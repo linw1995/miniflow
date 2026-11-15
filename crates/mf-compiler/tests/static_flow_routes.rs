@@ -649,7 +649,18 @@ fn assign_replaces_enables_without_leaking_between_invocations() {
         compiled, authored,
         "state assignment must not add graph nodes"
     );
-    let target = &plan.graph.relations.writes[&"write".into()];
+    let Some(mf_runtime::NodeOperation::Assign { target }) = plan
+        .graph
+        .definition
+        .nodes
+        .iter()
+        .find(|node| node.id.as_str() == "write")
+        .unwrap()
+        .operation
+        .as_ref()
+    else {
+        panic!("expected a compiled assignment")
+    };
     let schema = mf_compiler::assignment_schema(&plan.graph, target).unwrap();
     assert!(
         mf_compiler::prepared_assign(&registry, "write", target, &schema)

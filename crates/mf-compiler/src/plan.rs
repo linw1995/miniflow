@@ -197,14 +197,20 @@ impl CompiledWorkflow {
                 })
             })
             .collect();
+        let definitions: BTreeMap<_, _> = self
+            .graph
+            .definition
+            .nodes
+            .iter()
+            .map(|node| (&node.id, node))
+            .collect();
         nodes
             .iter()
             .enumerate()
             .filter(|(_, node)| {
-                self.graph
-                    .relations
-                    .instruction(&node.definition_id)
-                    .is_none()
+                definitions
+                    .get(&node.definition_id)
+                    .is_some_and(|node| node.operation.is_none())
             })
             .map(|(index, node)| {
                 let id = node.definition_id.to_string();
@@ -824,7 +830,7 @@ fn generate_scope(
                 }
             }
         });
-        if graph.relations.instruction(id).is_none()
+        if node.operation.is_none()
             && let ScopeBuild::Typed(constructors) = &build
             && let Some((constructor, expected)) = constructors.get(id)
         {
@@ -845,8 +851,8 @@ fn generate_scope(
             node_idents.push(node_ident);
             continue;
         }
-        let constructor = match graph.relations.instruction(id) {
-            Some(mf_runtime::ScopeInstruction::RootInput) => {
+        let constructor = match node.operation.as_ref() {
+            Some(mf_runtime::NodeOperation::RootInput) => {
                 let root = graph
                     .relations
                     .root
@@ -861,7 +867,7 @@ fn generate_scope(
                     mf_runtime::prepared_root_source(#id_lit, &types)
                 }}
             }
-            Some(mf_runtime::ScopeInstruction::Write(target)) => {
+            Some(mf_runtime::NodeOperation::Assign { target }) => {
                 let schema = crate::assignment_schema(graph, target)?;
                 let target_lit = LitStr::new(
                     &serde_json::to_string(target).context(SerializeSnafu)?,
@@ -876,10 +882,10 @@ fn generate_scope(
                         .inspect_err(|error| { #preparation_report })?
                 }
             }
-            Some(mf_runtime::ScopeInstruction::Exit) => {
+            Some(mf_runtime::NodeOperation::Exit) => {
                 quote! { mf_runtime::prepared_loop_exit(#id_lit) }
             }
-            Some(mf_runtime::ScopeInstruction::Input) => {
+            Some(mf_runtime::NodeOperation::Input) => {
                 let frame =
                     graph
                         .relations
@@ -2181,7 +2187,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_scope_constructors_follow_relations_not_kinds_or_config() {
+    fn generated_scope_constructors_follow_node_operations() {
         let graph = mf_runtime::CompiledGraph {
             definition: WorkflowDefinition {
                 version: mf_runtime::WorkflowDefinitionVersion::V2026_09_26,
@@ -2203,8 +2209,26 @@ mod tests {
                     kind: kind.into(),
                     config: if id == "choose" {
                         serde_json::json!({"opaque": "provider-owned"})
-                    } else {
+                    } else if id == "ordinary" {
                         serde_json::Value::Null
+                    } else {
+                        serde_json::json!({})
+                    },
+                    operation: match id {
+                        "custom-input" => Some(mf_runtime::NodeOperation::Input),
+                        "custom-exit" => Some(mf_runtime::NodeOperation::Exit),
+                        "custom-write" => Some(mf_runtime::NodeOperation::Assign {
+                            target: mf_runtime::StateTarget::Frame {
+                                field: "item".into(),
+                            },
+                        }),
+                        "node-write" => Some(mf_runtime::NodeOperation::Assign {
+                            target: mf_runtime::StateTarget::Node {
+                                node: "choose".into(),
+                                field: "selection".into(),
+                            },
+                        }),
+                        _ => None,
                     },
                 })
                 .collect(),
@@ -2230,23 +2254,7 @@ mod tests {
                     input: "custom-input".into(),
                     values: BTreeMap::from([("item".into(), mf_runtime::ValueType::String)]),
                     state_outputs: BTreeMap::from([("item".into(), "result".into())]),
-                    exits: BTreeSet::from(["custom-exit".into()]),
                 }),
-                writes: BTreeMap::from([
-                    (
-                        "custom-write".into(),
-                        mf_runtime::StateTarget::Frame {
-                            field: "item".into(),
-                        },
-                    ),
-                    (
-                        "node-write".into(),
-                        mf_runtime::StateTarget::Node {
-                            node: "choose".into(),
-                            field: "selection".into(),
-                        },
-                    ),
-                ]),
                 ..Default::default()
             },
             children: BTreeMap::new(),

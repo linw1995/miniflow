@@ -32,6 +32,12 @@ impl NodePortContract for AssignmentNode {
 }
 
 impl TaskNode for AssignmentNode {
+    fn operation(&self) -> Option<crate::NodeOperation> {
+        Some(crate::NodeOperation::Assign {
+            target: self.target.clone(),
+        })
+    }
+
     fn supports_success_dependencies(&self) -> bool {
         matches!(self.target, StateTarget::Node { .. })
     }

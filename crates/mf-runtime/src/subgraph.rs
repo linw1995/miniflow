@@ -368,6 +368,18 @@ impl PreparedSubgraph {
         }
     }
 
+    /// Inspects actual finite executors without maintaining a second operation index.
+    /// Opaque callbacks and Event factories do not advertise an instruction stream.
+    pub fn operations(&self) -> impl Iterator<Item = crate::NodeOperation> + '_ {
+        let flow = match &self.body {
+            PreparedSubgraphBody::Flow(flow) => Some(flow),
+            _ => None,
+        };
+        flow.into_iter()
+            .flat_map(|flow| flow.nodes())
+            .filter_map(|node| node.node.operation())
+    }
+
     /// Recovers an actual compiled Flow for injection into a typed node configuration.
     /// Host callbacks and Event factories have no equivalent finite Flow representation.
     pub fn into_flow(self) -> Result<Flow, crate::NodeBuildError> {
@@ -719,8 +731,6 @@ mod tests {
                 input: "custom-input".into(),
                 values: Default::default(),
                 state_outputs: Default::default(),
-
-                exits: Default::default(),
             }),
             ..Default::default()
         };

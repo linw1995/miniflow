@@ -1104,8 +1104,20 @@ fn compiled_scope_relationships_execute_independently_of_instruction_labels() {
         .unwrap();
     let relations = body.relations.clone();
     let frame = relations.scope.as_ref().unwrap();
-    assert!(!relations.writes.is_empty());
-    assert!(!frame.exits.is_empty());
+    assert!(body.definition.nodes.iter().any(|node| matches!(
+        node.operation.as_ref(),
+        Some(mf_runtime::NodeOperation::Assign { .. })
+    )));
+    assert!(body.definition.nodes.iter().any(|node| matches!(
+        node.operation.as_ref(),
+        Some(mf_runtime::NodeOperation::Exit)
+    )));
+    let operations: Vec<_> = body
+        .definition
+        .nodes
+        .iter()
+        .map(|node| node.operation.clone())
+        .collect();
     let original_input = frame.input.clone();
     let renamed_input = mf_runtime::DefinitionId::from("%actual-input");
     let rename = |id: &mut mf_runtime::DefinitionId| {
@@ -1114,9 +1126,9 @@ fn compiled_scope_relationships_execute_independently_of_instruction_labels() {
         }
     };
     for node in &mut body.definition.nodes {
-        if relations.instruction(&node.id).is_some() {
+        if node.operation.is_some() {
             node.kind = "unlinked.scope_instruction".into();
-            node.config = json!({"opaque": "not an instruction configuration"});
+            assert_eq!(node.config, json!({}));
         }
         rename(&mut node.id);
     }
@@ -1139,8 +1151,14 @@ fn compiled_scope_relationships_execute_independently_of_instruction_labels() {
         rename(id);
     }
     body.relations.scope.as_mut().unwrap().input = renamed_input;
-    assert_eq!(body.relations.writes, relations.writes);
-    assert_eq!(body.relations.scope.as_ref().unwrap().exits, frame.exits);
+    assert_eq!(
+        body.definition
+            .nodes
+            .iter()
+            .map(|node| node.operation.clone())
+            .collect::<Vec<_>>(),
+        operations
+    );
     let saved = mf_compiler::CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
     assert_eq!(
         instantiate_compiled(&saved, &registry)
@@ -1908,21 +1926,23 @@ fn observed_preparation_attributes_damaged_loop_graphs_to_the_root_owner() {
                 child.config = json!(17);
             }
             "write relationship" => {
-                damaged
+                let node = damaged
                     .graph
                     .children
                     .get_mut(&"repeat".into())
                     .unwrap()
                     .get_mut("body")
                     .unwrap()
-                    .relations
-                    .writes
-                    .insert(
-                        "assign".into(),
-                        mf_runtime::StateTarget::Frame {
-                            field: "unknown".into(),
-                        },
-                    );
+                    .definition
+                    .nodes
+                    .iter_mut()
+                    .find(|node| node.id.as_str() == "assign")
+                    .unwrap();
+                node.operation = Some(mf_runtime::NodeOperation::Assign {
+                    target: mf_runtime::StateTarget::Frame {
+                        field: "unknown".into(),
+                    },
+                });
             }
             _ => unreachable!(),
         }
@@ -1943,22 +1963,15 @@ fn observed_preparation_attributes_damaged_loop_graphs_to_the_root_owner() {
             ) => {
                 assert_eq!(definition_id.as_str(), "repeat");
                 let expected = if case == "input relationship" {
-                    "scope instruction relationships must be disjoint and reference known nodes"
+                    "frame-input operation must match its declared source"
                 } else {
                     "scope write target must name an available state output and value"
                 };
-                if case == "write relationship" {
-                    assert!(
-                        matches!(source.as_ref(), WorkflowCompileError::StateAssignments { path, source }
-                        if path == "[\"repeat\"]" && source.to_string().contains(expected))
-                    );
-                    assert!(find_source::<mf_runtime::GraphDescriptionError>(&error).is_some());
-                } else {
-                    assert!(
-                        matches!(source.as_ref(), WorkflowCompileError::InvalidScope { path, message }
-                        if path == "[\"repeat\"]" && message == expected)
-                    );
-                }
+                assert!(
+                    matches!(source.as_ref(), WorkflowCompileError::NodeOperations { path, source }
+                    if path == "[\"repeat\"]" && source.to_string().contains(expected))
+                );
+                assert!(find_source::<mf_runtime::GraphDescriptionError>(&error).is_some());
             }
             (
                 WorkflowCompileError::ChildGraph {
@@ -2079,11 +2092,11 @@ fn descriptions_reject_damaged_loop_relationships_with_typed_owners() {
             && message == "scope constructs require definition version 2026-09-29")
     );
 
-    // Persisted instructions are relationships, not authoring kind/config tokens.
+    // Persisted instructions belong to nodes, independently of display kind/config tokens.
     for (case, expected) in [
         (
             "overlapping roles",
-            "assignment instructions must be known nodes without children or overlapping roles",
+            "frame-input operation must match its declared source",
         ),
         (
             "unknown write target",
@@ -2091,29 +2104,32 @@ fn descriptions_reject_damaged_loop_relationships_with_typed_owners() {
         ),
         (
             "missing input",
-            "scope instruction relationships must be disjoint and reference known nodes",
+            "frame-input operation must match its declared source",
         ),
     ] {
         let mut damaged = valid.clone();
-        let relations = &mut damaged
+        let body = damaged
             .graph
             .children
             .get_mut(&"repeat".into())
             .unwrap()
             .get_mut("body")
-            .unwrap()
-            .relations;
+            .unwrap();
         match case {
-            "overlapping roles" => relations.scope.as_mut().unwrap().input = "assign".into(),
+            "overlapping roles" => body.relations.scope.as_mut().unwrap().input = "assign".into(),
             "unknown write target" => {
-                relations.writes.insert(
-                    "assign".into(),
-                    mf_runtime::StateTarget::Frame {
+                body.definition
+                    .nodes
+                    .iter_mut()
+                    .find(|node| node.id.as_str() == "assign")
+                    .unwrap()
+                    .operation = Some(mf_runtime::NodeOperation::Assign {
+                    target: mf_runtime::StateTarget::Frame {
                         field: "unknown".into(),
                     },
-                );
+                });
             }
-            "missing input" => relations.scope.as_mut().unwrap().input = "missing".into(),
+            "missing input" => body.relations.scope.as_mut().unwrap().input = "missing".into(),
             _ => unreachable!(),
         }
         let error = mf_compiler::describe_compiled(&damaged).unwrap_err();
@@ -2135,21 +2151,12 @@ fn descriptions_reject_damaged_loop_relationships_with_typed_owners() {
                 .unwrap()
                 .is::<Box<mf_compiler::WorkflowCompileError>>()
         );
-        if case == "missing input" {
-            assert!(
-                matches!(child.as_ref(), mf_compiler::WorkflowCompileError::InvalidScope { path, message }
-                if path == "[\"repeat\"]" && message == expected),
-                "{case}: {error}"
-            );
-            assert!(child.source().is_none());
-        } else {
-            assert!(
-                matches!(child.as_ref(), mf_compiler::WorkflowCompileError::StateAssignments { path, source }
-                if path == "[\"repeat\"]" && source.to_string().contains(expected)),
-                "{case}: {error}"
-            );
-            assert!(find_source::<mf_runtime::GraphDescriptionError>(&error).is_some());
-        }
+        assert!(
+            matches!(child.as_ref(), mf_compiler::WorkflowCompileError::NodeOperations { path, source }
+            if path == "[\"repeat\"]" && source.to_string().contains(expected)),
+            "{case}: {error}"
+        );
+        assert!(find_source::<mf_runtime::GraphDescriptionError>(&error).is_some());
         assert!(find_source::<serde_json::Error>(&error).is_none());
         assert!(error.to_string().contains(expected), "{case}: {error}");
         assert!(

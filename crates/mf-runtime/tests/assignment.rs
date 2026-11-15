@@ -134,6 +134,34 @@ fn all_targets_share_publication_rollback_and_preserve_sensitive_values() {
 }
 
 #[test]
+fn prepared_operations_are_reported_by_the_actual_executors() {
+    let types = BTreeMap::from([("count".into(), ValueType::Int64)]);
+    let assign = StateTarget::Frame {
+        field: "count".into(),
+    };
+    for (node, expected) in [
+        (
+            mf_runtime::prepared_root_source("root", &types),
+            mf_runtime::NodeOperation::RootInput,
+        ),
+        (
+            mf_runtime::prepared_scope_source("frame", &types),
+            mf_runtime::NodeOperation::Input,
+        ),
+        (
+            prepared_assign("write", assign.clone(), ValueType::Int64, None).unwrap(),
+            mf_runtime::NodeOperation::Assign { target: assign },
+        ),
+        (
+            mf_runtime::prepared_loop_exit("leave"),
+            mf_runtime::NodeOperation::Exit,
+        ),
+    ] {
+        assert_eq!(node.into_task().unwrap().node.operation(), Some(expected));
+    }
+}
+
+#[test]
 fn assignment_construction_checks_provider_ownership_and_initial_types() {
     let node = StateTarget::Node {
         node: "owner".into(),

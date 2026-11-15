@@ -393,10 +393,11 @@ and their input types, and `validate_write` enforces provider-specific constrain
 exist in the initial values with matching types. Return typed provider errors through
 `NodeExecutionError::PluginFailed` so their source chains remain available.
 
-`workflow.assign` can target `%<node>.<field>` for any provider that declares state. Lowering records
-all assignments in `GraphRelations::writes`, using `StateTarget::Root`, `Frame`, or `Node` to identify the
-owner and field. Saved plans retain these authoritative targets; Root and frame declarations do not
-maintain additional assignment tables. Preparation uses one constructor for every target, obtaining
+`workflow.assign` can target `%<node>.<field>` for any provider that declares state. Lowering stores
+`NodeOperation::Assign` on that node, using `StateTarget::Root`, `Frame`, or `Node` to identify the owner
+and field. The authored `config.variable` is consumed, leaving a single authoritative target in saved
+plans. `operation` is compiled metadata and cannot be supplied in authored nodes. `GraphRelations`
+contains state declarations and scope links, with no assignment or exit index. Preparation uses one constructor for every target, obtaining
 variable types from their scope or writable fields from the provider. Node initialization and business
 validation use the provider's current configuration. The runtime uses one assignment executor and one
 pending-write slot, committing the selected owner's value only after successful publication. Calls and
@@ -1240,15 +1241,19 @@ This also applies to Loop, Iteration, and Call; their ordinary business validati
 
 Compiler-prepared children carry `PreparedSubgraph::relations` with the actual graph's scope contract.
 A callable child and a frame-backed child are distinct; a scoped receiver validates the supplied frame
-values and state-port links before executing it. Frame inputs and write/exit targets come from these
-relationships, not from instruction kind labels. The actual source endpoint is also used for state
-refresh after assignments. Directly supplied manual callbacks have no compiled relationship record and
-retain their existing caller-defined preparation semantics. These are concrete execution relationships,
+values and state-port links before executing it. Frame declarations come from these
+relationships; input, assignment, and exit instructions come from each node's typed `operation`,
+independently of display kind labels. The actual source endpoint is also used for state
+refresh after assignments. `PreparedSubgraph::operations` inspects the actual finite Flow executors,
+allowing receivers to check frame write/output conflicts and immutable-frame controls without a second
+instruction index. Opaque callbacks and Event factories advertise no instruction stream and retain
+their caller-defined preparation semantics. These are concrete execution relationships,
 not persisted receiving-type schemas or a new factory callback interface.
 
 Callable Flows may separately carry `GraphRelations::root` with their own typed initial values.
-Their assignment targets use the same `GraphRelations::writes` table as frame and node writes. Root state does not turn a callable into a frame-backed child: calls still
-isolate startup inputs, outputs, and state using the existing invocation boundary. Preparation binds
+Their assignment nodes own `NodeOperation::Assign` targets using `StateTarget::Root`, just as frame and
+node assignments own their respective targets. Root state does not turn a callable into a frame-backed
+child: calls still isolate startup inputs, outputs, and state using the existing invocation boundary. Preparation binds
 the root relationships to the executable Flow, and every execution initializes fresh values without
 adding an observation scope. Such Flows use serial domains and dynamic publication, preserving native
 payloads and sensitivity across updates. Root source and assignment instructions require their

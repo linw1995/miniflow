@@ -17,6 +17,26 @@ fn graph(definition: Value, order: &[&str]) -> CompiledGraph {
     }
 }
 
+fn operation(graph: &mut CompiledGraph, id: &str, operation: mf_runtime::NodeOperation) {
+    let node = graph
+        .definition
+        .nodes
+        .iter_mut()
+        .find(|node| node.id.as_str() == id)
+        .unwrap();
+    node.operation = Some(operation);
+    node.config = json!({});
+}
+
+fn set_scope(graph: &mut CompiledGraph, scope: ScopeRelations) {
+    operation(
+        graph,
+        scope.input.as_str(),
+        mf_runtime::NodeOperation::Input,
+    );
+    graph.relations.scope = Some(scope);
+}
+
 fn child<'a>(graph: &'a mut CompiledGraph, owner: &str, binding: &str) -> &'a mut CompiledGraph {
     graph
         .children
@@ -428,12 +448,14 @@ fn loop_manifest() -> WorkflowManifest {
         &["%loop", "inner"],
     );
     body.relations.key = Some("repeat".into());
-    body.relations.scope = Some(ScopeRelations {
-        input: "%loop".into(),
-        values: [("counter".into(), ValueType::Int64)].into(),
-        state_outputs: [("counter".into(), "counter".into())].into(),
-        exits: Default::default(),
-    });
+    set_scope(
+        &mut body,
+        ScopeRelations {
+            input: "%loop".into(),
+            values: [("counter".into(), ValueType::Int64)].into(),
+            state_outputs: [("counter".into(), "counter".into())].into(),
+        },
+    );
     let mut inner = graph(
         json!({
             "version": "2026-09-29", "dependencies": {},
@@ -442,12 +464,14 @@ fn loop_manifest() -> WorkflowManifest {
         &["%loop"],
     );
     inner.relations.key = Some("inner".into());
-    inner.relations.scope = Some(ScopeRelations {
-        input: "%loop".into(),
-        values: [("counter".into(), ValueType::Int64)].into(),
-        state_outputs: [("counter".into(), "counter".into())].into(),
-        exits: Default::default(),
-    });
+    set_scope(
+        &mut inner,
+        ScopeRelations {
+            input: "%loop".into(),
+            values: [("counter".into(), ValueType::Int64)].into(),
+            state_outputs: [("counter".into(), "counter".into())].into(),
+        },
+    );
     bind(&mut body, "inner", "body", inner);
     bind(&mut root, "repeat", "body", body);
     WorkflowManifest {
@@ -797,12 +821,14 @@ fn historical_iteration_manifest() -> WorkflowManifest {
         &["%iteration", "dispatch"],
     );
     body.relations.key = Some("map".into());
-    body.relations.scope = Some(ScopeRelations {
-        input: "%iteration".into(),
-        values: [("item".into(), ValueType::String)].into(),
-        state_outputs: Default::default(),
-        exits: Default::default(),
-    });
+    set_scope(
+        &mut body,
+        ScopeRelations {
+            input: "%iteration".into(),
+            values: [("item".into(), ValueType::String)].into(),
+            state_outputs: Default::default(),
+        },
+    );
     bind(
         &mut body,
         "dispatch",
@@ -961,9 +987,9 @@ fn historical_projection_follows_explicit_stateless_frames_not_provider_names() 
     );
 
     let mut callable = manifest.clone();
-    child(&mut callable.graph, "map", "selected")
-        .relations
-        .scope = None;
+    let callable_body = child(&mut callable.graph, "map", "selected");
+    callable_body.relations.scope = None;
+    callable_body.definition.nodes[0].operation = None;
     assert_eq!(
         round_trip(&callable)
             .description()
@@ -990,9 +1016,9 @@ fn historical_projection_follows_explicit_stateless_frames_not_provider_names() 
     );
 
     let mut builtin_without_frame = historical_iteration_manifest();
-    child(&mut builtin_without_frame.graph, "map", "body")
-        .relations
-        .scope = None;
+    let body = child(&mut builtin_without_frame.graph, "map", "body");
+    body.relations.scope = None;
+    body.definition.nodes[0].operation = None;
     assert_eq!(
         round_trip(&builtin_without_frame)
             .description()
@@ -1008,18 +1034,18 @@ fn omitted_frames_still_validate_all_relation_endpoints_and_instruction_collisio
     let mut manifest = historical_iteration_manifest();
     // Keep a real child for instruction/child collision checks, but make it a
     // stateless frame too: no callable target should promote this legacy fixture.
-    child(
-        child(&mut manifest.graph, "map", "body"),
-        "dispatch",
-        "selected",
-    )
-    .relations
-    .scope = Some(ScopeRelations {
-        input: "value".into(),
-        values: [("item".into(), ValueType::String)].into(),
-        state_outputs: Default::default(),
-        exits: Default::default(),
-    });
+    set_scope(
+        child(
+            child(&mut manifest.graph, "map", "body"),
+            "dispatch",
+            "selected",
+        ),
+        ScopeRelations {
+            input: "value".into(),
+            values: [("item".into(), ValueType::String)].into(),
+            state_outputs: Default::default(),
+        },
+    );
     let body = child(&mut manifest.graph, "map", "body");
     body.definition.nodes.push(
         serde_json::from_value(json!({"id": "instruction", "kind": "foreign.instruction"}))
@@ -1035,8 +1061,6 @@ fn omitted_frames_still_validate_all_relation_endpoints_and_instruction_collisio
     );
     for case in [
         "unknown_input",
-        "unknown_write",
-        "unknown_exit",
         "input_write_collision",
         "input_exit_collision",
         "unknown_write_variable",
@@ -1048,7 +1072,7 @@ fn omitted_frames_still_validate_all_relation_endpoints_and_instruction_collisio
         "index_override",
         "immutable_write",
         "immutable_exit",
-        "write_exit_collision",
+        "provider_target_is_instruction",
         "source_owning_children",
         "write_owning_children",
         "exit_owning_children",
@@ -1061,36 +1085,27 @@ fn omitted_frames_still_validate_all_relation_endpoints_and_instruction_collisio
         let scope = body.relations.scope.as_mut().unwrap();
         match case {
             "unknown_input" => scope.input = "missing".into(),
-            "unknown_write" => {
-                body.relations.writes.insert(
-                    "missing".into(),
-                    mf_runtime::StateTarget::Frame {
+            "input_write_collision" => operation(
+                body,
+                "%iteration",
+                mf_runtime::NodeOperation::Assign {
+                    target: mf_runtime::StateTarget::Frame {
                         field: "item".into(),
                     },
-                );
-            }
-            "unknown_exit" => {
-                scope.exits.insert("missing".into());
-            }
-            "input_write_collision" => {
-                body.relations.writes.insert(
-                    "%iteration".into(),
-                    mf_runtime::StateTarget::Frame {
-                        field: "item".into(),
-                    },
-                );
-            }
+                },
+            ),
             "input_exit_collision" => {
-                scope.exits.insert("%iteration".into());
+                operation(body, "%iteration", mf_runtime::NodeOperation::Exit)
             }
-            "unknown_write_variable" => {
-                body.relations.writes.insert(
-                    "dispatch".into(),
-                    mf_runtime::StateTarget::Frame {
+            "unknown_write_variable" => operation(
+                body,
+                "instruction",
+                mf_runtime::NodeOperation::Assign {
+                    target: mf_runtime::StateTarget::Frame {
                         field: "missing".into(),
                     },
-                );
-            }
+                },
+            ),
             "unknown_state_variable" => {
                 scope
                     .state_outputs
@@ -1113,40 +1128,51 @@ fn omitted_frames_still_validate_all_relation_endpoints_and_instruction_collisio
             "index_override" => {
                 scope.values.insert("index".into(), ValueType::Int64);
             }
-            "immutable_write" => {
-                body.relations.writes.insert(
-                    "instruction".into(),
-                    mf_runtime::StateTarget::Frame {
+            "immutable_write" => operation(
+                body,
+                "instruction",
+                mf_runtime::NodeOperation::Assign {
+                    target: mf_runtime::StateTarget::Frame {
                         field: "item".into(),
                     },
-                );
-            }
-            "immutable_exit" => {
-                scope.exits.insert("instruction".into());
-            }
-            "write_exit_collision" => {
-                scope.state_outputs.insert("item".into(), "item".into());
-                body.relations.writes.insert(
-                    "instruction".into(),
-                    mf_runtime::StateTarget::Frame {
+                },
+            ),
+            "immutable_exit" => operation(body, "instruction", mf_runtime::NodeOperation::Exit),
+            "provider_target_is_instruction" => operation(
+                body,
+                "instruction",
+                mf_runtime::NodeOperation::Assign {
+                    target: mf_runtime::StateTarget::Node {
+                        node: "%iteration".into(),
                         field: "item".into(),
                     },
-                );
-                scope.exits.insert("instruction".into());
+                },
+            ),
+            "source_owning_children" => {
+                scope.input = "dispatch".into();
+                body.definition
+                    .nodes
+                    .iter_mut()
+                    .find(|node| node.id.as_str() == "%iteration")
+                    .unwrap()
+                    .operation = None;
+                operation(body, "dispatch", mf_runtime::NodeOperation::Input);
             }
-            "source_owning_children" => scope.input = "dispatch".into(),
             "write_owning_children" => {
                 scope.state_outputs.insert("item".into(), "item".into());
-                body.relations.writes.insert(
-                    "dispatch".into(),
-                    mf_runtime::StateTarget::Frame {
-                        field: "item".into(),
+                operation(
+                    body,
+                    "dispatch",
+                    mf_runtime::NodeOperation::Assign {
+                        target: mf_runtime::StateTarget::Frame {
+                            field: "item".into(),
+                        },
                     },
                 );
             }
             "exit_owning_children" => {
                 scope.state_outputs.insert("item".into(), "item".into());
-                scope.exits.insert("dispatch".into());
+                operation(body, "dispatch", mf_runtime::NodeOperation::Exit);
             }
             _ => {
                 let (name, node, port) = match case {
@@ -1201,19 +1227,24 @@ fn explicit_relations_round_trip_without_kind_or_configuration_inference() {
         );
         body.execution_order.push(id.into());
     }
-    body.relations.scope = Some(ScopeRelations {
-        input: "source".into(),
-        values: [("item".into(), ValueType::String)].into(),
-        state_outputs: [("item".into(), "item".into())].into(),
-
-        exits: ["leave".into()].into(),
-    });
-    body.relations.writes.insert(
-        "store".into(),
-        mf_runtime::StateTarget::Frame {
-            field: "item".into(),
+    set_scope(
+        body,
+        ScopeRelations {
+            input: "source".into(),
+            values: [("item".into(), ValueType::String)].into(),
+            state_outputs: [("item".into(), "item".into())].into(),
         },
     );
+    operation(
+        body,
+        "store",
+        mf_runtime::NodeOperation::Assign {
+            target: mf_runtime::StateTarget::Frame {
+                field: "item".into(),
+            },
+        },
+    );
+    operation(body, "leave", mf_runtime::NodeOperation::Exit);
     body.relations.streams.insert(
         "events".into(),
         serde_json::from_value(json!({"node": "value", "port": "item"})).unwrap(),
@@ -1232,12 +1263,15 @@ fn explicit_relations_round_trip_without_kind_or_configuration_inference() {
         .unwrap();
     let original_id = decoded.workflow_id().unwrap();
     let mut changed = decoded;
-    child(&mut changed.graph, "dispatch", "selected")
-        .relations
-        .scope
-        .as_mut()
+    let body = child(&mut changed.graph, "dispatch", "selected");
+    body.definition
+        .nodes
+        .iter_mut()
+        .find(|node| node.id.as_str() == "source")
         .unwrap()
-        .input = "other-source".into();
+        .operation = None;
+    operation(body, "other-source", mf_runtime::NodeOperation::Input);
+    body.relations.scope.as_mut().unwrap().input = "other-source".into();
     let key = mf_telemetry::event::ScopePathEntry::binding_key("dispatch", "selected");
     assert_eq!(
         changed

@@ -278,11 +278,8 @@ fn factory(
             }
         );
         ensure!(
-            body.relations
-                .as_ref()
-                .is_none_or(|relations| relations.writes.values().all(|target| {
-                    !matches!(target, mf_runtime::StateTarget::Frame { field } if field == variable)
-                })),
+            !body.operations().any(|operation| matches!(operation,
+                mf_runtime::NodeOperation::Assign { target: mf_runtime::StateTarget::Frame { field } } if field == variable)),
             ConflictingBodyOutputSnafu { variable }
         );
     }
@@ -336,8 +333,6 @@ mod tests {
                 input: input.into(),
                 values: BTreeMap::from([("x".into(), ValueType::Int64)]),
                 state_outputs: BTreeMap::from([("x".into(), "x".into())]),
-
-                exits: Default::default(),
             }),
             ..Default::default()
         }

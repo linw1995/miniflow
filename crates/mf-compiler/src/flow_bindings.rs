@@ -100,7 +100,11 @@ fn propagate(
     state: &mut State,
 ) -> Result<bool, WorkflowCompileError> {
     let mut changed = false;
-    for (writer, target) in &scope.relations.writes {
+    for node in &scope.definition.nodes {
+        let Some(mf_runtime::NodeOperation::Assign { target }) = &node.operation else {
+            continue;
+        };
+        let writer = &node.id;
         let source = match target {
             mf_runtime::StateTarget::Root { .. } => {
                 scope.relations.root.as_ref().map(|root| &root.input)

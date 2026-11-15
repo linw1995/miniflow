@@ -3,7 +3,7 @@ use crate::{
     NodeRegistry, ValueType,
 };
 use crate::{DefinitionId, WorkflowDefinition};
-use mf_runtime::{GraphRelations, PreparedSubgraph, ScopeInstruction};
+use mf_runtime::{GraphRelations, NodeOperation, PreparedSubgraph};
 use mf_runtime::{OutputDerivation, TypeCompatibility, TypeMismatch};
 use mf_telemetry::{description::WorkflowDescription, event::NodeIdentity};
 use snafu::{IntoError, OptionExt, ResultExt, Snafu, ensure};
@@ -34,8 +34,8 @@ impl fmt::Display for CyclePath {
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowCompileError {
-    #[snafu(display("invalid state assignments at {path}: {source}"))]
-    StateAssignments {
+    #[snafu(display("invalid node operations at {path}: {source}"))]
+    NodeOperations {
         path: String,
         source: mf_runtime::GraphDescriptionError,
     },
@@ -1264,9 +1264,8 @@ pub fn compile_definition(
     let mut context =
         crate::lowering::ScopeContext::default().with_subgraphs(registry.subgraph_scopes());
     context.lower_scope(&mut root)?;
-    let relations = context.relations;
     for node in &root.nodes {
-        if relations.instruction(&node.id).is_none() {
+        if node.operation.is_none() {
             registration_for(node, registry)?;
         }
     }
@@ -1382,7 +1381,7 @@ fn resolve_inline_scopes(
     context.lower_scope(&mut definition)?;
     let mut children = BTreeMap::new();
     for node in &definition.nodes {
-        if context.relations.instruction(&node.id).is_some() {
+        if node.operation.is_some() {
             continue;
         }
         let Some(registration) = registry.get(&node.kind) else {
@@ -1735,7 +1734,7 @@ fn validate_relations(
         .build()
     };
     let ids: BTreeSet<_> = graph.definition.nodes.iter().map(|node| &node.id).collect();
-    mf_runtime::validate_state_writes(graph).context(StateAssignmentsSnafu {
+    mf_runtime::validate_node_operations(graph).context(NodeOperationsSnafu {
         path: crate::loops::path_label(path),
     })?;
     ensure!(
@@ -1772,16 +1771,6 @@ fn validate_relations(
         root.validate_values().context(WorkflowVariablesSnafu {
             path: crate::loops::path_label(path),
         })?;
-        let mut instructions = BTreeSet::new();
-        for id in std::iter::once(&root.input) {
-            ensure!(
-                ids.contains(id) && instructions.insert(id) && !graph.children.contains_key(id),
-                InvalidScopeSnafu {
-                    path: crate::loops::path_label(path),
-                    message: "root state instructions must be disjoint known nodes without children",
-                }
-            );
-        }
         ensure!(
             !dependency_pairs(&graph.definition)
                 .iter()
@@ -1814,17 +1803,6 @@ fn validate_relations(
             message: "scope inputs cannot belong to a cluster"
         }
     );
-    let mut instructions = BTreeSet::new();
-    for id in std::iter::once(&frame.input).chain(&frame.exits) {
-        if !ids.contains(id) || !instructions.insert(id) {
-            return Err(invalid(
-                "scope instruction relationships must be disjoint and reference known nodes",
-            ));
-        }
-        if graph.children.contains_key(id) {
-            return Err(invalid("scope instructions cannot own child graphs"));
-        }
-    }
     let mut outputs = BTreeSet::new();
     for (variable, output) in &frame.state_outputs {
         if !frame.values.contains_key(variable) || output != variable || !outputs.insert(output) {
@@ -1832,9 +1810,6 @@ fn validate_relations(
                 "state outputs must preserve current-frame variable names and reference known values",
             ));
         }
-    }
-    if !frame.is_stateful() && !frame.exits.is_empty() {
-        return Err(invalid("scope exits require a stateful frame"));
     }
     for (name, value_type) in &frame.values {
         if name.trim().is_empty() || name == "index" {
@@ -2520,22 +2495,22 @@ fn resolve_nodes_in_scope(
         .nodes
         .iter()
         .map(|node| {
-            match graph.relations.instruction(&node.id) {
-                Some(ScopeInstruction::RootInput) => {
+            match node.operation.as_ref() {
+                Some(NodeOperation::RootInput) => {
                     let root = graph.relations.root.as_ref().expect("validated root source");
                     return Ok(mf_runtime::prepared_root_source(root.input.as_str(), &root.values));
                 }
-                Some(ScopeInstruction::Input) => {
+                Some(NodeOperation::Input) => {
                     let frame = graph.relations.scope.as_ref().expect("validated scope input");
                     return Ok(mf_runtime::prepared_scope_source(frame.input.as_str(), &frame.values));
                 }
-                Some(ScopeInstruction::Write(target)) => {
+                Some(NodeOperation::Assign { target }) => {
                     let schema = crate::assignment_schema(graph, target)?;
                     return Ok(crate::prepared_assign(
                         preparation.registry, node.id.as_str(), target, &schema,
                     )?);
                 }
-                Some(ScopeInstruction::Exit) => {
+                Some(NodeOperation::Exit) => {
                     return Ok(mf_runtime::prepared_loop_exit(node.id.as_str()));
                 }
                 None => {}

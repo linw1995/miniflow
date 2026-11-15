@@ -664,9 +664,10 @@ fn saved_container_frames_require_known_instruction_endpoints_and_distinct_bindi
             error,
             WorkflowCompileError::ChildGraph { definition_id, source }
                 if definition_id.as_str() == "container"
-                    && matches!(source.as_ref(), WorkflowCompileError::InvalidScope { path, message }
+                    && matches!(source.as_ref(), WorkflowCompileError::NodeOperations { path, source }
                         if path == "[\"container\"]"
-                            && message == "scope instruction relationships must be disjoint and reference known nodes")
+                            && matches!(source, mf_runtime::GraphDescriptionError::Invalid { message }
+                                if message == "declared frame source must carry a frame-input operation"))
         ));
     }
 }

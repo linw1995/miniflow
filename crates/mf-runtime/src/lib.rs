@@ -44,8 +44,7 @@ pub use assignment::{NodeStateContract, prepared_assign};
 pub use cancellation::Cancelled;
 pub use cancellation::StreamCancellation;
 pub use compiled_graph::{
-    CompiledGraph, GraphRelations, RootScopeRelations, ScopeInstruction, ScopeRelations,
-    StateTarget,
+    CompiledGraph, GraphRelations, RootScopeRelations, ScopeRelations, StateTarget,
 };
 pub use config_template::{ConfigTemplate, ConfigTemplateError};
 pub use context::{
@@ -59,8 +58,8 @@ pub use definition::{
     FlowSource, InputBindingDefinition, LOOP_KIND, LOOP_SOURCE_ID, LoopComparisonOperator,
     LoopConditionDefinition, LoopDefinition, LoopVariableDefinition, MAX_CALL_DEPTH,
     MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS, MAX_SCHEDULED_STEPS, NodeDefinition, NodeDependency,
-    NodeDependencyError, OrderEdgeDefinition, OutputReferenceDefinition, ROOT_SOURCE_ID,
-    WorkflowDefinition, WorkflowDefinitionVersion, WorkflowOutputDefinition,
+    NodeDependencyError, NodeOperation, OrderEdgeDefinition, OutputReferenceDefinition,
+    ROOT_SOURCE_ID, WorkflowDefinition, WorkflowDefinitionVersion, WorkflowOutputDefinition,
     WorkflowVariableDefinition, validate_exclusive_inputs,
 };
 pub use execution_domains::{ExecutionDomain, ExecutionDomains};
@@ -184,5 +183,5 @@ pub use workflow_manifest::{
     GraphDescriptionError, MANIFEST_FRAMING_VERSION, MANIFEST_HEADER_BYTES, MANIFEST_MAGIC,
     MAX_MANIFEST_PADDING_BYTES, MAX_MANIFEST_PAYLOAD_BYTES, MAX_MANIFEST_SECTION_BYTES,
     ObservationSnafu as GraphObservationSnafu, WorkflowManifest, WorkflowManifestError,
-    WorkflowManifestVersion, describe_graph, validate_state_writes,
+    WorkflowManifestVersion, describe_graph, validate_node_operations,
 };

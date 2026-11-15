@@ -1,5 +1,5 @@
 use mf_runtime::{
-    CompiledGraph, GraphRelations, ScopeInstruction, ScopePathEntry, ScopeRelations, StateTarget,
+    CompiledGraph, GraphRelations, NodeOperation, ScopePathEntry, ScopeRelations, StateTarget,
     ValueType,
 };
 use mf_telemetry::identity::WorkflowId;
@@ -36,57 +36,62 @@ fn scope() -> ScopeRelations {
     ScopeRelations {
         input: "origin".into(),
         values: [("counter".into(), ValueType::String)].into(),
-        state_outputs: [("counter".into(), "result".into())].into(),
-        exits: ["stop".into()].into(),
+        state_outputs: [("counter".into(), "counter".into())].into(),
+    }
+}
+
+fn bind_scope(graph: &mut CompiledGraph) {
+    graph.relations.scope = Some(scope());
+    for node in &mut graph.definition.nodes {
+        node.operation = match node.id.as_str() {
+            "origin" => Some(NodeOperation::Input),
+            "store" => Some(NodeOperation::Assign {
+                target: StateTarget::Frame {
+                    field: "counter".into(),
+                },
+            }),
+            "stop" => Some(NodeOperation::Exit),
+            _ => None,
+        };
     }
 }
 
 #[test]
-fn instruction_roles_follow_explicit_relations_not_source_names_or_kinds() {
+fn node_operations_are_owned_by_nodes_and_do_not_follow_kind_labels_or_scope_links() {
     let mut graph = graph();
-    graph.relations.scope = Some(scope());
-    graph.relations.writes.insert(
-        "store".into(),
-        StateTarget::Frame {
-            field: "counter".into(),
-        },
-    );
+    bind_scope(&mut graph);
     for kind in ["user.noop", "renamed.provider", "builtin.iteration_input"] {
         for node in &mut graph.definition.nodes {
             node.kind = kind.into();
         }
         assert_eq!(
-            graph.relations.instruction(&"origin".into()),
-            Some(ScopeInstruction::Input)
+            graph.definition.nodes[0].operation,
+            Some(NodeOperation::Input)
         );
         assert_eq!(
-            graph.relations.instruction(&"store".into()),
-            Some(ScopeInstruction::Write(&StateTarget::Frame {
-                field: "counter".into()
-            }))
+            graph.definition.nodes[1].operation,
+            Some(NodeOperation::Assign {
+                target: StateTarget::Frame {
+                    field: "counter".into()
+                }
+            })
         );
         assert_eq!(
-            graph.relations.instruction(&"stop".into()),
-            Some(ScopeInstruction::Exit)
+            graph.definition.nodes[2].operation,
+            Some(NodeOperation::Exit)
         );
-        assert_eq!(graph.relations.instruction(&"%loop".into()), None);
-        assert_eq!(graph.relations.instruction(&"%iteration".into()), None);
+        assert_eq!(graph.definition.nodes[3].operation, None);
+        mf_runtime::validate_node_operations(&graph).unwrap();
     }
-    let scope = graph.relations.scope.as_mut().unwrap();
-    scope.input = "another-source".into();
-    assert_eq!(graph.relations.instruction(&"origin".into()), None);
+    graph.relations.scope.as_mut().unwrap().input = "another-source".into();
     assert_eq!(
-        graph.relations.instruction(&"another-source".into()),
-        Some(ScopeInstruction::Input)
+        graph.definition.nodes[0].operation,
+        Some(NodeOperation::Input)
     );
+    assert!(mf_runtime::validate_node_operations(&graph).is_err());
     graph.relations.scope = None;
-    assert!(matches!(
-        graph.relations.instruction(&"store".into()),
-        Some(ScopeInstruction::Write(_))
-    ));
-    graph.relations.writes.clear();
-    assert_eq!(graph.relations.instruction(&"store".into()), None);
-    assert_eq!(graph.relations.instruction(&"stop".into()), None);
+    assert!(graph.definition.nodes[1].operation.is_some());
+    assert!(mf_runtime::validate_node_operations(&graph).is_err());
 }
 
 #[test]
@@ -102,13 +107,6 @@ fn callable_and_stateful_depend_only_on_scope_and_state_outputs() {
     scope.state_outputs.clear();
     assert!(!scope.is_stateful());
     assert!(!scope.values.is_empty());
-    relations.writes.insert(
-        "store".into(),
-        StateTarget::Frame {
-            field: "counter".into(),
-        },
-    );
-    assert!(!relations.is_callable());
 }
 
 #[test]
@@ -156,23 +154,26 @@ fn relations_are_required_and_empty_relationship_fields_are_optional() {
         serde_json::from_value::<GraphRelations>(json!({})).unwrap(),
         GraphRelations::default()
     );
-    assert!(serde_json::from_value::<GraphRelations>(json!({"unknown": true})).is_err());
+    for field in ["unknown", "writes", "node_writes"] {
+        assert!(serde_json::from_value::<GraphRelations>(json!({field:{}})).is_err());
+    }
     let encoded = serde_json::to_value(scope()).unwrap();
-    for field in ["input", "values", "state_outputs", "exits"] {
+    for field in ["input", "values", "state_outputs"] {
         let mut missing = encoded.clone();
         missing.as_object_mut().unwrap().remove(field);
         assert!(serde_json::from_value::<ScopeRelations>(missing).is_err());
     }
-    let mut unknown = encoded;
-    unknown["unknown"] = json!(true);
-    assert!(serde_json::from_value::<ScopeRelations>(unknown).is_err());
+    for field in ["unknown", "writes", "exits"] {
+        let mut invalid = encoded.clone();
+        invalid[field] = json!({});
+        assert!(serde_json::from_value::<ScopeRelations>(invalid).is_err());
+    }
 }
 
 #[test]
-fn all_concrete_relationships_round_trip() {
+fn all_concrete_relationships_and_node_operations_round_trip() {
     let mut graph = graph();
-    graph.relations.scope = Some(scope());
-    graph.relations.host = Some("parent-host".into());
+    bind_scope(&mut graph);
     graph.relations.key = Some("edge-key".into());
     graph.relations.streams.insert(
         "events".into(),
@@ -182,6 +183,15 @@ fn all_concrete_relationships_round_trip() {
         serde_json::from_slice::<CompiledGraph>(&serde_json::to_vec(&graph).unwrap()).unwrap(),
         graph
     );
+    let encoded = serde_json::to_value(&graph).unwrap();
+    assert_eq!(
+        encoded["definition"]["nodes"][1]["operation"],
+        json!({
+            "op":"assign", "target":{"scope":"frame", "field":"counter"}
+        })
+    );
+    assert_eq!(encoded["definition"]["nodes"][1]["config"], json!({}));
+    assert!(encoded["relations"].get("writes").is_none());
 }
 
 #[test]
@@ -194,7 +204,7 @@ fn only_plain_child_free_graphs_retain_definition_order_identity() {
         .collect::<Vec<_>>();
     let historical = WorkflowId::from_definition(&graph.definition, &order).unwrap();
     assert_eq!(graph.workflow_id().unwrap(), historical);
-    graph.relations.scope = Some(scope());
+    bind_scope(&mut graph);
     assert_ne!(graph.workflow_id().unwrap(), historical);
     assert_eq!(
         graph.workflow_id().unwrap(),
@@ -209,8 +219,7 @@ fn identity_preserves_every_relationship_fact() {
     let mut scoped = plain.clone();
     scoped.relations.scope = Some(scope());
     variants.push(scoped.clone());
-    let scope = scoped.relations.scope.as_mut().unwrap();
-    scope.input = "store".into();
+    scoped.relations.scope.as_mut().unwrap().input = "store".into();
     variants.push(scoped.clone());
     scoped
         .relations
@@ -228,21 +237,6 @@ fn identity_preserves_every_relationship_fact() {
         .state_outputs
         .insert("counter".into(), "other".into());
     variants.push(scoped.clone());
-    scoped.relations.writes.insert(
-        "stop".into(),
-        StateTarget::Frame {
-            field: "counter".into(),
-        },
-    );
-    variants.push(scoped.clone());
-    scoped
-        .relations
-        .scope
-        .as_mut()
-        .unwrap()
-        .exits
-        .insert("store".into());
-    variants.push(scoped.clone());
     scoped.relations.host = Some("host".into());
     variants.push(scoped.clone());
     scoped.relations.key = Some("key".into());
@@ -252,12 +246,28 @@ fn identity_preserves_every_relationship_fact() {
         serde_json::from_value(json!({"node": "origin", "port": "counter"})).unwrap(),
     );
     variants.push(scoped);
-    let mut identities = std::collections::BTreeSet::new();
-    identities.insert(plain.workflow_id().unwrap());
+    let mut identities = std::collections::BTreeSet::from([plain.workflow_id().unwrap()]);
     for variant in variants {
         assert_eq!(variant.definition, plain.definition);
         assert!(identities.insert(variant.workflow_id().unwrap()));
     }
+}
+
+#[test]
+fn identity_preserves_node_operation_operands() {
+    let mut original = graph();
+    bind_scope(&mut original);
+    let mut changed = original.clone();
+    changed.definition.nodes[1].operation = Some(NodeOperation::Assign {
+        target: StateTarget::Root {
+            field: "counter".into(),
+        },
+    });
+    assert_eq!(changed.relations, original.relations);
+    assert_ne!(
+        changed.workflow_id().unwrap(),
+        original.workflow_id().unwrap()
+    );
 }
 
 #[test]

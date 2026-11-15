@@ -5,7 +5,7 @@ use crate::{
 use mf_telemetry::identity::WorkflowId;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 /// Concrete execution relationships for one compiled graph.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -18,9 +18,6 @@ pub struct GraphRelations {
     pub root: Option<RootScopeRelations>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub streams: BTreeMap<String, crate::OutputReferenceDefinition>,
-    /// All state assignments, keyed by the instruction node.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub writes: BTreeMap<DefinitionId, StateTarget>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -64,38 +61,9 @@ pub struct ScopeRelations {
     /// Source variable to receiving owner output. The current frame protocol
     /// preserves variable names; nonidentity mappings are not executable.
     pub state_outputs: BTreeMap<String, String>,
-    pub exits: BTreeSet<DefinitionId>,
-}
-
-/// The execution role of a node explicitly named by scope relationships.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ScopeInstruction<'a> {
-    RootInput,
-    Input,
-    Write(&'a StateTarget),
-    Exit,
 }
 
 impl GraphRelations {
-    pub fn instruction(&self, id: &DefinitionId) -> Option<ScopeInstruction<'_>> {
-        if let Some(target) = self.writes.get(id) {
-            return Some(ScopeInstruction::Write(target));
-        }
-        if let Some(root) = &self.root
-            && id == &root.input
-        {
-            return Some(ScopeInstruction::RootInput);
-        }
-        let scope = self.scope.as_ref()?;
-        if id == &scope.input {
-            Some(ScopeInstruction::Input)
-        } else if scope.exits.contains(id) {
-            Some(ScopeInstruction::Exit)
-        } else {
-            None
-        }
-    }
-
     pub fn is_callable(&self) -> bool {
         self.scope.is_none()
     }

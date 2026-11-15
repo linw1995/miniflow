@@ -76,6 +76,14 @@ impl NodePortContract for ScopeSourceNode {
 }
 
 impl TaskNode for ScopeSourceNode {
+    fn operation(&self) -> Option<crate::NodeOperation> {
+        Some(if self.root {
+            crate::NodeOperation::RootInput
+        } else {
+            crate::NodeOperation::Input
+        })
+    }
+
     fn supports_success_dependencies(&self) -> bool {
         false
     }
@@ -125,6 +133,10 @@ struct ExitLoopNode;
 struct EmptyValues {}
 
 impl TypedTaskNode for ExitLoopNode {
+    fn operation(&self) -> Option<crate::NodeOperation> {
+        Some(crate::NodeOperation::Exit)
+    }
+
     fn supports_success_dependencies(&self) -> bool {
         false
     }

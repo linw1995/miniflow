@@ -17,6 +17,7 @@ pub fn definition(count: usize, payload: usize) -> WorkflowDefinition {
         Value::String("x".repeat(payload))
     };
     let mut nodes = vec![NodeDefinition {
+        operation: None,
         id: id(0).into(),
         kind: "builtin.constant".into(),
         config: json!({ "value": value }),
@@ -24,6 +25,7 @@ pub fn definition(count: usize, payload: usize) -> WorkflowDefinition {
     let mut edges = Vec::new();
     for index in 1..count {
         nodes.push(NodeDefinition {
+            operation: None,
             id: id(index).into(),
             kind: "builtin.identity".into(),
             config: json!({}),

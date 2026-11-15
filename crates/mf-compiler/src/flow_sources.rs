@@ -420,9 +420,7 @@ impl FlowDiscovery {
     #[cfg(feature = "codegen")]
     pub fn check_pending_nodes(&self) -> Result<(), crate::WorkflowCompileError> {
         for node in &self.definition.nodes {
-            if self.relations.instruction(&node.id).is_none()
-                && self.pending.contains(&format!("node:{}", node.kind))
-            {
+            if node.operation.is_none() && self.pending.contains(&format!("node:{}", node.kind)) {
                 return Err(crate::WorkflowCompileError::UnknownNodeKind {
                     definition_id: node.id.clone(),
                     kind: node.kind.clone(),
@@ -967,7 +965,7 @@ impl Resolver {
         let version = definition.version;
         let mut children = BTreeMap::new();
         for node in &mut definition.nodes {
-            if context.relations.instruction(&node.id).is_some() {
+            if node.operation.is_some() {
                 continue;
             }
             // Input-contract calls receive their handle through an ordinary edge.
@@ -1199,7 +1197,7 @@ mod tests {
 
     #[cfg(feature = "codegen")]
     #[test]
-    fn pending_classification_uses_relations_without_hiding_instruction_children() {
+    fn pending_classification_uses_node_operations_without_hiding_instruction_children() {
         let pending = BTreeSet::from(["node:missing.kind".into()]);
         let mut discovery = FlowDiscovery {
             relations: GraphRelations {
@@ -1207,12 +1205,12 @@ mod tests {
                     input: "input".into(),
                     values: BTreeMap::new(),
                     state_outputs: BTreeMap::new(),
-
-                    exits: BTreeSet::new(),
                 }),
                 ..Default::default()
             },
-            definition: definition(json!([{"id":"input", "kind":"missing.kind"}])),
+            definition: definition(
+                json!([{"id":"input", "kind":"missing.kind", "operation":{"op":"input"}}]),
+            ),
             sources: BTreeSet::new(),
             pending: pending.clone(),
             children: BTreeMap::new(),

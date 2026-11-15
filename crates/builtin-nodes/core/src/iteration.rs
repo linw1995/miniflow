@@ -221,13 +221,7 @@ impl IterationNode {
         if let Some(relations) = &body.relations {
             ensure!(
                 relations.scope.as_ref().is_some_and(|scope| {
-                    scope.values == types
-                        && scope.state_outputs.is_empty()
-                        && !relations
-                            .writes
-                            .values()
-                            .any(|target| matches!(target, mf_runtime::StateTarget::Frame { .. }))
-                        && scope.exits.is_empty()
+                    scope.values == types && scope.state_outputs.is_empty()
                 }),
                 InvalidScopeBindingsSnafu
             );
@@ -235,6 +229,15 @@ impl IterationNode {
         ensure!(
             body.outputs.len() == 1 && body.outputs[0].name == "result" && body.outputs[0].required,
             InvalidResultSnafu
+        );
+        ensure!(
+            !body.operations().any(|operation| matches!(
+                operation,
+                mf_runtime::NodeOperation::Assign {
+                    target: mf_runtime::StateTarget::Frame { .. }
+                } | mf_runtime::NodeOperation::Exit
+            )),
+            InvalidScopeBindingsSnafu
         );
         let result_type = body.outputs[0].value_type.clone();
         let id = id.into();
@@ -596,8 +599,6 @@ mod tests {
                     ("key".into(), ValueType::Any),
                 ]),
                 state_outputs: BTreeMap::new(),
-
-                exits: Default::default(),
             }),
             ..Default::default()
         }
@@ -672,7 +673,7 @@ mod tests {
             .is_ok()
         );
         let mut invalid = vec![mf_runtime::GraphRelations::default()];
-        for mismatch in 0..7 {
+        for mismatch in 0..5 {
             let mut relations = body_relations("custom-input");
             let scope = relations.scope.as_mut().unwrap();
             match mismatch {
@@ -688,17 +689,6 @@ mod tests {
                 }
                 4 => {
                     scope.state_outputs.insert("item".into(), "item".into());
-                }
-                5 => {
-                    relations.writes.insert(
-                        "assign".into(),
-                        mf_runtime::StateTarget::Frame {
-                            field: "item".into(),
-                        },
-                    );
-                }
-                6 => {
-                    scope.exits.insert("exit".into());
                 }
                 _ => unreachable!(),
             }

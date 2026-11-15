@@ -809,6 +809,11 @@ where
 }
 
 pub trait TaskNode: Send + Sync {
+    /// Reports an intrinsic operation from the prepared executor itself.
+    fn operation(&self) -> Option<crate::NodeOperation> {
+        None
+    }
+
     /// Containers and engine controls opt out of ordinary per-frame success dependencies.
     fn supports_success_dependencies(&self) -> bool {
         true
@@ -846,6 +851,10 @@ pub trait NodePortContract {
 /// Prepare through [`PreparedNode::typed_task`]. The runtime adapter implements
 /// the dynamic task contract, so business logic only receives decoded fields.
 pub trait TypedTaskNode: Send + Sync {
+    fn operation(&self) -> Option<crate::NodeOperation> {
+        None
+    }
+
     fn supports_success_dependencies(&self) -> bool {
         true
     }
@@ -888,6 +897,10 @@ pub fn encode_typed_result<O: crate::NodeOutputs>(
 }
 
 impl<N: TypedTaskNode> TaskNode for TypedTaskAdapter<N> {
+    fn operation(&self) -> Option<crate::NodeOperation> {
+        self.0.operation()
+    }
+
     fn supports_success_dependencies(&self) -> bool {
         self.0.supports_success_dependencies()
     }
@@ -1056,6 +1069,10 @@ impl<N> Clone for TypedTaskHandle<N> {
 struct SharedTypedTask<N>(std::sync::Arc<N>);
 
 impl<N: TypedTaskNode> TaskNode for SharedTypedTask<N> {
+    fn operation(&self) -> Option<crate::NodeOperation> {
+        self.0.operation()
+    }
+
     fn supports_success_dependencies(&self) -> bool {
         self.0.supports_success_dependencies()
     }

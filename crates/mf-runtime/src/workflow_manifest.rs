@@ -412,66 +412,124 @@ fn has_default_collapsed(graph: &CompiledGraph) -> bool {
             .any(has_default_collapsed)
 }
 
-/// Validate the single authoritative assignment table without constructing providers.
-pub fn validate_state_writes(graph: &CompiledGraph) -> Result<(), GraphDescriptionError> {
-    let nodes: BTreeSet<_> = graph.definition.nodes.iter().map(|node| &node.id).collect();
-    let mut reserved = BTreeSet::new();
-    if let Some(root) = &graph.relations.root {
-        reserved.insert(&root.input);
-    }
-    if let Some(scope) = &graph.relations.scope {
-        reserved.insert(&scope.input);
-        reserved.extend(&scope.exits);
-    }
-    for (id, target) in &graph.relations.writes {
+/// Validate normalized node operations without constructing providers or reparsing configuration.
+pub fn validate_node_operations(graph: &CompiledGraph) -> Result<(), GraphDescriptionError> {
+    let nodes: BTreeMap<_, _> = graph
+        .definition
+        .nodes
+        .iter()
+        .map(|node| (&node.id, node))
+        .collect();
+    for node in &graph.definition.nodes {
+        let Some(operation) = &node.operation else {
+            continue;
+        };
         ensure!(
-            nodes.contains(id) && !reserved.contains(id) && !graph.children.contains_key(id),
+            node.config == serde_json::json!({}) && !graph.children.contains_key(&node.id),
             InvalidSnafu {
-                message: "assignment instructions must be known nodes without children or overlapping roles"
+                message: "compiled operations cannot retain executable config or own child graphs"
             }
         );
-        ensure!(
-            !target.field().trim().is_empty(),
-            InvalidSnafu {
-                message: "assignment targets require a nonblank field"
-            }
-        );
-        match target {
-            crate::StateTarget::Root { field } => ensure!(
+        match operation {
+            crate::NodeOperation::RootInput => ensure!(
                 graph
                     .relations
                     .root
                     .as_ref()
-                    .is_some_and(|root| root.values.contains_key(field)),
+                    .is_some_and(|root| root.input == node.id),
                 InvalidSnafu {
-                    message: "root write target must name a declared workflow variable"
+                    message: "root-input operation must match its declared source"
                 }
             ),
-            crate::StateTarget::Frame { field } => ensure!(
+            crate::NodeOperation::Input => ensure!(
                 graph
                     .relations
                     .scope
                     .as_ref()
-                    .is_some_and(|scope| scope.values.contains_key(field)
-                        && scope.state_outputs.contains_key(field)),
+                    .is_some_and(|scope| scope.input == node.id),
                 InvalidSnafu {
-                    message: "scope write target must name an available state output and value"
+                    message: "frame-input operation must match its declared source"
                 }
             ),
-            crate::StateTarget::Node { node, .. } => ensure!(
-                nodes.contains(node) && graph.relations.instruction(node).is_none(),
+            crate::NodeOperation::Exit => ensure!(
+                graph
+                    .relations
+                    .scope
+                    .as_ref()
+                    .is_some_and(|scope| scope.is_stateful()),
                 InvalidSnafu {
-                    message: "node state writes require a known ordinary target"
+                    message: "scope exits require a stateful frame"
                 }
             ),
+            crate::NodeOperation::Assign { target } => {
+                ensure!(
+                    !target.field().trim().is_empty(),
+                    InvalidSnafu {
+                        message: "assignment targets require a nonblank field"
+                    }
+                );
+                match target {
+                    crate::StateTarget::Root { field } => ensure!(
+                        graph
+                            .relations
+                            .root
+                            .as_ref()
+                            .is_some_and(|root| root.values.contains_key(field)),
+                        InvalidSnafu {
+                            message: "root write target must name a declared workflow variable"
+                        }
+                    ),
+                    crate::StateTarget::Frame { field } => ensure!(
+                        graph
+                            .relations
+                            .scope
+                            .as_ref()
+                            .is_some_and(|scope| scope.values.contains_key(field)
+                                && scope.state_outputs.contains_key(field)),
+                        InvalidSnafu {
+                            message: "scope write target must name an available state output and value"
+                        }
+                    ),
+                    crate::StateTarget::Node { node: owner, .. } => ensure!(
+                        nodes
+                            .get(owner)
+                            .is_some_and(|owner| owner.operation.is_none()),
+                        InvalidSnafu {
+                            message: "node state writes require a known provider target"
+                        }
+                    ),
+                }
+            }
         }
+    }
+    if let Some(root) = &graph.relations.root {
+        ensure!(
+            nodes.get(&root.input).is_some_and(|node| matches!(
+                node.operation.as_ref(),
+                Some(crate::NodeOperation::RootInput)
+            )),
+            InvalidSnafu {
+                message: "declared root source must carry a root-input operation"
+            }
+        );
+    }
+    if let Some(scope) = &graph.relations.scope {
+        ensure!(
+            nodes.get(&scope.input).is_some_and(|node| matches!(
+                node.operation.as_ref(),
+                Some(crate::NodeOperation::Input)
+            )),
+            InvalidSnafu {
+                message: "declared frame source must carry a frame-input operation"
+            }
+        );
     }
     Ok(())
 }
 
 /// Validate provider-free endpoints before any observation-only projection.
 fn validate_relations(graph: &CompiledGraph) -> Result<(), GraphDescriptionError> {
-    validate_state_writes(graph)?;
+    validate_node_operations(graph)?;
     ensure!(
         graph
             .relations
@@ -488,7 +546,6 @@ fn validate_relations(graph: &CompiledGraph) -> Result<(), GraphDescriptionError
         .iter()
         .map(|node| &node.id)
         .collect::<BTreeSet<_>>();
-    let mut instructions = BTreeSet::new();
     for (name, output) in &graph.relations.streams {
         ensure!(
             !name.trim().is_empty()
@@ -521,22 +578,16 @@ fn validate_relations(graph: &CompiledGraph) -> Result<(), GraphDescriptionError
             }
         );
         root.validate_values().context(VariablesSnafu)?;
-        for id in std::iter::once(&root.input) {
-            ensure!(
-                nodes.contains(id) && instructions.insert(id) && !graph.children.contains_key(id),
-                InvalidSnafu {
-                    message: "root state instructions must be disjoint known nodes without children",
-                }
-            );
-        }
         ensure!(
             graph
                 .definition
                 .nodes
                 .iter()
                 .any(|node| node.id.as_str() == crate::ROOT_SOURCE_ID
-                    && node.kind == crate::ROOT_SOURCE_ID
-                    && node.config == serde_json::json!({})),
+                    && matches!(
+                        node.operation.as_ref(),
+                        Some(crate::NodeOperation::RootInput)
+                    )),
             InvalidSnafu {
                 message: "workflow variables require a canonical synthetic root source",
             }
@@ -565,20 +616,6 @@ fn validate_relations(graph: &CompiledGraph) -> Result<(), GraphDescriptionError
     let Some(scope) = &graph.relations.scope else {
         return Ok(());
     };
-    for id in std::iter::once(&scope.input).chain(scope.exits.iter()) {
-        ensure!(
-            nodes.contains(id),
-            InvalidSnafu {
-                message: format!("compiled scope instruction names unknown node `{id}`")
-            }
-        );
-        ensure!(
-            instructions.insert(id),
-            InvalidSnafu {
-                message: "compiled scope instruction roles collide"
-            }
-        );
-    }
     ensure!(
         scope
             .values
@@ -605,20 +642,6 @@ fn validate_relations(graph: &CompiledGraph) -> Result<(), GraphDescriptionError
             }
         );
     }
-    ensure!(
-        scope.is_stateful() || scope.exits.is_empty(),
-        InvalidSnafu {
-            message: "compiled scope exits require a stateful frame"
-        }
-    );
-    ensure!(
-        instructions
-            .iter()
-            .all(|id| !graph.children.contains_key(*id)),
-        InvalidSnafu {
-            message: "compiled scope instructions cannot own child graphs"
-        }
-    );
     Ok(())
 }
 

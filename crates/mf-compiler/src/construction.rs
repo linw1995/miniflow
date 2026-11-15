@@ -921,7 +921,7 @@ fn validate_compiled_providers(
 ) -> Result<(), WorkflowBuildError> {
     for node in &graph.definition.nodes {
         let children = graph.children.get(&node.id);
-        if graph.relations.instruction(&node.id).is_some() {
+        if node.operation.is_some() {
             ensure!(
                 children.is_none_or(BTreeMap::is_empty),
                 InvalidDefinitionSnafu {
@@ -1046,6 +1046,7 @@ fn validated_node_config(
         kind: kind.to_owned(),
     })?;
     let node = crate::NodeDefinition {
+        operation: None,
         id: definition_id.into(),
         kind: kind.into(),
         config: serde_json::from_str(config_json).context(InvalidEmbeddedConfigSnafu {
@@ -1189,10 +1190,10 @@ pub fn prepared_assign(
             AssignmentSchema::Provider { node },
         ) => {
             ensure!(
-                *owner == node.id,
+                *owner == node.id && node.operation.is_none(),
                 InvalidDefinitionSnafu {
                     definition_id: id,
-                    message: "assignment provider differs from its target node",
+                    message: "assignment provider must match an ordinary target node",
                 }
             );
             let registration = registry.get(&node.kind).with_context(|| UnknownKindSnafu {
@@ -2053,8 +2054,6 @@ mod tests {
                 input: "scope-input".into(),
                 values: BTreeMap::from([(variable.into(), ValueType::String)]),
                 state_outputs: BTreeMap::from([(variable.into(), variable.into())]),
-
-                exits: BTreeSet::new(),
             }),
             ..Default::default()
         }

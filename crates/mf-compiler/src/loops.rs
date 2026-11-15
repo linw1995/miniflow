@@ -91,6 +91,10 @@ pub fn validate_scope(
     subgraphs: &BTreeMap<String, SubgraphScope>,
 ) -> Result<(), WorkflowCompileError> {
     for node in &definition.nodes {
+        // The lowering boundary has already rejected operations in authored input.
+        if node.operation.is_some() {
+            continue;
+        }
         let mut node_path = path.to_vec();
         node_path.push(node.id.clone());
         if definition.version == WorkflowDefinitionVersion::V2026_09_26

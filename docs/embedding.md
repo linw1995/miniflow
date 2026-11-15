@@ -138,13 +138,14 @@ constructing nodes and supports existing description and observation APIs.
 
 The plan stores an explicit `CompiledGraph`: a definition, its canonical `execution_order`, and a
 `children` map keyed by receiving node ID and configuration field name, plus required `relations`.
-These relationships name scope input sources, state assignments and exits, stream export endpoints,
-host bindings, and scope-edge identity. `GraphRelations::writes` is the single assignment table:
-`StateTarget` identifies a Root variable, a current-frame variable, or a provider's node field. Root and
-frame declarations contain types, initial values, and output mappings rather than separate write tables.
-Interpreted and generated preparation use the same assignment constructor. Variable types come from
-the owning scope; node contracts come from the provider's final compiled configuration. Discovery,
-provider checking, preparation, and codegen consume those relationships rather than reclassifying instructions by their node-kind labels. Only the
+Relationships name scope input sources, state declarations and output mappings, stream exports,
+host bindings, and scope-edge identity. Executable instructions belong to their nodes:
+`NodeDefinition::operation` records Root/frame inputs, assignments, and exits. An assignment owns its
+normalized `StateTarget`; its original `config.variable` is consumed during lowering and is not stored
+as a second target. There is no graph-level assignment or exit index. Provider nodes leave `operation`
+unset and keep their ordinary configuration opaque. Interpreted and generated preparation match the
+same typed operations and use the same assignment constructor. Variable types come from the owning
+scope; node field contracts come from the provider's final compiled configuration. Only the
 authoring lowering boundary interprets the language's structural syntax. Scope keys must name their
 actual receiving owner or that exact encoded owner/binding pair; runtime invocation paths and
 telemetry descriptions use the same key while routing and errors retain the physical owner ID.

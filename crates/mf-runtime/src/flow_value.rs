@@ -400,9 +400,16 @@ mod tests {
             input: "params".into(),
             values: Default::default(),
             state_outputs: Default::default(),
-
-            exits: Default::default(),
         });
+        let input = manifest
+            .graph
+            .definition
+            .nodes
+            .iter_mut()
+            .find(|node| node.id.as_str() == "params")
+            .unwrap();
+        input.operation = Some(crate::NodeOperation::Input);
+        input.config = json!({});
         let scoped = FlowValue::external(&manifest, outputs.clone(), |_, _| {
             panic!("an external implicit-scope body must not execute")
         })
@@ -439,8 +446,6 @@ mod tests {
                 input: "%frame".into(),
                 values: BTreeMap::new(),
                 state_outputs: BTreeMap::new(),
-
-                exits: Default::default(),
             }),
             ..Default::default()
         });

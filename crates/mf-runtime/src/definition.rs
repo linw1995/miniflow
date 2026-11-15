@@ -287,6 +287,19 @@ pub struct NodeDefinition {
     pub kind: String,
     #[serde(default = "empty_object")]
     pub config: Value,
+    /// Normalized engine operation. Authored provider nodes leave this unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<NodeOperation>,
+}
+
+/// An engine operation owned by its compiled node, independent of display kind labels.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NodeOperation {
+    RootInput,
+    Input,
+    Assign { target: crate::StateTarget },
+    Exit,
 }
 
 /// Errors reading or replacing declared executable configuration fields.

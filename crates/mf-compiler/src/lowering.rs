@@ -7,7 +7,7 @@ use mf_runtime::{GraphRelations, ScopeRelations, SubgraphScope, WorkflowDefiniti
 use serde::Deserialize;
 use serde_json::json;
 use snafu::{ResultExt, ensure};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 /// Lowering-only traversal state. Only `relations` crosses a phase boundary;
 /// ancestry and diagnostic paths are carried explicitly during source lowering.
@@ -168,7 +168,6 @@ pub fn child_relations_at(
                 input: mf_runtime::LOOP_SOURCE_ID.into(),
                 values,
                 state_outputs,
-                exits: BTreeSet::new(),
             });
             relations.streams = config.stream_outputs;
             relations.key = Some(owner.id.to_string());
@@ -190,7 +189,6 @@ pub fn child_relations_at(
                 input: mf_runtime::ITERATION_INPUT_ID.into(),
                 values: inputs,
                 state_outputs: BTreeMap::new(),
-                exits: BTreeSet::new(),
             });
             relations.streams = config.stream_outputs;
             relations.key = Some(owner.id.to_string());
@@ -241,6 +239,18 @@ pub fn lower_scope_at(
     // Resolved-definition adapters retain canonical sources from an earlier pass;
     // authored definitions cannot opt into that path. Artifact replay uses stored relations.
     for node in &definition.nodes {
+        if node.operation.is_some() {
+            let mut operation_path = path.to_vec();
+            operation_path.push(node.id.clone());
+            ensure!(
+                lowered_sources && node.config == json!({}),
+                crate::compiler::InvalidScopeSnafu {
+                    path: crate::loops::path_label(&operation_path),
+                    message: "compiled node operations are not authoring syntax",
+                }
+            );
+            continue;
+        }
         let reserved = matches!(
             node.id.as_str(),
             mf_runtime::ROOT_SOURCE_ID
@@ -313,6 +323,7 @@ pub fn lower_scope_at(
                     id: mf_runtime::ROOT_SOURCE_ID.into(),
                     kind: mf_runtime::ROOT_SOURCE_ID.into(),
                     config: json!({}),
+                    operation: Some(mf_runtime::NodeOperation::RootInput),
                 },
             );
         }
@@ -346,6 +357,7 @@ pub fn lower_scope_at(
                     id: scope.input.clone(),
                     kind: expected_kind.into(),
                     config: json!({}),
+                    operation: Some(mf_runtime::NodeOperation::Input),
                 },
             );
         }
@@ -375,17 +387,17 @@ pub fn lower_scope_at(
         path,
         subgraphs,
     )?;
-    if let Some(scope) = relations.scope.as_mut() {
-        scope.exits.clear();
-    }
-    relations.writes.clear();
-    for node in &definition.nodes {
+    for index in 0..definition.nodes.len() {
+        let node = &definition.nodes[index];
+        if node.operation.is_some() {
+            continue;
+        }
         let mut node_path = path.to_vec();
         node_path.push(node.id.clone());
         let path = node_path.as_slice();
-        match node.kind.as_str() {
+        let operation = match node.kind.as_str() {
             // `validate_scope` already proved the canonical endpoint above.
-            mf_runtime::ROOT_SOURCE_ID => {}
+            mf_runtime::ROOT_SOURCE_ID => Some(mf_runtime::NodeOperation::RootInput),
             mf_runtime::LOOP_SOURCE_ID | mf_runtime::ITERATION_INPUT_KIND => {
                 let scope = relations.scope.as_ref();
                 let valid = scope.is_some_and(|scope| {
@@ -403,6 +415,7 @@ pub fn lower_scope_at(
                         message: "reserved scope source requires its canonical enclosing scope",
                     }
                 );
+                Some(mf_runtime::NodeOperation::Input)
             }
             mf_runtime::ASSIGN_KIND => {
                 // validate_scope checked ownership, target existence and spelling.
@@ -415,16 +428,9 @@ pub fn lower_scope_at(
                             mf_runtime::StateTarget::Root { field: target }
                         }
                     });
-                relations.writes.insert(node.id.clone(), target);
+                Some(mf_runtime::NodeOperation::Assign { target })
             }
-            mf_runtime::EXIT_LOOP_KIND => {
-                relations
-                    .scope
-                    .as_mut()
-                    .expect("validated state scope")
-                    .exits
-                    .insert(node.id.clone());
-            }
+            mf_runtime::EXIT_LOOP_KIND => Some(mf_runtime::NodeOperation::Exit),
             _ => {
                 ensure!(
                     node.id.as_str() != mf_runtime::LOOP_SOURCE_ID
@@ -435,7 +441,13 @@ pub fn lower_scope_at(
                         message: "reserved scope source must use its canonical declaration",
                     }
                 );
+                None
             }
+        };
+        if let Some(operation) = operation {
+            let node = &mut definition.nodes[index];
+            node.operation = Some(operation);
+            node.config = json!({});
         }
     }
     Ok(())
@@ -450,6 +462,7 @@ mod tests {
         let subgraphs =
             BTreeMap::from([(mf_runtime::ITERATION_KIND.into(), SubgraphScope::Iteration)]);
         let owner = NodeDefinition {
+            operation: None,
             id: "each".into(),
             kind: mf_runtime::ITERATION_KIND.into(),
             config: json!({"inputs":{"flow_0":"flow", "settings":"object"}}),
@@ -472,13 +485,13 @@ mod tests {
             ])
         );
         assert!(scope.state_outputs.is_empty());
-        assert!(relations.writes.is_empty());
-        assert!(scope.exits.is_empty());
+        assert!(relations.root.is_none());
     }
 
     #[test]
     fn item_scope_rejects_declared_container_scopes_by_metadata() {
         let item_owner = NodeDefinition {
+            operation: None,
             id: "each".into(),
             kind: "test.custom-item".into(),
             config: json!({"inputs":{}}),
@@ -491,6 +504,7 @@ mod tests {
             .child(WorkflowDefinitionVersion::CURRENT, &item_owner, "body")
             .unwrap();
         let loop_owner = NodeDefinition {
+            operation: None,
             id: "repeat".into(),
             kind: "test.custom-loop".into(),
             config: json!({"variables":[]}),
@@ -512,6 +526,7 @@ mod tests {
     #[test]
     fn declared_subgraph_scope_selects_relationships_instead_of_kind() {
         let custom_loop = NodeDefinition {
+            operation: None,
             id: "custom".into(),
             kind: "test.custom-loop".into(),
             config: json!({"variables":[{"name":"count", "type":"int"}]}),
@@ -538,6 +553,7 @@ mod tests {
             "a kind without provider metadata has no frame"
         );
         let builtin_loop = NodeDefinition {
+            operation: None,
             id: "repeat".into(),
             kind: mf_runtime::LOOP_KIND.into(),
             config: json!({"variables":[{"name":"count", "type":"int"}]}),
@@ -555,6 +571,7 @@ mod tests {
             "built-in kind strings do not imply a frame"
         );
         let custom_host = NodeDefinition {
+            operation: None,
             id: "invoke".into(),
             kind: "test.custom-host".into(),
             config: json!({"flow":"child"}),
@@ -576,6 +593,7 @@ mod tests {
             (mf_runtime::LOOP_KIND.into(), SubgraphScope::Loop),
         ]);
         let owner = NodeDefinition {
+            operation: None,
             id: "receiver".into(),
             kind: "test.receiver".into(),
             config: json!({}),
@@ -585,6 +603,7 @@ mod tests {
             .child(WorkflowDefinitionVersion::CURRENT, &owner, "selected")
             .unwrap();
         let frame = NodeDefinition {
+            operation: None,
             id: "repeat".into(),
             kind: mf_runtime::LOOP_KIND.into(),
             config: json!({"variables":[{"name":"count", "type":"int"}]}),
