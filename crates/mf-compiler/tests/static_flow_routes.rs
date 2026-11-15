@@ -649,6 +649,13 @@ fn assign_replaces_enables_without_leaking_between_invocations() {
         compiled, authored,
         "state assignment must not add graph nodes"
     );
+    assert!(
+        mf_runtime::prepared_router_assign("write", "execute", vec![], vec![])
+            .into_task()
+            .unwrap()
+            .node
+            .supports_success_dependencies()
+    );
     let flow = instantiate_compiled(&plan, &registry).unwrap();
     for (enables, route, active) in [
         (json!([]), "first", false),
