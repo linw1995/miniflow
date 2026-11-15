@@ -338,6 +338,7 @@ impl Freezing<'_> {
                 }
             }
         }
+        crate::routers::lower(&mut scope.definition, true)?;
         Ok(())
     }
 }

@@ -532,12 +532,25 @@ nix develop --command ./target/flow-tools-runner --params.calls='[{"id":"one","n
 ```
 
 `builtin.router` is a composite selection-and-call node. Configuration `{"routes":["first","second"]}`
-fixes its full static branch set. The `route` input selects **one** child, and `arguments` provides its
-flat input object. An unknown selection returns an error result without invoking any child. Blank,
-reserved `else`, and duplicate routes are rejected. The output is always the same
-`result: Object`, independent of the number of branches. There is no separate dynamic enablement
-state: changing the optional `flows` map never changes which static routes exist or which one is
-selected.
+fixes its full static branch set. The `route` input selects **one** eligible child, and `arguments`
+provides its flat input object. `enables` is an allowed subset, not a list of branches to execute.
+Omission enables all routes; `"enables": []` disables all. Unknown or disabled selections return an
+error result without invoking any child. Blank, reserved `else`, and duplicate routes are rejected,
+as are duplicate or unknown names in `enables`. The output is always the same `result: Object`,
+independent of the number of branches.
+
+Each router `choose` has an implicit node-local source `%choose`:
+
+- `%choose.config.routes` retains the static full declaration.
+- `%choose.routes` publishes that full set as a read-only string array.
+- `%choose.enables` publishes the current enabled subset, initialized from `config.enables` or all routes.
+
+`workflow.assign` with `{"variable":"%choose.enables"}` replaces the entire enabled array. The runtime
+checks that it is a duplicate-free subset before committing the write. Assigning `routes`, `config`, or
+an unknown node-local field is rejected. Use an explicit `write.done` prerequisite on later readers and
+on the router itself; referencing a mutable source does not order it after a writer. State belongs to
+the current invocation and is isolated across Calls and item/container frames. Writes never add ports,
+change compiled children, or exclude disabled branches from static validation.
 
 The router's optional `flows: Map(Flow)` input supplies static provenance. The compiler follows that
 map through Call parameters and shared Loop/Iteration inputs, binding one child per route in
@@ -546,10 +559,12 @@ superset; an explicit nonempty list must match it. Branch bodies live in the chi
 synthetic config fields. The router remains the authored node: there is no dispatch template,
 per-route Call-node expansion, or generated result-join topology.
 
-ToolUses needs no boilerplate to synchronize runtime map keys: its `params.tools` map is provenance
-only, and the compiler-bound route set is its complete static branch set. The runtime never selects
-an executor from the supplied handles, so substituting a handle cannot replace a static target. An
-empty map binds no children. No caller-specific Agent source or ordinal candidate IDs are needed.
+ToolUses does not rewrite `%execute.enables`: its `params.tools` map is fixed, so the compiler-bound
+route set is already the exact enabled set. Generic callers that need runtime narrowing can still use
+`workflow.assign` on `%<router>.enables`; that state is optional rather than required boilerplate.
+The runtime never selects an executor from the supplied handles, so substituting a handle cannot
+replace a static target. An empty map binds no children. No caller-specific Agent source or ordinal
+candidate IDs are needed.
 
 Providers declare capability provenance with `NodeFactory::WithFlowBindings`, wrapping their existing
 factory. `FlowBindingSource` describes child exports, forwarded inputs, and native object fields;
@@ -557,7 +572,7 @@ factory. `FlowBindingSource` describes child exports, forwarded inputs, and nati
 only and never run node work. `NodeFactory::BoundSubgraph` declares the expected static child names
 without treating ordinary config as Flow definitions. Opaque transformations conservatively retain
 incoming capabilities. Discovery is independent of inferred port types; sources without declared
-provenance cannot introduce static bodies. All discovered bodies are checked, whether selected or not.
+provenance cannot introduce static bodies. All discovered bodies are checked, whether enabled or not.
 The final artifact retains the authored router and its children, so replay, generated runners,
 descriptions, and TUI need no rediscovery or runtime graph projection.
 

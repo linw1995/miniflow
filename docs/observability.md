@@ -953,8 +953,9 @@ It does not expand the Router into Call nodes or rewrite the authored branch top
 `body_paths_for_node` exposes every route body before execution through the normal description
 contract. The selected child uses Call's shared invocation implementation and ordinary Call scopes,
 including item correlation and nested-body detail. The TUI needs no runtime invocation cache, graph
-reconstruction, or producer-body projection. Unused branches remain visible as unexecuted bodies.
-An optional runtime `flows` map is provenance only and cannot substitute an executor.
+reconstruction, or producer-body projection. Disabled and unused branches remain visible as
+unexecuted bodies. Updating `%<router>.enables` never adds or removes static definitions; an optional
+runtime `flows` map is provenance only and cannot substitute an executor.
 
 Snapshots replace callable payloads with `"<Flow>"`, or `"[REDACTED]"` when secret. Business JSON
 serialization does not use this placeholder: it rejects executable values.

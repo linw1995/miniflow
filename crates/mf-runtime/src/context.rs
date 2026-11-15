@@ -84,6 +84,7 @@ struct ScopeGuard<'a> {
     context: &'a mut ExecutionContext,
     parent_outputs: ExecutionOutputs,
     parent_exit_cutoff: Arc<AtomicUsize>,
+    parent_node_state: BTreeMap<String, NodeState>,
     depth: usize,
 }
 
@@ -93,7 +94,15 @@ impl Drop for ScopeGuard<'_> {
         self.context.outputs = std::mem::take(&mut self.parent_outputs);
         self.context.scope_exit_cutoff = self.parent_exit_cutoff.clone();
         self.context.pending_loop_write = None;
+        self.context.node_state = std::mem::take(&mut self.parent_node_state);
+        self.context.pending_node_write = None;
     }
+}
+
+#[derive(Clone, Debug, Default)]
+struct NodeState {
+    values: Outputs,
+    writes: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -221,6 +230,8 @@ pub struct ExecutionContext {
     pending_loop_write: Option<(String, Value)>,
     root_state: Option<RootState>,
     pending_root_write: Option<(String, Value)>,
+    node_state: BTreeMap<String, NodeState>,
+    pending_node_write: Option<(String, String, Value)>,
     current_position: Option<usize>,
     current_node: Option<crate::DefinitionId>,
     scope_exit_cutoff: Arc<AtomicUsize>,
@@ -247,6 +258,8 @@ impl Default for ExecutionContext {
             pending_loop_write: None,
             root_state: None,
             pending_root_write: None,
+            node_state: BTreeMap::new(),
+            pending_node_write: None,
             current_position: None,
             current_node: None,
             scope_exit_cutoff: Arc::new(AtomicUsize::new(usize::MAX)),
@@ -345,6 +358,8 @@ impl ExecutionContext {
             pending_loop_write: None,
             root_state: None,
             pending_root_write: None,
+            node_state: BTreeMap::new(),
+            pending_node_write: None,
             current_position: None,
             current_node: None,
             scope_exit_cutoff: self.scope_exit_cutoff.clone(),
@@ -370,6 +385,7 @@ impl ExecutionContext {
         self.body_observation = source.body_observation.clone();
         self.scopes = source.scopes.clone();
         self.root_state = source.root_state.clone();
+        self.node_state = source.node_state.clone();
         self.scope_prefix = source.scope_prefix.clone();
         self.scope_exit_cutoff = source.scope_exit_cutoff.clone();
         self.snapshots = source.snapshots.clone();
@@ -418,6 +434,8 @@ impl ExecutionContext {
         self.pending_loop_write = None;
         self.root_state = None;
         self.pending_root_write = None;
+        self.node_state.clear();
+        self.pending_node_write = None;
         self.scope_exit_cutoff = Arc::new(AtomicUsize::new(usize::MAX));
         Ok(())
     }
@@ -574,6 +592,20 @@ impl ExecutionContext {
             pending_loop_write: None,
             root_state: self.root_state.clone(),
             pending_root_write: None,
+            node_state: self
+                .node_state
+                .iter()
+                .map(|(id, state)| {
+                    (
+                        id.clone(),
+                        NodeState {
+                            values: state.values.clone(),
+                            writes: BTreeSet::new(),
+                        },
+                    )
+                })
+                .collect(),
+            pending_node_write: None,
             current_position: None,
             current_node: None,
             scope_exit_cutoff: self.scope_exit_cutoff.clone(),
@@ -597,6 +629,17 @@ impl ExecutionContext {
         nodes: impl IntoIterator<Item = &'a FlowNode<N>>,
     ) {
         self.outputs.merge_nodes(&source.outputs, nodes);
+        for (id, state) in &source.node_state {
+            let fresh = !self.node_state.contains_key(id);
+            let target = self.node_state.entry(id.clone()).or_default();
+            for (name, value) in &state.values {
+                if fresh || state.writes.contains(name) {
+                    target.values.insert(name.clone(), value.clone());
+                    self.outputs.set_value(output_id(id, name), value.clone());
+                }
+            }
+            target.writes.extend(state.writes.iter().cloned());
+        }
         if let (Some(target), Some(source)) = (&mut self.root_state, &source.root_state) {
             for (name, value) in &source.variables {
                 if !target
@@ -1220,6 +1263,37 @@ impl ExecutionContext {
         Ok(())
     }
 
+    /// Initializes state owned by a synthetic node source in this invocation.
+    pub fn node_state(&mut self, source: &str, initial: Outputs) -> Outputs {
+        self.node_state
+            .entry(source.into())
+            .or_insert_with(|| NodeState {
+                values: initial,
+                writes: BTreeSet::new(),
+            })
+            .values
+            .clone()
+    }
+
+    /// Stages a provider-validated state update until its instruction succeeds.
+    pub fn stage_node_write(
+        &mut self,
+        source: &str,
+        field: &str,
+        value: Value,
+    ) -> Result<(), NodeExecutionError> {
+        ensure!(
+            self.node_state
+                .get(source)
+                .is_some_and(|state| state.values.contains_key(field)),
+            crate::NodeExecutionFailedSnafu {
+                message: format!("unknown node state `{source}.{field}`"),
+            }
+        );
+        self.pending_node_write = Some((source.into(), field.into(), value));
+        Ok(())
+    }
+
     pub fn run_scope<T>(
         &mut self,
         scope: ExecutionScope,
@@ -1232,10 +1306,12 @@ impl ExecutionContext {
             Arc::new(AtomicUsize::new(usize::MAX)),
         );
         self.scopes.push(scope);
+        let parent_node_state = std::mem::take(&mut self.node_state);
         let guard = ScopeGuard {
             context: self,
             parent_outputs,
             parent_exit_cutoff,
+            parent_node_state,
             depth,
         };
         let state = &mut *guard.context;
@@ -1249,6 +1325,15 @@ impl ExecutionContext {
     }
 
     fn commit_pending_writes(&mut self) {
+        if let Some((source, field, value)) = self.pending_node_write.take() {
+            let state = self
+                .node_state
+                .get_mut(&source)
+                .expect("validated node state");
+            state.values.insert(field.clone(), value.clone());
+            state.writes.insert(field.clone());
+            self.outputs.set_value(output_id(&source, &field), value);
+        }
         if let Some((variable, value)) = self.pending_root_write.take() {
             let state = self
                 .root_state
@@ -1280,6 +1365,7 @@ impl ExecutionContext {
             .inspect_err(|_| {
                 self.pending_loop_write = None;
                 self.pending_root_write = None;
+                self.pending_node_write = None;
             })?;
         self.commit_pending_writes();
         Ok(())
@@ -1293,6 +1379,7 @@ impl ExecutionContext {
         self.outputs.publish(node, result).inspect_err(|_| {
             self.pending_loop_write = None;
             self.pending_root_write = None;
+            self.pending_node_write = None;
         })?;
         self.commit_pending_writes();
         Ok(())
@@ -1458,6 +1545,7 @@ pub fn execute_resolved_node_in_context<N>(
     ctx.reserve_step(id)?;
     ctx.pending_loop_write = None;
     ctx.pending_root_write = None;
+    ctx.pending_node_write = None;
     let mut step = ctx.begin_step_observation(id);
     let _root_context = match &step {
         Some(StepObservation::Root(step)) => Some(step.enter()),
@@ -1607,6 +1695,65 @@ mod tests {
     };
 
     struct EmitNode(Outputs);
+
+    #[test]
+    fn unrelated_domains_cannot_revert_committed_node_state() {
+        let mut context = ExecutionContext::default();
+        context.node_state(
+            "%choose",
+            Outputs::from([("enables".into(), json!(["first"]).into())]),
+        );
+        let unrelated = context.fork_domain_with_observation(None);
+        let mut writer = context.fork_domain_with_observation(None);
+        writer
+            .stage_node_write("%choose", "enables", json!(["second"]).into())
+            .unwrap();
+        writer.commit_pending_writes();
+        let nodes: Vec<FlowNode> = Vec::new();
+        context.merge_domain_outputs(&writer, &nodes);
+        context.merge_domain_outputs(&unrelated, &nodes);
+        assert_eq!(
+            context.node_state("%choose", Outputs::new())["enables"],
+            json!(["second"])
+        );
+        assert!(
+            matches!(context.output("%choose.enables").unwrap(), ContextValue::Value(value) if *value == json!(["second"]))
+        );
+    }
+
+    #[test]
+    fn node_state_scopes_restore_after_failure_and_calls_are_isolated() {
+        let mut context = ExecutionContext::default();
+        let initial = Outputs::from([("enables".into(), json!(["first"]).into())]);
+        context.node_state("%choose", initial.clone());
+        let scope =
+            ExecutionScope::new("repeat", "%loop", 0, Outputs::new(), BTreeMap::new()).unwrap();
+        assert!(
+            context
+                .run_scope(scope, |state| {
+                    assert!(state.node_state.is_empty());
+                    state.node_state("%choose", Outputs::new());
+                    crate::runner::ContextSnafu {
+                        definition_id: "child",
+                        message: "failed",
+                    }
+                    .fail::<()>()
+                })
+                .is_err()
+        );
+        assert_eq!(context.node_state("%choose", Outputs::new()), initial);
+        context
+            .run_call("call", Default::default(), &[], |state| {
+                assert!(state.node_state.is_empty());
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            context
+                .stage_node_write("%missing", "enables", json!([]).into())
+                .is_err()
+        );
+    }
 
     #[test]
     fn call_failure_and_unwinding_preserve_parent_state_and_charge_shared_resources() {
