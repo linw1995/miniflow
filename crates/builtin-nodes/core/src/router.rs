@@ -85,10 +85,7 @@ fn bindings(config: &Value) -> FlowBindings {
     if serde_json::from_value::<Config>(config.clone())
         .is_ok_and(|config| validate_routes(&config.routes).is_ok())
     {
-        FlowBindings {
-            invocation: Some("flows".into()),
-            ..Default::default()
-        }
+        FlowBindings::invoker("flows")
     } else {
         FlowBindings::default()
     }
