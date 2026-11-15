@@ -359,11 +359,17 @@ stdin ownership) are checked when invoked, rather than preventing construction o
 `FlowValue::from_flow(flow)` wraps an already prepared native `Flow` without serializing it.
 When authored inputs must form a callable collection, the generic `builtin.object` node assembles
 `Map(Flow)` fields without Serde or CEL; the map is ordinary input data, not a registry of graph IDs.
-Nested object construction can instead attach caller-owned metadata to each callable. For example, an inner
-`builtin.object` with `flow`, `description`, and optional `parameters` fields creates a self-contained tool
-record, and an outer `builtin.object` with `object`-typed fields creates the `Map(Object)` consumed by the
-Agent. Executable Router accepts either a direct `Map(Flow)` or, with `flow_field` configured, a generic
-`Map(Object)` whose selected record contains the Flow in that field.
+Nested object construction can attach caller-owned metadata to capabilities without serializing them.
+The Agent accepts separate `Map(Flow)` tools and plain `Map(Object)` tool properties. Provider factories
+may declare capability provenance through `NodeFactory::WithFlowBindings`: `Child` exports a prepared
+binding, `Input` forwards incoming provenance, and `Object` prefixes it with native field names. The
+compiler follows these facts across Call and container boundaries and binds static children directly
+to explicitly authored `builtin.router` nodes. `NodeFactory::BoundSubgraph` declares the compiled
+binding names separately from config-owned Flow parameters; `GraphRelations::static_binding` keeps
+these children out of config projection. Router owns fixed `routes` and a writable node-local
+`enables` subset, selects one child, and reuses Call's invocation implementation. There is no dispatch
+placeholder or compiler expansion into per-route Call nodes.
+See [tool composition](workflows.md#configured-flow-tools) for the authoring and state contracts.
 
 Definition identity is shared prepared metadata: `PreparedSubgraph::origin` and `SubgraphOrigin`
 are public through the existing `mf_runtime` entry point, alongside the other subgraph metadata.

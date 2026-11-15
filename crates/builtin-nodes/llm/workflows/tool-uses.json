@@ -160,7 +160,7 @@
               "id": "execute",
               "kind": "builtin.router",
               "config": {
-                "mode": "execute"
+                "routes": []
               },
               "inputs": {
                 "flows": {
@@ -242,13 +242,13 @@
             },
             {
               "from_node": "gate",
-              "from_output": "ok",
-              "to_node": "execute"
+              "from_output": "else",
+              "to_node": "fail"
             },
             {
               "from_node": "gate",
-              "from_output": "else",
-              "to_node": "fail"
+              "from_output": "ok",
+              "to_node": "execute"
             }
           ],
           "outputs": [

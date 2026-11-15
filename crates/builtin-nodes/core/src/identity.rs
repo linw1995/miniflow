@@ -1,6 +1,6 @@
 use mf_runtime::{
-    NodeBuildError, NodeExecutionError, NodeRegistration, NodeValue, OutputDerivation,
-    TypedConstructor, TypedTaskHandle, TypedTaskNode, ValueRef,
+    FlowBindingSource, FlowBindings, NodeBuildError, NodeExecutionError, NodeRegistration,
+    NodeValue, OutputDerivation, TypedConstructor, TypedTaskHandle, TypedTaskNode, ValueRef,
 };
 use serde_json::Value;
 
@@ -63,7 +63,18 @@ pub fn prepare_identity(
 }
 
 inventory::submit! {
-    NodeRegistration { kind: KIND, factory: mf_runtime::NodeFactory::Plain(|config| {
-        Ok(prepare_identity(config)?.prepared())
-    }) }
+    NodeRegistration {
+        kind: KIND,
+        factory: mf_runtime::NodeFactory::WithFlowBindings {
+            factory: &mf_runtime::NodeFactory::Plain(|config| {
+                Ok(prepare_identity(config)?.prepared())
+            }),
+            bindings: |_| FlowBindings {
+                outputs: std::collections::BTreeMap::from([(
+                    "value".into(), FlowBindingSource::Input("input".into()),
+                )]),
+                ..Default::default()
+            },
+        },
+    }
 }

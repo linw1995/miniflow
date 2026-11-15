@@ -891,6 +891,17 @@ fn generate_scope(
                         .inspect_err(|error| { #preparation_report })?
                 }
             }
+            Some(mf_runtime::ScopeInstruction::RouterWrite(write)) => {
+                let router_lit = LitStr::new(write.router.as_str(), Span::call_site());
+                let routes_json = serde_json::to_string(&write.routes).context(SerializeSnafu)?;
+                let routes_lit = LitStr::new(&routes_json, Span::call_site());
+                let enables_json = serde_json::to_string(&write.enables).context(SerializeSnafu)?;
+                let enables_lit = LitStr::new(&enables_json, Span::call_site());
+                quote! {
+                    mf_compiler::prepared_router_assign_from_json(#id_lit, #router_lit, #routes_lit, #enables_lit)
+                        .inspect_err(|error| { #preparation_report })?
+                }
+            }
             Some(mf_runtime::ScopeInstruction::Exit) => {
                 quote! { mf_runtime::prepared_loop_exit(#id_lit) }
             }
@@ -2208,6 +2219,7 @@ mod tests {
                     ("custom-input", "custom.source"),
                     ("custom-write", "custom.write"),
                     ("custom-exit", "custom.exit"),
+                    ("router-write", crate::ASSIGN_KIND),
                     ("ordinary", crate::ASSIGN_KIND),
                 ]
                 .into_iter()
@@ -2223,10 +2235,16 @@ mod tests {
                 order_edges: Vec::new(),
                 clusters: Vec::new(),
             },
-            execution_order: ["custom-input", "custom-write", "custom-exit", "ordinary"]
-                .into_iter()
-                .map(DefinitionId::from)
-                .collect(),
+            execution_order: [
+                "custom-input",
+                "custom-write",
+                "custom-exit",
+                "router-write",
+                "ordinary",
+            ]
+            .into_iter()
+            .map(DefinitionId::from)
+            .collect(),
             relations: mf_runtime::GraphRelations {
                 scope: Some(mf_runtime::ScopeRelations {
                     input: "custom-input".into(),
@@ -2235,6 +2253,14 @@ mod tests {
                     writes: BTreeMap::from([("custom-write".into(), "item".into())]),
                     exits: BTreeSet::from(["custom-exit".into()]),
                 }),
+                router_writes: BTreeMap::from([(
+                    "router-write".into(),
+                    mf_runtime::RouterWrite {
+                        router: "choose".into(),
+                        routes: vec!["first".into()],
+                        enables: vec!["first".into()],
+                    },
+                )]),
                 ..Default::default()
             },
             children: BTreeMap::new(),
@@ -2251,6 +2277,7 @@ mod tests {
         assert!(source.contains("prepared_scope_source_from_json"));
         assert!(source.contains("prepared_loop_assign_from_json"));
         assert!(source.contains("prepared_loop_exit"));
+        assert!(source.contains("prepared_router_assign_from_json"));
         assert_eq!(source.matches("instantiate_node_with_metadata").count(), 1);
         assert!(source.contains("\"ordinary\""));
         assert!(!source.contains("iteration_input_flow_node"));

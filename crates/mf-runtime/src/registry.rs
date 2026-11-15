@@ -165,13 +165,26 @@ impl NodeRegistry {
         self.iter()
             .map(|registration| {
                 let extractor: fn(&serde_json::Value) -> BTreeMap<String, serde_json::Value> =
-                    match registration.factory {
+                    match registration.factory.base() {
                         crate::NodeFactory::Subgraph {
                             flow_parameters, ..
                         } => flow_parameters,
-                        crate::NodeFactory::Plain(_) => |_| BTreeMap::new(),
+                        _ => |_| BTreeMap::new(),
                     };
                 (registration.kind.to_owned(), extractor)
+            })
+            .collect()
+    }
+
+    pub fn flow_bindings(
+        &self,
+    ) -> BTreeMap<String, fn(&serde_json::Value) -> crate::flow_bindings::FlowBindings> {
+        self.iter()
+            .filter_map(|registration| match registration.factory {
+                crate::NodeFactory::WithFlowBindings { bindings, .. } => {
+                    Some((registration.kind.to_owned(), bindings))
+                }
+                _ => None,
             })
             .collect()
     }
@@ -436,6 +449,54 @@ mod tests {
         };
         assert!(registration.accepts_subgraphs());
         assert!(registration.instantiate(Value::Null).is_ok());
+    }
+
+    #[test]
+    fn bound_subgraphs_validate_static_names_without_config_flow_discovery() {
+        static BOUND: NodeRegistration = NodeRegistration {
+            kind: "test.bound",
+            factory: crate::NodeFactory::BoundSubgraph {
+                bindings: |_| std::collections::BTreeSet::from(["child".into()]),
+                plain: first_factory,
+                prepared: |_, config, _| first_factory(config),
+            },
+        };
+        let registry = NodeRegistry::from_registrations([&BOUND]).unwrap();
+        let config = serde_json::json!({"routes":["child"],"child":{"path":"must-not-read.json"}});
+        assert!(BOUND.accepts_subgraphs());
+        assert_eq!(BOUND.subgraph_scope(), None);
+        assert!(BOUND.flow_parameters(&config).is_empty());
+        assert!(registry.flow_extractors()["test.bound"](&config).is_empty());
+        assert_eq!(
+            BOUND.compiled_bindings(&config),
+            std::collections::BTreeSet::from(["child".into()])
+        );
+        let body =
+            || crate::PreparedSubgraph::new(Vec::new(), Vec::new(), |_| Ok(Default::default()));
+        assert!(
+            BOUND
+                .instantiate_subgraphs("owner", config.clone(), BTreeMap::new())
+                .is_err()
+        );
+        assert!(
+            BOUND
+                .instantiate_subgraphs(
+                    "owner",
+                    config.clone(),
+                    BTreeMap::from([("other".into(), body())])
+                )
+                .is_err()
+        );
+        assert!(
+            BOUND
+                .instantiate_subgraphs(
+                    "owner",
+                    config.clone(),
+                    BTreeMap::from([("child".into(), body())])
+                )
+                .is_ok()
+        );
+        assert!(BOUND.instantiate(config).is_ok());
     }
 
     #[test]

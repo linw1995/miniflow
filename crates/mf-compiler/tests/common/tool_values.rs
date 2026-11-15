@@ -48,7 +48,7 @@ fn select_local_sources(value: &mut Value) {
 
 /// Assembles the two collections dispatch needs.
 ///
-/// `tools` holds the native capabilities the Router invokes; `tool_properties`
+/// `tools` holds the native capabilities bound to router children; `tool_properties`
 /// holds the plain JSON each body publishes about itself, joined with the
 /// caller-owned description and parameter documentation. Flow values never enter
 /// JSON or CEL.
@@ -98,6 +98,29 @@ fn caller(tools: BTreeMap<String, FlowTool>) -> Value {
         "version":"2026-10-28", "dependencies":local_dependencies(),
         "nodes":nodes,"outputs":[]
     })
+}
+
+pub fn without_specialized_routes(graph: &mf_runtime::CompiledGraph) -> mf_runtime::CompiledGraph {
+    let mut graph = graph.clone();
+    graph.children.retain(|_, children| {
+        !children
+            .values()
+            .all(|child| child.relations.static_binding)
+    });
+    for node in &mut graph.definition.nodes {
+        if node.config.get("routes").is_some() {
+            node.config["routes"] = json!([]);
+            node.config.as_object_mut().unwrap().remove("enables");
+        }
+        if let Some(children) = graph.children.get_mut(&node.id) {
+            for (binding, child) in children {
+                *child = without_specialized_routes(child);
+                node.set_node_flow(binding, child.definition.clone())
+                    .unwrap();
+            }
+        }
+    }
+    graph
 }
 
 pub fn configured_tools(tools: BTreeMap<String, FlowTool>) -> WorkflowDefinition {

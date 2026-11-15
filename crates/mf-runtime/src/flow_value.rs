@@ -250,9 +250,7 @@ impl FlowValue {
         let mut arguments = arguments;
         // Dynamic callers supply flat startup names; runtime invocation keeps one
         // canonical `node.port` key space for secrets, defaults, and observations.
-        arguments
-            .qualify_inputs(&self.0.inputs)
-            .map_err(|source| crate::WorkflowRunError::WorkflowInputs { source })?;
+        arguments.qualify_inputs(&self.0.inputs)?;
         self.0.inputs.mark_secrets(&mut arguments);
         if matches!(self.1, InvocationBoundary::External) {
             return context.run_external_flow(id, arguments, |child| {

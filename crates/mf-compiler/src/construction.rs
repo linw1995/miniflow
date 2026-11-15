@@ -935,10 +935,10 @@ fn validate_compiled_providers(
             definition_id: node.id.clone(),
             kind: node.kind.clone(),
         })?;
-        let fields = registration.flow_parameters(&node.config);
+        let fields = registration.compiled_bindings(&node.config);
         ensure!(
             fields
-                .keys()
+                .iter()
                 .eq(children.into_iter().flat_map(BTreeMap::keys)),
             InvalidDefinitionSnafu {
                 definition_id: node.id.clone(),
@@ -1052,10 +1052,10 @@ fn validated_node_config(
             definition_id: DefinitionId::from(definition_id),
         })?,
     };
-    let fields = registration.flow_parameters(&node.config);
+    let fields = registration.compiled_bindings(&node.config);
     ensure!(
         fields
-            .keys()
+            .iter()
             .map(String::as_str)
             .eq(expected.iter().copied()),
         InvalidDefinitionSnafu {
@@ -1124,6 +1124,21 @@ pub fn prepared_loop_source_from_json(
         definition_id: crate::LOOP_SOURCE_ID,
     })?;
     Ok(mf_runtime::prepared_loop_source_types(&types))
+}
+
+pub fn prepared_router_assign_from_json(
+    id: &str,
+    router: &str,
+    routes_json: &str,
+    enables_json: &str,
+) -> Result<FlowNode, WorkflowBuildError> {
+    let routes: Vec<String> = serde_json::from_str(routes_json)
+        .context(InvalidEmbeddedConfigSnafu { definition_id: id })?;
+    let enables: Vec<String> = serde_json::from_str(enables_json)
+        .context(InvalidEmbeddedConfigSnafu { definition_id: id })?;
+    Ok(mf_runtime::prepared_router_assign(
+        id, router, routes, enables,
+    ))
 }
 
 pub fn prepared_loop_assign_from_json(
@@ -1916,6 +1931,19 @@ pub fn prepare_stream(
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn router_assignment_constructor_parses_generated_bindings() {
+        let node = super::prepared_router_assign_from_json(
+            "write",
+            "choose",
+            r#"["first","second"]"#,
+            r#"["first"]"#,
+        )
+        .unwrap();
+        assert_eq!(node.definition_id.as_str(), "write");
+        assert_eq!(node.metadata.ports.inputs[0].name, "value");
+    }
+
     use super::*;
     use crate::NodeExecutionError;
     use mf_runtime::{FlowOutputs, Inputs, Outputs, RuntimeOptions, TaskNode};

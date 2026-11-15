@@ -943,8 +943,19 @@ B child beneath A. The runtime path still contains the enclosing call/loop/item 
 definition cursor switches to B for subsequent node and nested scope validation. Validation checks
 the callsite, owning workflow identity, and target body before accepting the scope.
 
-The TUI retains B's static definition at its producer and distinguishes its actual invoked target
-from the consumer's placement. Snapshots replace callable payloads with `"<Flow>"`, or `"[REDACTED]"`
-when secret. Business JSON serialization does not use this placeholder: it rejects executable values.
-The metadata reference cannot manufacture or select an executable; execution uses the native handle
-that arrived through the edge.
+For native dynamic Calls, the compiled description retains B's definition at its producer. The metadata
+reference cannot manufacture or select an executable; execution uses the native handle that arrived
+through the edge.
+
+Compiled tool dispatch retains the explicitly authored Router. The compiler follows caller-owned Flow
+constants and native-map wiring across Call boundaries, binding each static route as a Router child.
+It does not expand the Router into Call nodes or rewrite the authored branch topology.
+`body_paths_for_node` exposes every route body before execution through the normal description
+contract. The selected child uses Call's shared invocation implementation and ordinary Call scopes,
+including item correlation and nested-body detail. The TUI needs no runtime invocation cache, graph
+reconstruction, or producer-body projection. Disabled and unused branches remain visible as
+unexecuted bodies. Updating `%<router>.enables` never adds or removes static definitions; an optional
+runtime `flows` map is provenance only and cannot substitute an executor.
+
+Snapshots replace callable payloads with `"<Flow>"`, or `"[REDACTED]"` when secret. Business JSON
+serialization does not use this placeholder: it rejects executable values.

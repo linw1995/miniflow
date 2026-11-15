@@ -1350,12 +1350,13 @@ pub fn plan_resolved_definition(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
 ) -> Result<CompiledWorkflow, WorkflowCompileError> {
-    let resolved = resolve_inline_scopes(
+    let mut resolved = resolve_inline_scopes(
         definition,
         registry,
         crate::lowering::ScopeContext::resolved().with_subgraphs(registry.subgraph_scopes()),
         0,
     )?;
+    crate::flow_bindings::freeze(&mut resolved, &registry.flow_bindings())?;
     plan_resolved_workflow(&resolved)
 }
 
@@ -1459,10 +1460,12 @@ fn normalize_scope(
                 normalize_scope(body, &body.definition, order, depth + 1),
             )?;
             crate::calls::validate_child(node, &normalized)?;
-            node.set_node_flow(name, normalized.definition.clone())
-                .context(FlowParametersSnafu {
-                    definition_id: node.id.clone(),
-                })?;
+            if !body.relations.static_binding {
+                node.set_node_flow(name, normalized.definition.clone())
+                    .context(FlowParametersSnafu {
+                        definition_id: node.id.clone(),
+                    })?;
+            }
             flows.insert(name.clone(), normalized);
         }
         if !flows.is_empty() {
@@ -1562,6 +1565,7 @@ fn project_graph_definition_at(
     for node in &mut definition.nodes {
         let flows = crate::calls::compiled_node_flows(graph, node)?
             .into_iter()
+            .filter(|(_, child)| !child.relations.static_binding)
             .map(|(name, child)| Ok((name, project_graph_definition_at(child, depth + 1)?)))
             .collect::<Result<BTreeMap<_, _>, WorkflowCompileError>>()?;
         *node = crate::calls::node_with_actual_flows(
@@ -1898,7 +1902,13 @@ fn canonical_host_definition(
         .collect();
     let mut nodes: Vec<_> = order.iter().map(|id| (*nodes_by_id[id]).clone()).collect();
     for node in &mut nodes {
-        for (name, child) in shape.children.get(&node.id).into_iter().flatten() {
+        for (name, child) in shape
+            .children
+            .get(&node.id)
+            .into_iter()
+            .flatten()
+            .filter(|(_, child)| !child.relations.static_binding)
+        {
             let value = node
                 .config
                 .get(name)
@@ -1946,6 +1956,7 @@ pub fn validate_host_flow_binding(
     let relations = GraphRelations {
         host: graph.relations.host.clone(),
         key: graph.relations.key.clone(),
+        static_binding: graph.relations.static_binding,
         ..GraphRelations::default()
     };
     ensure!(
@@ -2430,9 +2441,9 @@ fn prepare_node_subgraphs(
         }
     );
     // Validate the actual frozen configuration before constructing any child.
-    let declared_flows = registration.flow_parameters(&node.config);
+    let declared_flows = registration.compiled_bindings(&node.config);
     ensure!(
-        declared_flows.keys().eq(flows.keys()),
+        declared_flows.iter().eq(flows.keys()),
         InvalidGraphSnafu {
             definition_id: node.id.clone(),
             message: "receiving Flow parameter declarations differ from the prepared binding set",
@@ -2541,6 +2552,14 @@ fn resolve_nodes_in_scope(
                     })?;
                     return Ok(mf_runtime::prepared_loop_assign(node.id.as_str(), target, value_type));
                 }
+                Some(ScopeInstruction::RouterWrite(write)) => {
+                    return Ok(mf_runtime::prepared_router_assign(
+                        node.id.as_str(),
+                        write.router.as_str(),
+                        write.routes.clone(),
+                        write.enables.clone(),
+                    ));
+                }
                 Some(ScopeInstruction::Exit) => {
                     return Ok(mf_runtime::prepared_loop_exit(node.id.as_str()));
                 }
@@ -2548,9 +2567,9 @@ fn resolve_nodes_in_scope(
             }
             let registration = registration_for(node, preparation.registry)?;
             let flows = graph.children.get(&node.id);
-            let declared_flows = registration.flow_parameters(&node.config);
+            let declared_flows = registration.compiled_bindings(&node.config);
             ensure!(
-                declared_flows.keys().eq(flows.into_iter().flat_map(BTreeMap::keys)),
+                declared_flows.iter().eq(flows.into_iter().flat_map(BTreeMap::keys)),
                 InvalidGraphSnafu {
                     definition_id: node.id.clone(),
                     message: "receiving Flow parameter declarations differ from the prepared binding set",
