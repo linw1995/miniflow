@@ -18,14 +18,34 @@ The optional [`mfn-llm`](../crates/builtin-nodes/llm/) package registers `builti
 a current assistant `message` output, and optional typed `delta` and `tool_call` streams. Select it explicitly to add its HTTP transport dependencies.
 Its factory validates configuration without credentials or I/O; execution uses optional shared future driving.
 The node also accepts function `tools` and explicit `tool_results`, both optional list inputs, and returns
-tool calls in its current assistant message and its `tool_calls` output. Explicit results follow `messages`
+tool calls in its current assistant message and its `tool_calls` output. The required `messages`
+output is the generated zero-or-one-message addition: it is empty for captured failures without a
+message, never an input echo or placeholder. Agent composition accumulates these additions and
+ordered tool results, including the terminal assistant, without conflating them with request history.
+The reusable `mfn-llm.agent` consumes complete `params.messages` and exports only its generated
+assistant/tool additions. `mf-chat` uses these shared values for independent display and model-context
+views; it does not define another message schema or infer records from internal model nodes.
+Explicit results follow `messages`
 in the provider request and must match pending assistant call IDs. Flows own history and persistence.
 `ToolDefinition`, `ToolCall`, `ToolResult`, and `ToolCallEvent` are exported by `mfn_llm`;
 `ChatMessage` derives `NodeEnum` with the `role` tag and has `System`, `User`, `Assistant`, and
 `ToolResult` variants. Only the assistant variant carries `tool_calls`; the tool-result variant
 requires `tool_call_id`. `ToolResult` converts into `ChatMessage::ToolResult` for caller-managed history.
 Individual messages use `InputValue::decode` and `OutputValue::encode`; enclosing node contracts
-continue to use `NodeValue`.
+continue to use `NodeValue`. `ChatMessage`, `ToolCall`, and `ToolResult` also implement Serde by
+calling those same native codecs, so persisted JSON preserves strict role-specific fields, required
+arguments, optional omission, and metadata. Use `mf_runtime::decode_unique_json` at bounded external
+JSON byte boundaries to reject duplicate keys before typed decoding. Serialization retains business
+values, including secret payloads, and rejects native Flow capabilities instead of redacting them
+or writing placeholders.
+
+`mfn_llm::validate_transcript` checks content, tool names, unique nonblank call IDs, and matching
+results without provider configuration, request construction, or I/O. `TranscriptMode::Complete`
+requires all calls to be resolved; `TranscriptMode::Partial` permits outstanding results only in the
+final call batch. Both modes accept an empty transcript, so callers can validate an empty context
+snapshot; model requests still require messages. `TranscriptError` reports the indexed failing path
+and remains a typed source of request-preparation errors. Callers own additional rules such as a
+final assistant answer and validate independent context/display views separately.
 See [terminal conversations](workflows.md#llm-configuration-and-conversation-values) and
 [tool calls](workflows.md#llm-tool-calls).
 

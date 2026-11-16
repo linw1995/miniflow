@@ -1,0 +1,350 @@
+{
+  "version": "2026-11-13",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../crates/builtin-nodes/core"
+    },
+    "code": {
+      "package": "mfn-code",
+      "path": "../crates/builtin-nodes/code"
+    },
+    "llm": {
+      "package": "mfn-llm",
+      "path": "../crates/builtin-nodes/llm"
+    }
+  },
+  "flows": {
+    "conversation": {
+      "path": "chat-calculator-flow.json"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "messages": {
+            "type": {
+              "list": "object"
+            }
+          },
+          "compact": {
+            "type": "bool",
+            "default": false,
+            "secret": false
+          },
+          "model": {
+            "type": "string",
+            "default": "your-model",
+            "secret": false
+          },
+          "base_url": {
+            "type": "string",
+            "default": "https://api.openai.com/v1",
+            "secret": false
+          },
+          "api_key": {
+            "type": "string",
+            "env": "OPENAI_API_KEY"
+          }
+        }
+      }
+    },
+    {
+      "id": "conversation",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "conversation"
+      },
+      "inputs": {
+        "params.messages": {
+          "from": {
+            "node": "params",
+            "port": "messages"
+          }
+        },
+        "params.model": {
+          "from": {
+            "node": "params",
+            "port": "model"
+          }
+        },
+        "params.base_url": {
+          "from": {
+            "node": "params",
+            "port": "base_url"
+          }
+        },
+        "params.api_key": {
+          "from": {
+            "node": "params",
+            "port": "api_key"
+          }
+        }
+      }
+    },
+    {
+      "id": "eligible",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "compact": "bool",
+          "result": "object"
+        },
+        "code": {
+          "value": "compact && result.status == 'succeeded'"
+        }
+      },
+      "inputs": {
+        "compact": {
+          "from": {
+            "node": "params",
+            "port": "compact"
+          }
+        },
+        "result": {
+          "from": {
+            "node": "conversation",
+            "port": "append"
+          }
+        }
+      }
+    },
+    {
+      "id": "route",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "compact",
+            "condition": {
+              "source": {
+                "output": "eligible.value",
+                "path": ""
+              },
+              "operator": "eq",
+              "value": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "normal",
+      "kind": "builtin.identity",
+      "config": {},
+      "inputs": {
+        "input": {
+          "from": {
+            "node": "conversation",
+            "port": "append"
+          }
+        }
+      }
+    },
+    {
+      "id": "summary_request",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "messages": {
+            "list": "object"
+          },
+          "result": "object"
+        },
+        "code": {
+          "value": "[dyn({'role':'system','content':'Summarize this conversation for continuation. Preserve essential instructions, decisions, and tool findings. Return only the summary.'})] + messages + result.messages + [dyn({'role':'user','content':'Create the continuation summary now. Include the completed tool findings without replaying tools.'})]"
+        }
+      },
+      "inputs": {
+        "messages": {
+          "from": {
+            "node": "params",
+            "port": "messages"
+          }
+        },
+        "result": {
+          "from": {
+            "node": "conversation",
+            "port": "append"
+          }
+        }
+      }
+    },
+    {
+      "id": "summary",
+      "kind": "builtin.llm",
+      "config": {
+        "model": {
+          "$ref": "params.model"
+        },
+        "base_url": {
+          "$ref": "params.base_url"
+        },
+        "api_key": {
+          "$ref": "params.api_key"
+        },
+        "capture_errors": true,
+        "attribution": {
+          "purpose": "compaction"
+        }
+      },
+      "inputs": {
+        "messages": {
+          "from": {
+            "node": "summary_request",
+            "port": "value"
+          }
+        }
+      }
+    },
+    {
+      "id": "summary_success",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "status": "string",
+          "outcome": "string",
+          "text": "string"
+        },
+        "code": {
+          "value": "status == 'succeeded' && outcome == 'completed' && text != ''"
+        }
+      },
+      "inputs": {
+        "status": {
+          "from": {
+            "node": "summary",
+            "port": "status"
+          }
+        },
+        "outcome": {
+          "from": {
+            "node": "summary",
+            "port": "outcome"
+          }
+        },
+        "text": {
+          "from": {
+            "node": "summary",
+            "port": "text"
+          }
+        }
+      }
+    },
+    {
+      "id": "replacement",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "result": "object",
+          "accepted": "bool",
+          "text": "string",
+          "usages": {
+            "list": "object"
+          }
+        },
+        "code": {
+          "value": "{'status':accepted ? 'succeeded' : 'failed','context_messages':accepted ? [dyn({'role':'system','content':text})] : [],'display_messages':result.messages,'usages':result.usages + usages,'error':accepted ? '' : (usages.size() > 0 && has(usages[0].error) ? usages[0].error : 'Context summarization did not produce a complete nonempty summary')}"
+        }
+      },
+      "inputs": {
+        "result": {
+          "from": {
+            "node": "conversation",
+            "port": "append"
+          }
+        },
+        "accepted": {
+          "from": {
+            "node": "summary_success",
+            "port": "value"
+          }
+        },
+        "text": {
+          "from": {
+            "node": "summary",
+            "port": "text"
+          }
+        },
+        "usages": {
+          "from": {
+            "node": "summary",
+            "port": "usages"
+          }
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "eligible",
+      "to_node": "route"
+    },
+    {
+      "from_node": "route",
+      "from_output": "else",
+      "to_node": "normal"
+    },
+    {
+      "from_node": "route",
+      "from_output": "compact",
+      "to_node": "summary_request"
+    }
+  ],
+  "clusters": [
+    {
+      "label": "Conversation",
+      "annotation": "Run the calculator Agent and retain its complete display additions and model facts.",
+      "nodes": [
+        "params",
+        "conversation"
+      ]
+    },
+    {
+      "label": "Result choice",
+      "annotation": "Return the original append result unless successful generation explicitly requests compaction.",
+      "nodes": [
+        "eligible",
+        "route",
+        "normal"
+      ]
+    },
+    {
+      "label": "Explicit compaction",
+      "annotation": "Report the summary call and return a complete snapshot separately from original display messages. No result merge is required.",
+      "nodes": [
+        "summary_request",
+        "summary",
+        "summary_success",
+        "replacement"
+      ]
+    }
+  ],
+  "outputs": [
+    {
+      "name": "append",
+      "node": "normal",
+      "port": "value",
+      "optional": true
+    },
+    {
+      "name": "replace_context",
+      "node": "replacement",
+      "port": "value",
+      "optional": true
+    },
+    {
+      "name": "answer",
+      "node": "conversation",
+      "port": "answer",
+      "optional": true
+    }
+  ]
+}

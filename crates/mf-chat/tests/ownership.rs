@@ -45,13 +45,7 @@ fn exact_cleanup_keeps_other_sessions_and_committed_success() {
     database
         .complete_turn(
             second.invocation.clone(),
-            ConversationResult {
-                usages: Vec::new(),
-                metadata: None,
-                text: "saved".into(),
-                finish_reason: None,
-                ..Default::default()
-            },
+            ConversationResult::assistant("saved"),
         )
         .unwrap();
     assert!(matches!(

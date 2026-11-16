@@ -665,17 +665,16 @@ fn composed_conversation_compiles_without_application_nodes() {
     let arguments = mf_runtime::resolve_workflow_inputs(
         &manifest.input_schema,
         &arguments(&json!({
-            "params.prompt":"Hello",
+            "params.messages":[{"role":"user","content":"Hello"}],
             "params.api_key":"synthetic-key",
             "params.context":{"title":{"source":"provisional","revision":0,"attempted":false,"enabled":true}}
         })),
         |_| None,
     ).unwrap();
     manifest.input_schema.validate(&arguments).unwrap();
-    assert_eq!(arguments.0["params.system"].as_str(), Some(""));
     assert_eq!(
-        serde_json::to_value(&arguments).unwrap()["params.history"],
-        json!([])
+        serde_json::to_value(&arguments).unwrap()["params.messages"],
+        json!([{"role":"user","content":"Hello"}])
     );
     instantiate_stream(&plan, &registry).unwrap();
 }

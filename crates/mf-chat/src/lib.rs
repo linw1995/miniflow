@@ -8,6 +8,7 @@ mod preview;
 #[macro_use]
 pub mod nodes;
 mod call_events;
+mod context;
 pub mod contract;
 mod schema;
 mod session;
@@ -18,15 +19,16 @@ mod usage;
 pub use call_events::{CallEventCollector, CallEventError};
 pub mod workflow;
 
+pub use context::ModelContext;
 pub use contract::{
     CallUsage, Completion, ConversationContext, ConversationInputs, ConversationResult,
-    TitleContext, UncommittedCompletion,
+    MessageUpdate, ModelContextRevision, ResultAlternatives, TitleContext, UncommittedCompletion,
 };
 pub use error::{BackendSnafu, CaptureSnafu, ChatError};
 pub use host::{ChatHost, ChatJob, HostConfig};
 pub use models::{Message, ModelCall, Session, Turn};
 pub use preview::{PreviewConsumer, PreviewEvent, PreviewReceiver};
-pub use session::{HistoryContext, MessagePage, MessageRecord, SessionPage};
+pub use session::{MessagePage, MessageRecord, SessionPage};
 pub use storage::ChatDatabase;
 pub use turn::{Invocation, ModelIdentity};
 pub use usage::CallPurpose;
@@ -35,6 +37,8 @@ pub use usage::{
     UsageGroup, UsageGrouping, UsageQuery, UsageStatistics, UsageSummary,
 };
 
-pub use mfn_llm::{MessageMetadata, TextDelta, UsageAttribution, UsageNode, UsageScope};
+pub use mfn_llm::{
+    ChatMessage, MessageMetadata, TextDelta, UsageAttribution, UsageNode, UsageScope,
+};
 
 pub use workflow::{ConversationBackend, WorkflowProfile};

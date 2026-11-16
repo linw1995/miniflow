@@ -202,8 +202,8 @@ fn answer_and_title_share_one_result_while_only_answer_is_streamed() {
         let executable = compile(root.path(), definition);
         let output = Command::new(&executable)
             .args([
-                "--params.prompt",
-                "Hello",
+                "--params.messages",
+                r#"[{"role":"user","content":"Hello"}]"#,
                 "--params.base_url",
                 &server.base_url,
             ])
@@ -238,9 +238,9 @@ fn answer_and_title_share_one_result_while_only_answer_is_streamed() {
         } else {
             serde_json::from_slice(&output.stdout).unwrap()
         };
-        assert_eq!(result["text"], "Live answer");
-        assert_eq!(result["title"], "Generated title");
-        assert_eq!(result["usages"].as_array().unwrap().len(), 2);
+        assert_eq!(result["append"]["messages"][0]["content"], "Live answer");
+        assert_eq!(result["append"]["title"], "Generated title");
+        assert_eq!(result["append"]["usages"].as_array().unwrap().len(), 2);
     }
     let requests = server.requests();
     assert_eq!(requests.len(), 4);

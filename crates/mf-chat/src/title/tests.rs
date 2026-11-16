@@ -18,7 +18,7 @@ fn begin(database: &ChatDatabase, session_id: &str) -> crate::nodes::TurnStarted
 
 fn result(title: &str) -> ConversationResult {
     ConversationResult {
-        text: "answer".into(),
+        update: ConversationResult::assistant("answer").update,
         title: Some(title.into()),
         usages: vec![crate::CallUsage {
             timing: None,

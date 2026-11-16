@@ -49,7 +49,7 @@ fn builtin_title_runs_once_and_persists_usage_with_the_answer() {
             .unwrap()
             .join()
             .unwrap();
-        assert_eq!(first.result.text, "First answer");
+        assert_eq!(first.result.final_text(), Some("First answer"));
         assert_eq!(
             first.result.title.as_deref(),
             (!failed).then_some("Generated title")
@@ -92,11 +92,15 @@ fn builtin_title_runs_once_and_persists_usage_with_the_answer() {
             .unwrap()
             .join()
             .unwrap();
-        assert_eq!(second.result.text, "Second answer");
+        assert_eq!(second.result.final_text(), Some("Second answer"));
         assert_eq!(second.result.usages.len(), 1);
         assert!(second.result.title.is_none());
         assert_eq!(
-            host.database().history(&session.id).unwrap().history.len(),
+            host.database()
+                .model_context(&session.id)
+                .unwrap()
+                .messages
+                .len(),
             4
         );
         assert_eq!(
@@ -126,6 +130,99 @@ fn builtin_title_runs_once_and_persists_usage_with_the_answer() {
         );
         host.close().unwrap();
     }
+}
+
+#[test]
+fn keyless_title_uses_display_answer_even_when_replacement_context_is_empty() {
+    let server = Server::start(vec![
+        Reply::text("Original display answer"),
+        Reply::text("Generated title"),
+    ]);
+    let mut definition: serde_json::Value =
+        serde_json::from_str(include_str!("../../../examples/chat-flow.json")).unwrap();
+    definition["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id":"snapshot","kind":"builtin.constant","config":{"value":[]}}));
+    let result = definition["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|node| node["id"] == "result")
+        .unwrap();
+    result["config"]["fields"]
+        .as_object_mut()
+        .unwrap()
+        .remove("messages");
+    result["config"]["fields"]["display_messages"] = json!({"list":"object"});
+    result["config"]["fields"]["context_messages"] = json!({"list":"object"});
+    let display_input = result["inputs"]
+        .as_object_mut()
+        .unwrap()
+        .remove("messages")
+        .unwrap();
+    result["inputs"]["display_messages"] = display_input;
+    result["inputs"]["context_messages"] = json!({"from":{"node":"snapshot","port":"value"}});
+    definition["outputs"][0]["name"] = "replace_context".into();
+    let profile = WorkflowProfile::new(
+        "default",
+        serde_json::from_value(definition).unwrap(),
+        WorkflowArguments::try_from(json!({
+            "params.model":"keyless-model","params.base_url":server.base_url,"params.api_key":""
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let host = ChatHost::open(root.path().join("chat.sqlite"), HostConfig::new(profile)).unwrap();
+    let id = host
+        .database()
+        .create_session("default", None, None)
+        .unwrap()
+        .id;
+    let completion = host
+        .submit(&id, "Original user question")
+        .unwrap()
+        .join()
+        .unwrap();
+    assert_eq!(completion.result.title.as_deref(), Some("Generated title"));
+    assert_eq!(completion.result.usages.len(), 2);
+    assert!(
+        host.database()
+            .model_context(&id)
+            .unwrap()
+            .messages
+            .is_empty()
+    );
+    assert_eq!(
+        host.database()
+            .messages(&id, 50, None)
+            .unwrap()
+            .messages
+            .len(),
+        2
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    let title = messages(&requests[1]);
+    assert!(
+        title[1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("user: Original user question")
+    );
+    assert!(
+        title[1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("assistant: Original display answer")
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| !request.headers.to_lowercase().contains("authorization:"))
+    );
+    host.close().unwrap();
 }
 
 #[test]
@@ -180,9 +277,9 @@ fn cancelling_the_builtin_title_does_not_commit_an_intermediate_answer() {
     );
     assert!(
         host.database()
-            .history(&session.id)
+            .model_context(&session.id)
             .unwrap()
-            .history
+            .messages
             .is_empty()
     );
     host.close().unwrap();
@@ -220,22 +317,26 @@ fn conversation_finish_retains_the_title_for_save_only_retry() {
     );
     assert!(
         host.database()
-            .history(&session.id)
+            .model_context(&session.id)
             .unwrap()
-            .history
+            .messages
             .is_empty()
     );
     connection
         .batch_execute("DROP TRIGGER reject_title;")
         .unwrap();
     let saved = host.retry_completion(*pending).unwrap();
-    assert_eq!(saved.result.text, "Answer");
+    assert_eq!(saved.result.final_text(), Some("Answer"));
     assert_eq!(
         host.database().session(&session.id).unwrap().title,
         "Generated title"
     );
     assert_eq!(
-        host.database().history(&session.id).unwrap().history.len(),
+        host.database()
+            .model_context(&session.id)
+            .unwrap()
+            .messages
+            .len(),
         2
     );
     assert_eq!(server.requests().len(), 2);

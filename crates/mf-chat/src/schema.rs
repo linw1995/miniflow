@@ -12,6 +12,7 @@ diesel::table! {
         next_sequence -> BigInt,
         created_at -> BigInt,
         updated_at -> BigInt,
+        context_revision -> BigInt,
     }
 }
 
@@ -25,6 +26,8 @@ diesel::table! {
         created_at -> BigInt,
         finished_at -> Nullable<BigInt>,
         error -> Nullable<Text>,
+        context_revision -> BigInt,
+        result_alternatives -> Nullable<Text>,
     }
 }
 
@@ -34,10 +37,8 @@ diesel::table! {
         session_id -> Text,
         turn_id -> Text,
         sequence -> BigInt,
-        role -> Text,
-        content -> Text,
+        payload -> Text,
         created_at -> BigInt,
-        metadata -> Nullable<Text>,
     }
 }
 
@@ -63,6 +64,18 @@ diesel::table! {
         usages -> Nullable<Text>,
         metadata -> Nullable<Text>,
         result_title -> Nullable<Text>,
+        terminal_result -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    context_revisions (session_id, revision) {
+        session_id -> Text,
+        revision -> BigInt,
+        parent_revision -> Nullable<BigInt>,
+        turn_id -> Nullable<Text>,
+        operation -> Text,
+        snapshot -> Nullable<Text>,
     }
 }
 
@@ -71,7 +84,13 @@ diesel::joinable!(messages -> sessions (session_id));
 diesel::joinable!(messages -> turns (turn_id));
 diesel::joinable!(model_calls -> sessions (session_id));
 diesel::joinable!(model_calls -> turns (turn_id));
-diesel::allow_tables_to_appear_in_same_query!(sessions, turns, messages, model_calls);
+diesel::allow_tables_to_appear_in_same_query!(
+    sessions,
+    turns,
+    messages,
+    model_calls,
+    context_revisions
+);
 
 diesel::table! {
     usage_facts (id) {

@@ -9,17 +9,13 @@ fn chat_manifest() -> mf_runtime::WorkflowManifest {
         "version":"2026-10-03", "dependencies":{},
         "nodes":[{"id":"start","kind":"builtin.llm","config":{"model":"fixture-model"}}],
         "outputs":[
-            {"name":"status","node":"start","port":"status"},
-            {"name":"text","node":"start","port":"text"},
-            {"name":"usages","node":"start","port":"usages"}
+            {"name":"append","node":"start","port":"append"}
         ]
     }))
     .unwrap();
     manifest.graph.execution_order = vec!["start".into()];
     manifest.input_schema = serde_json::from_value(json!({"inputs":{"start":{
-        "prompt":{"type":"string","required":true},
-        "system":{"type":"string","required":false},
-        "history":{"type":mf_runtime::ValueType::List(Box::new(mf_runtime::ValueType::Object)),"required":false}
+        "messages":{"type":mf_runtime::ValueType::List(Box::new(mf_runtime::ValueType::Object)),"required":true}
     }},"stdin":{}})).unwrap();
     manifest
 }
@@ -209,7 +205,16 @@ fn captured_results_keep_the_lane_reserved_until_save_or_discard_without_resendi
         let count = root.path().join("calls");
         prepared.options.database_path = state.join("chat.sqlite");
         let path = prepared.options.database_path.clone();
-        fs::write(prepared.runner.executable().with_extension("script"), format!("#!/bin/sh\nprintf x >> '{}'\nsleep 0.3\nprintf '%s' '{{\"status\":\"succeeded\",\"text\":\"retained answer\",\"metadata\":{{\"source\":\"fixture\"}},\"usages\":[{{\"call_id\":\"actual-call\",\"model\":\"fixture\"}}]}}'\n", count.display())).unwrap();
+        let result = json!({"append":{"status":"succeeded","messages":[{"role":"assistant","content":"retained answer","metadata":{"source":"fixture"}}],"usages":[{"call_id":"actual-call","model":"fixture"}]}});
+        fs::write(
+            prepared.runner.executable().with_extension("script"),
+            format!(
+                "#!/bin/sh\nprintf x >> '{}'\nsleep 0.3\nprintf '%s' '{}'\n",
+                count.display(),
+                result
+            ),
+        )
+        .unwrap();
         let controller = ChatController::open(prepared).unwrap();
         controller
             .send(ChatCommand::Submit {
@@ -268,8 +273,8 @@ fn captured_results_keep_the_lane_reserved_until_save_or_discard_without_resendi
             if abandon { 1 } else { 2 }
         );
         if !abandon {
-            let history = database.history(&invocation.session_id).unwrap();
-            let message = history.history[1].clone().encode().unwrap();
+            let history = database.model_context(&invocation.session_id).unwrap();
+            let message = history.messages[1].clone().encode().unwrap();
             assert_eq!(message["metadata"], json!({"source":"fixture"}));
         }
     }
@@ -345,7 +350,7 @@ fn history_pages_start_at_the_tail_and_do_not_overlap_across_failed_turns() {
     let ChatEvent::Loaded { page, .. } = next(&controller) else {
         panic!("expected tail")
     };
-    assert_eq!(page.messages.last().unwrap().message.content, "prompt-59");
+    assert_eq!(page.messages.last().unwrap().message.content(), "prompt-59");
     let first = page.messages[0].message.sequence;
     assert!(first > 0);
     controller
@@ -454,7 +459,7 @@ fn live_launch(directory: &Path, mode: &str) -> (ChatLaunch, std::path::PathBuf)
     let gate = directory.join("release");
     let records = json!([
         {"answer":{"text":"provisional","model_call_id":"model-call"}},
-        {"status":"succeeded","text":"canonical","usages":[]}
+        {"append":{"status":"succeeded","messages":[{"role":"assistant","content":"canonical"}],"usages":[]}}
     ]);
     // Exceed preview and queue limits without turning delivery checks into a throughput benchmark.
     let flood_chunk_bytes = 2048;
@@ -469,6 +474,13 @@ if mode == 'flood':
     records = [records[0].copy() for _ in range({flood_records})] + records[-1:]
 if mode == 'empty':
     records = records[-1:]
+replacement = {{'replace_context': {{'status': 'succeeded', 'context_messages': [], 'display_messages': [{{'role': 'assistant', 'content': 'Other answer'}}], 'usages': []}}}}
+if mode == 'duplicate': records += records[-1:]
+if mode == 'malformed_delta': records.append({{'answer': None, **records[-1]}})
+if mode == 'undeclared': records.append(replacement)
+if mode == 'both': records[-1].update(replacement)
+if mode == 'null': records.append({{'append': None}})
+if mode == 'malformed': records.append({{'append': {{'status': 'succeeded', 'messages': None, 'usages': []}}}})
 split = 0 if mode == 'empty' else 1
 for record in records[:split]:
     print(json.dumps(record), flush=True)
@@ -526,7 +538,7 @@ fn executable_live_previews_arrive_before_authoritative_settlement() {
             let CompletionState::Committed(completion) = resolution.unwrap().state else {
                 panic!("expected saved final")
             };
-            assert_eq!(completion.result.text, "canonical");
+            assert_eq!(completion.result.final_text(), Some("canonical"));
             break;
         }
     }
@@ -556,7 +568,7 @@ fn native_failures_keep_complete_replies_for_save_only_and_never_save_prefixes()
                 match resolution.state {
                     CompletionState::Uncommitted(pending) => {
                         assert_eq!(mode, "late");
-                        assert_eq!(pending.completion.result.text, "canonical");
+                        assert_eq!(pending.completion.result.final_text(), Some("canonical"));
                         assert!(capture_error.is_some());
                         controller.send(ChatCommand::Save).unwrap();
                         loop {
@@ -571,7 +583,7 @@ fn native_failures_keep_complete_replies_for_save_only_and_never_save_prefixes()
                     }
                     CompletionState::Committed(completion) => {
                         assert_eq!(mode, "empty");
-                        assert_eq!(completion.result.text, "canonical");
+                        assert_eq!(completion.result.final_text(), Some("canonical"));
                     }
                     CompletionState::Finished(turn) => {
                         assert_eq!(mode, "prefix");
@@ -600,6 +612,79 @@ fn native_failures_keep_complete_replies_for_save_only_and_never_save_prefixes()
                 break;
             }
         }
+        controller.close().unwrap();
+    }
+}
+
+#[test]
+fn invalid_terminal_records_invalidate_native_recovery_instead_of_saving_first() {
+    for mode in [
+        "duplicate",
+        "undeclared",
+        "both",
+        "null",
+        "malformed",
+        "malformed_delta",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let (launch, _) = live_launch(root.path(), mode);
+        let controller = ChatController::open(launch).unwrap();
+        controller
+            .send(ChatCommand::Submit {
+                session_id: None,
+                prompt: "Question".into(),
+            })
+            .unwrap();
+        let mut invocation = None;
+        loop {
+            match next(&controller) {
+                ChatEvent::Submitted {
+                    invocation: started,
+                    ..
+                } => invocation = Some(started),
+                ChatEvent::Finished { resolution, .. } => {
+                    let resolution = resolution.unwrap();
+                    assert!(
+                        matches!(resolution.state, CompletionState::Finished(ref turn) if turn.state == "failed"),
+                        "{mode}: {:?}",
+                        resolution.state
+                    );
+                    assert!(!resolution.diagnostics.is_empty());
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let invocation = invocation.unwrap();
+        assert!(
+            !controller.busy(),
+            "{mode}: ambiguous results cannot be retained"
+        );
+        assert_eq!(
+            controller
+                ._database
+                .messages(&invocation.session_id, 50, None)
+                .unwrap()
+                .messages
+                .len(),
+            1
+        );
+        assert_eq!(
+            controller
+                ._database
+                .model_context(&invocation.session_id)
+                .unwrap()
+                .revision,
+            0
+        );
+        assert!(
+            controller
+                ._database
+                .call(&invocation.call_id)
+                .unwrap()
+                .terminal_result
+                .is_none()
+        );
         controller.close().unwrap();
     }
 }

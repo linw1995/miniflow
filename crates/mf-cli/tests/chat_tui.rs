@@ -82,7 +82,7 @@ fn supplied_title_workflow_runs_inside_the_application_lifecycle() {
                     let CompletionState::Committed(completion) = resolution.state else {
                         panic!("expected committed conversation")
                     };
-                    assert_eq!(completion.result.text, expected);
+                    assert_eq!(completion.result.final_text(), Some(expected));
                     assert_eq!(completion.result.usages.len(), calls);
                     for usage in &completion.result.usages {
                         let timing = usage
@@ -117,7 +117,7 @@ fn supplied_title_workflow_runs_inside_the_application_lifecycle() {
     let database = ChatDatabase::open(path).unwrap();
     let id = session_id.unwrap();
     assert_eq!(database.session(&id).unwrap().title, "Generated title");
-    assert_eq!(database.history(&id).unwrap().history.len(), 4);
+    assert_eq!(database.model_context(&id).unwrap().messages.len(), 4);
     assert_eq!(
         database
             .usage(mf_chat::UsageQuery {
@@ -151,6 +151,33 @@ fn compiled(root: &Path, server: &Server, example: &str) -> std::path::PathBuf {
     if let Some(code) = value["dependencies"].get_mut("code") {
         code["path"] = crates.join("builtin-nodes/code").to_str().unwrap().into();
     }
+    if example == "chat-context-flow.json" {
+        let examples = crates.parent().unwrap().join("examples");
+        let mut conversation: serde_json::Value =
+            serde_json::from_slice(&fs::read(examples.join("chat-calculator-flow.json")).unwrap())
+                .unwrap();
+        conversation["dependencies"] = value["dependencies"].clone();
+        fs::write(
+            root.join("chat-calculator-flow.json"),
+            serde_json::to_vec(&conversation).unwrap(),
+        )
+        .unwrap();
+        fs::create_dir(root.join("agent-calculator")).unwrap();
+        for entry in fs::read_dir(examples.join("agent-calculator")).unwrap() {
+            let source = entry.unwrap().path();
+            let mut tool: serde_json::Value =
+                serde_json::from_slice(&fs::read(&source).unwrap()).unwrap();
+            for (alias, dependency) in tool["dependencies"].as_object_mut().unwrap() {
+                dependency["path"] = value["dependencies"][alias]["path"].clone();
+            }
+            fs::write(
+                root.join("agent-calculator")
+                    .join(source.file_name().unwrap()),
+                serde_json::to_vec(&tool).unwrap(),
+            )
+            .unwrap();
+        }
+    }
     let parameters = &mut value["nodes"][0]["config"]["parameters"];
     parameters["model"]["default"] = "wrong-default-model".into();
     parameters["base_url"]["default"] = server.base_url.clone().into();
@@ -173,7 +200,200 @@ fn compiled(root: &Path, server: &Server, example: &str) -> std::path::PathBuf {
     .unwrap();
     fs::remove_file(&definition).unwrap();
     fs::remove_dir_all(build).unwrap();
+    if example == "chat-context-flow.json" {
+        fs::remove_file(root.join("chat-calculator-flow.json")).unwrap();
+        fs::remove_dir_all(root.join("agent-calculator")).unwrap();
+    }
     binary
+}
+
+fn calculator_call(id: &str, operation: &str, left: f64, right: f64) -> Reply {
+    let mut reply = Reply::stream_text("");
+    let arguments =
+        serde_json::json!({"operation":operation,"left":left,"right":right}).to_string();
+    let chunk = serde_json::json!({"id":"response","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":id,"type":"function","function":{"name":"calculator","arguments":arguments}}]},"finish_reason":null}]});
+    let finish = serde_json::json!({"id":"response","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}});
+    reply.body = format!("data: {chunk}\n\ndata: {finish}\n\ndata: [DONE]\n\n");
+    reply
+}
+
+fn next_completion(
+    controller: &mf_tui::chat::ChatController,
+) -> mf_chat::contract::ReconciledCompletion {
+    use mf_tui::chat::ChatEvent;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "context conversation did not complete"
+        );
+        match controller.try_event() {
+            Some(ChatEvent::Finished {
+                resolution,
+                status,
+                capture_error,
+                ..
+            }) => {
+                assert!(status.is_none_or(|status| status.success()));
+                assert!(capture_error.is_none(), "{capture_error:?}");
+                return resolution.unwrap();
+            }
+            Some(ChatEvent::Error { source, .. }) => {
+                panic!("context conversation failed: {source}")
+            }
+            _ => thread::sleep(Duration::from_millis(10)),
+        }
+    }
+}
+
+#[test]
+fn compiled_context_replacement_keeps_tool_audit_and_save_only_retries_after_reopen() {
+    use mf_chat::{MessageUpdate, contract::CompletionState};
+    use mf_tui::{
+        chat::{ChatCommand, ChatController, ChatLaunch, ChatOptions},
+        run::RunOptions,
+    };
+    use serde_json::json;
+    let server = Server::start(vec![
+        calculator_call("first", "add", 2.0, 3.0),
+        Reply::stream_text("First answer: 5"),
+        calculator_call("second", "multiply", 3.0, 4.0),
+        Reply::stream_text("Second answer: 12"),
+        Reply::text("Summary only: 5 and 12"),
+        Reply::stream_text("Third answer"),
+    ]);
+    let root = tempfile::tempdir().unwrap();
+    let binary = compiled(root.path(), &server, "chat-context-flow.json");
+    let path = root.path().join("chat.sqlite");
+    let database = ChatDatabase::open(&path).unwrap();
+    let id = database
+        .create_session(
+            "context",
+            Some("Original instructions".into()),
+            Some("Manual name".into()),
+        )
+        .unwrap()
+        .id;
+    drop(database);
+    let mut original = vec![];
+    for (turn, compact) in [false, true, false].into_iter().enumerate() {
+        let launch = ChatLaunch::prepare(&binary, ChatOptions {
+            database_path: path.clone(), profile: "context".into(),
+            run: RunOptions { inputs: Some(json!({"params.model":"fixture-model","params.api_key":"synthetic-key","params.compact":compact}).to_string()), ..Default::default() },
+        }).unwrap();
+        let controller = ChatController::open(launch).unwrap();
+        if compact {
+            fail_save(&path, true);
+        }
+        controller
+            .send(ChatCommand::Submit {
+                session_id: Some(id.clone()),
+                prompt: format!("Question {turn}"),
+            })
+            .unwrap();
+        let mut resolution = next_completion(&controller);
+        if compact {
+            let CompletionState::Uncommitted(pending) = resolution.state else {
+                panic!("expected complete replacement candidate")
+            };
+            assert!(matches!(
+                pending.completion.result.update,
+                MessageUpdate::ReplaceContext { .. }
+            ));
+            assert_eq!(pending.completion.result.display_messages().len(), 3);
+            assert_eq!(pending.completion.result.usages.len(), 3);
+            assert_eq!(server.requests().len(), 5);
+            fail_save(&path, false);
+            controller.send(ChatCommand::Save).unwrap();
+            resolution = next_completion(&controller);
+            assert_eq!(
+                server.requests().len(),
+                5,
+                "save-only retry must not call a model or tool"
+            );
+        }
+        let CompletionState::Committed(completion) = resolution.state else {
+            panic!("expected committed context result")
+        };
+        assert_eq!(
+            matches!(
+                completion.result.update,
+                MessageUpdate::ReplaceContext { .. }
+            ),
+            compact
+        );
+        assert_eq!(
+            completion.result.usages.len(),
+            if compact {
+                3
+            } else if turn == 0 {
+                2
+            } else {
+                1
+            }
+        );
+        controller.close().unwrap();
+        let database = ChatDatabase::open(&path).unwrap();
+        let page = database.messages(&id, 50, None).unwrap();
+        if turn == 1 {
+            assert_eq!(
+                database.model_context(&id).unwrap().messages,
+                vec![mf_chat::ChatMessage::System {
+                    content: "Summary only: 5 and 12".into(),
+                    metadata: None
+                }]
+            );
+            original = page
+                .messages
+                .iter()
+                .map(|record| record.message.clone())
+                .collect();
+            assert_eq!(original.len(), 8);
+        } else if turn == 2 {
+            assert_eq!(
+                page.messages[..8]
+                    .iter()
+                    .map(|record| &record.message)
+                    .collect::<Vec<_>>(),
+                original.iter().collect::<Vec<_>>()
+            );
+            assert_eq!(
+                page.messages
+                    .iter()
+                    .filter(|record| record.message.role() == "tool")
+                    .count(),
+                2
+            );
+            assert_eq!(
+                database
+                    .usage(Default::default())
+                    .unwrap()
+                    .overall
+                    .attempted_calls,
+                6
+            );
+        }
+    }
+    let requests = server.requests();
+    assert_eq!(requests.len(), 6);
+    assert_eq!(
+        messages(&requests[5]),
+        vec![
+            json!({"role":"system","content":"Summary only: 5 and 12"}),
+            json!({"role":"user","content":"Question 2"})
+        ]
+    );
+    let summary = requests[4].body["messages"].as_array().unwrap();
+    assert!(
+        summary
+            .iter()
+            .any(|message| message["tool_call_id"] == "first" && message["content"] == "5.0")
+    );
+    assert!(
+        summary
+            .iter()
+            .any(|message| message["tool_call_id"] == "second" && message["content"] == "12.0")
+    );
 }
 
 fn fail_save(path: &Path, enabled: bool) {
@@ -181,7 +401,7 @@ fn fail_save(path: &Path, enabled: bool) {
     connection
         .batch_execute("PRAGMA busy_timeout=5000;")
         .unwrap();
-    connection.batch_execute(if enabled { "CREATE TRIGGER fail_reply BEFORE INSERT ON messages WHEN NEW.role='assistant' BEGIN SELECT RAISE(ABORT, 'synthetic save failure'); END;" } else { "DROP TRIGGER fail_reply;" }).unwrap();
+    connection.batch_execute(if enabled { "CREATE TRIGGER fail_reply BEFORE INSERT ON messages WHEN json_extract(NEW.payload, '$.role')='assistant' BEGIN SELECT RAISE(ABORT, 'synthetic save failure'); END;" } else { "DROP TRIGGER fail_reply;" }).unwrap();
 }
 
 // Drive the terminal with parent-owned storage and child model calls.
@@ -261,7 +481,9 @@ fn interact(binary: &Path, database: &Path, restart: bool) -> String {
                             fail_save(database, true);
                             Some(b"retain this reply\x1b\r")
                         }
-                        6 if text.contains("Assistant [not saved]") => {
+                        6 if text.contains("[not saved]")
+                            && text.contains("Model context update pending") =>
+                        {
                             fail_save(database, false);
                             Some(b"\x10\x1b[B\x1b[B\r")
                         }
@@ -391,7 +613,7 @@ fn executable_chat_preserves_sessions_retry_save_usage_and_source_free_restart()
     assert_eq!(
         transcript
             .iter()
-            .filter(|m| m.message.role == "assistant")
+            .filter(|m| m.message.role() == "assistant")
             .count(),
         4
     );
@@ -401,7 +623,7 @@ fn executable_chat_preserves_sessions_retry_save_usage_and_source_free_restart()
         .unwrap();
     let retry = transcript
         .iter()
-        .find(|m| m.message.role == "assistant" && m.message.content == "retried reply")
+        .find(|m| m.message.role() == "assistant" && m.message.content() == "retried reply")
         .unwrap();
     assert_eq!(
         database
@@ -428,14 +650,19 @@ fn executable_chat_preserves_sessions_retry_save_usage_and_source_free_restart()
     assert_eq!(usage.overall.performance.elapsed.reported_calls, 8);
     let retained = transcript
         .iter()
-        .find(|message| message.message.content == "retained reply")
+        .find(|message| message.message.content() == "retained reply")
         .unwrap();
-    assert!(retained.usages.as_ref().unwrap().iter().all(|usage| {
+    let mut retained_facts = transcript
+        .iter()
+        .filter(|record| record.message.turn_id == retained.message.turn_id)
+        .filter_map(|record| record.usages.as_ref());
+    assert!(retained_facts.next().unwrap().iter().all(|usage| {
         usage
             .timing
             .as_ref()
             .is_some_and(|timing| timing.is_valid() && timing.elapsed_us > 0)
     }));
+    assert!(retained_facts.next().is_none());
     assert!(
         sessions
             .iter()
@@ -697,19 +924,22 @@ fn loop_conversations() {
                                 server.requests().len()
                             )
                         };
-                        assert_eq!(completion.result.text, "final answer");
+                        assert_eq!(completion.result.final_text(), Some("final answer"));
                         assert_eq!(completion.result.usages.len(), 3);
                         assert_eq!(completion.result.title.as_deref(), Some("Loop title"));
                         assert_eq!(
-                            serde_json::to_value(completion.result.metadata).unwrap(),
+                            serde_json::to_value(
+                                completion.result.display_messages().last().unwrap()
+                            )
+                            .unwrap()["metadata"],
                             serde_json::json!({"strategy":"iterative"})
                         );
                     } else {
-                        let CompletionState::Finished(turn) = resolution.state else {
-                            panic!("expected failed loop result")
+                        let CompletionState::Committed(completion) = resolution.state else {
+                            panic!("expected a durable failed loop result")
                         };
-                        assert_eq!(turn.state, "failed");
-                        assert!(turn.error.unwrap().contains("HTTP 400"));
+                        assert_eq!(completion.result.status, "failed");
+                        assert!(completion.result.error.unwrap().contains("HTTP 400"));
                     }
                     break;
                 }
@@ -723,10 +953,10 @@ fn loop_conversations() {
     controller.close().unwrap();
     let database = ChatDatabase::open(path).unwrap();
     let history = database
-        .history(session_id.as_ref().unwrap())
+        .model_context(session_id.as_ref().unwrap())
         .unwrap()
-        .history;
-    assert_eq!(history.len(), 2);
+        .messages;
+    assert_eq!(history.len(), 3);
     assert!(matches!(&history[1],
         mfn_llm::ChatMessage::Assistant { metadata: Some(metadata), .. }
             if serde_json::to_value(metadata).unwrap() == serde_json::json!({"strategy":"iterative"})

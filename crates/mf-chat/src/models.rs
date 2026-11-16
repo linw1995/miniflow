@@ -28,6 +28,7 @@ pub struct Session {
     pub next_sequence: i64,
     pub created_at: i64,
     pub updated_at: i64,
+    pub context_revision: i64,
 }
 
 #[derive(
@@ -53,6 +54,10 @@ pub struct Turn {
     pub created_at: i64,
     pub finished_at: Option<i64>,
     pub error: Option<String>,
+    pub context_revision: i64,
+    #[diesel(deserialize_as = crate::storage::StoredJson<crate::ResultAlternatives>)]
+    #[diesel(serialize_as = crate::storage::StoredJson<crate::ResultAlternatives>)]
+    pub result_alternatives: Option<crate::ResultAlternatives>,
 }
 
 #[derive(
@@ -74,13 +79,39 @@ pub struct Message {
     pub session_id: String,
     pub turn_id: String,
     pub sequence: i64,
-    pub role: String,
-    pub content: String,
+    #[diesel(deserialize_as = crate::storage::StoredMessage)]
+    #[diesel(serialize_as = crate::storage::StoredMessage)]
+    pub payload: mfn_llm::ChatMessage,
     pub created_at: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[diesel(deserialize_as = crate::storage::StoredJson<mfn_llm::MessageMetadata>)]
-    #[diesel(serialize_as = crate::storage::StoredJson<mfn_llm::MessageMetadata>)]
-    pub metadata: Option<mfn_llm::MessageMetadata>,
+}
+
+impl Message {
+    pub fn role(&self) -> &'static str {
+        match &self.payload {
+            mfn_llm::ChatMessage::System { .. } => "system",
+            mfn_llm::ChatMessage::User { .. } => "user",
+            mfn_llm::ChatMessage::Assistant { .. } => "assistant",
+            mfn_llm::ChatMessage::ToolResult { .. } => "tool",
+        }
+    }
+
+    pub fn content(&self) -> &str {
+        match &self.payload {
+            mfn_llm::ChatMessage::System { content, .. }
+            | mfn_llm::ChatMessage::User { content, .. }
+            | mfn_llm::ChatMessage::Assistant { content, .. }
+            | mfn_llm::ChatMessage::ToolResult { content, .. } => content,
+        }
+    }
+
+    pub fn metadata(&self) -> Option<&mfn_llm::MessageMetadata> {
+        match &self.payload {
+            mfn_llm::ChatMessage::System { metadata, .. }
+            | mfn_llm::ChatMessage::User { metadata, .. }
+            | mfn_llm::ChatMessage::Assistant { metadata, .. }
+            | mfn_llm::ChatMessage::ToolResult { metadata, .. } => metadata.as_ref(),
+        }
+    }
 }
 
 #[derive(
@@ -125,4 +156,7 @@ pub struct ModelCall {
     #[diesel(serialize_as = crate::storage::StoredJson<mfn_llm::MessageMetadata>)]
     pub metadata: Option<mfn_llm::MessageMetadata>,
     pub result_title: Option<String>,
+    #[diesel(deserialize_as = crate::storage::StoredJson<crate::ConversationResult>)]
+    #[diesel(serialize_as = crate::storage::StoredJson<crate::ConversationResult>)]
+    pub terminal_result: Option<crate::ConversationResult>,
 }

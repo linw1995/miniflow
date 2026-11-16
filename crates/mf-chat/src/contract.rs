@@ -1,5 +1,10 @@
 //! Application context and results shared by embedded and executable conversation workflows.
 
+pub mod transcript;
+pub use transcript::{
+    ConversationResult, MessageUpdate, ResultAlternatives, TerminalResultDecoder,
+};
+
 use crate::{ChatError, Invocation, error::*, turn};
 use mf_runtime::{NodeValue, NodeValues, WorkflowArguments, WorkflowInputSchema, WorkflowManifest};
 use serde::{Deserialize, Serialize};
@@ -15,16 +20,40 @@ pub struct TitleContext {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, NodeValue)]
+pub struct ModelContextRevision {
+    pub revision: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, NodeValue)]
 pub struct ConversationContext {
     pub title: TitleContext,
+    pub model_context: ModelContextRevision,
 }
 
 #[derive(Clone, Debug, NodeValue)]
 pub struct ConversationInputs {
-    pub prompt: String,
-    pub system: Option<String>,
-    pub history: Option<Vec<mfn_llm::ChatMessage>>,
+    pub messages: Vec<mfn_llm::ChatMessage>,
     pub context: Option<ConversationContext>,
+}
+
+impl ConversationInputs {
+    pub fn prompt(&self) -> Result<&str, ChatError> {
+        match self.messages.last() {
+            Some(mfn_llm::ChatMessage::User { content, .. }) if !content.is_empty() => Ok(content),
+            _ => InvalidSnafu {
+                field: "messages",
+                reason: "must end with the current nonempty user message",
+            }
+            .fail(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), ChatError> {
+        self.prompt()?;
+        mfn_llm::validate_transcript(&self.messages, mfn_llm::TranscriptMode::Complete)
+            .context(TranscriptSnafu { view: "request" })?;
+        Ok(())
+    }
 }
 
 /// Application-owned call facts enriched with event-derived performance measurements.
@@ -71,94 +100,9 @@ impl From<mfn_llm::CallUsage> for CallUsage {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, NodeValue)]
-pub struct ConversationResult {
-    pub status: String,
-    #[value(default)]
-    #[serde(default)]
-    pub text: String,
-    pub usages: Vec<CallUsage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<mfn_llm::MessageMetadata>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub finish_reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, NodeValue)]
 pub struct Completion {
     pub invocation: Invocation,
     pub result: ConversationResult,
-}
-
-impl Default for ConversationResult {
-    fn default() -> Self {
-        Self {
-            status: "succeeded".into(),
-            text: String::new(),
-            usages: Vec::new(),
-            metadata: None,
-            finish_reason: None,
-            error: None,
-            title: None,
-        }
-    }
-}
-
-impl ConversationResult {
-    pub fn from_json(bytes: &[u8]) -> Result<Self, ChatError> {
-        ensure!(
-            bytes.len() <= recovery::MAX_RECOVERY_BYTES,
-            RecoveryTooLargeSnafu {
-                limit: recovery::MAX_RECOVERY_BYTES
-            }
-        );
-        let values = mf_runtime::decode_unique_json(bytes).context(JsonSnafu)?;
-        let result = Self::decode(values)?;
-        Ok(result)
-    }
-
-    pub fn decode(mut values: NodeValues) -> Result<Self, ChatError> {
-        let ports = Self::ports();
-        values.retain(|name, _| ports.iter().any(|port| port.name == *name));
-        let result = Self::from_values(values)?;
-        result.validate()?;
-        Ok(result)
-    }
-
-    pub fn validate(&self) -> Result<(), ChatError> {
-        turn::validate_usages(&self.usages)?;
-        match self.status.as_str() {
-            "succeeded" => ensure!(
-                !self.text.is_empty() && self.error.as_ref().is_none_or(String::is_empty),
-                InvalidSnafu {
-                    field: "workflow result",
-                    reason: "success requires nonempty text and no error"
-                }
-            ),
-            "failed" => ensure!(
-                self.title.is_none()
-                    && self
-                        .error
-                        .as_ref()
-                        .is_some_and(|error| !error.trim().is_empty()),
-                InvalidSnafu {
-                    field: "workflow result",
-                    reason: "failure requires an error summary and cannot update the title"
-                }
-            ),
-            _ => {
-                return InvalidSnafu {
-                    field: "workflow result",
-                    reason: "requires succeeded or failed status",
-                }
-                .fail();
-            }
-        }
-        Ok(())
-    }
 }
 
 mod recovery;
@@ -173,7 +117,7 @@ pub struct ChatContract {
     pub answer_stream: bool,
     pub streaming: bool,
     inputs: BTreeMap<String, String>,
-    owns_title: bool,
+    pub alternatives: ResultAlternatives,
 }
 
 impl ChatContract {
@@ -224,12 +168,12 @@ impl ChatContract {
                 candidates.len() <= 1 && (!expected.required || candidates.len() == 1),
                 InvalidSnafu {
                     field: "chat inputs",
-                    reason: "requires an unambiguous prompt and optional system, history, and context inputs"
+                    reason: "requires an unambiguous messages input and optional context; update and recompile the chatflow"
                 }
             );
             if let Some((node, port)) = candidates.first() {
                 ensure!(
-                    port.value_type == expected.value_type,
+                    port.value_type == expected.value_type && (!expected.required || port.required),
                     InvalidSnafu {
                         field: "chat inputs",
                         reason: "conversation input types must match the chat contract"
@@ -246,20 +190,31 @@ impl ChatContract {
                 );
             }
         }
-        for name in ["status", "text", "usages"] {
-            ensure!(
-                manifest
-                    .graph
-                    .definition
-                    .outputs
-                    .iter()
-                    .any(|output| output.name == name && (name == "text" || !output.optional)),
-                InvalidSnafu {
-                    field: "chat outputs",
-                    reason: "requires status and usages outputs, with text for successful results"
+        let outputs = &manifest.graph.definition.outputs;
+        let append = outputs.iter().find(|output| output.name == "append");
+        let replace = outputs
+            .iter()
+            .find(|output| output.name == "replace_context");
+        let alternatives =
+            match (append, replace) {
+                (Some(append), Some(replace)) => {
+                    ensure!(
+                        append.optional && replace.optional,
+                        InvalidSnafu {
+                            field: "chat outputs",
+                            reason: "both result alternatives must be optional selections"
+                        }
+                    );
+                    ResultAlternatives::Both
                 }
-            );
-        }
+                (Some(_), None) => ResultAlternatives::Append,
+                (None, Some(_)) => ResultAlternatives::ReplaceContext,
+                (None, None) => return InvalidSnafu {
+                    field: "chat outputs",
+                    reason: "requires append or replace_context; update and recompile the chatflow",
+                }
+                .fail(),
+            };
         let streaming = manifest.description()?.is_streaming();
         let answer_stream = manifest
             .graph
@@ -279,23 +234,15 @@ impl ChatContract {
             answer_stream,
             streaming,
             inputs,
-            owns_title: manifest
-                .graph
-                .definition
-                .outputs
-                .iter()
-                .any(|output| output.name == "title"),
+            alternatives,
         })
     }
 
-    /// Reuses resolved provider inputs only when the workflow leaves titles to the host.
+    /// Reuses unambiguous public provider inputs; returned title facts decide actual composition.
     pub fn builtin_title_parameters(
         &self,
         parameters: &WorkflowArguments,
     ) -> Option<WorkflowArguments> {
-        if self.owns_title {
-            return None;
-        }
         let mut arguments = WorkflowArguments::default();
         for name in ["model", "base_url", "api_key"] {
             let mut candidates = self
@@ -308,7 +255,8 @@ impl ChatContract {
                 return None;
             }
             let value = parameters.0.get(&mf_runtime::output_id(node, name))?;
-            if value.as_str()?.trim().is_empty() {
+            let text = value.as_str()?;
+            if text.trim().is_empty() && !(name == "api_key" && text.is_empty()) {
                 return None;
             }
             arguments
@@ -320,12 +268,11 @@ impl ChatContract {
 
     pub fn arguments(
         &self,
-        mut input: crate::ConversationInputs,
+        input: crate::ConversationInputs,
         parameters: &WorkflowArguments,
     ) -> Result<WorkflowArguments, ChatError> {
         self.parameters.validate(parameters)?;
-        input.system.get_or_insert_default();
-        input.history.get_or_insert_default();
+        input.validate()?;
         let mut arguments = parameters.clone();
         for (name, value) in input.into_values()? {
             if let Some(target) = self.inputs.get(&name) {
@@ -383,12 +330,17 @@ impl crate::ChatDatabase {
                 id: &invocation.call_id
             }
         );
+        if call.terminal_result.is_some() {
+            let result = turn::saved_result(&call)?;
+            ensure!(result.status == turn.state, ConflictSnafu { id: &call.id });
+            return Ok(InvocationState::Committed(Completion {
+                invocation: invocation.clone(),
+                result,
+            }));
+        }
         match turn.state.as_str() {
             "running" => Ok(InvocationState::Running),
-            "succeeded" => Ok(InvocationState::Committed(Completion {
-                invocation: invocation.clone(),
-                result: turn::saved_result(&call)?,
-            })),
+            "succeeded" => Ok(InvocationState::Finished(turn)),
             "failed" | "cancelled" | "interrupted" => Ok(InvocationState::Finished(turn)),
             _ => ConflictSnafu {
                 id: &invocation.call_id,
@@ -445,14 +397,14 @@ pub fn decode_answer_delta(
 /// Validates native workflow output records against the conversation protocol.
 pub struct ConversationOutputDecoder {
     answer: bool,
-    result: Option<ConversationResult>,
+    terminal: TerminalResultDecoder,
 }
 
 impl ConversationOutputDecoder {
     pub fn new(contract: &ChatContract) -> Self {
         Self {
             answer: contract.answer_stream,
-            result: None,
+            terminal: TerminalResultDecoder::new(contract.alternatives),
         }
     }
 
@@ -460,8 +412,10 @@ impl ConversationOutputDecoder {
         &mut self,
         mut values: NodeValues,
     ) -> Result<Option<mfn_llm::TextDelta>, ChatError> {
-        let delta = values
-            .remove("answer")
+        let answer = values.remove("answer");
+        // Count terminal alternatives even when a mixed record carries an invalid preview.
+        self.terminal.accept(values)?;
+        let delta = answer
             .map(|value| -> Result<_, ChatError> {
                 ensure!(
                     self.answer,
@@ -481,29 +435,15 @@ impl ConversationOutputDecoder {
                 Ok(delta)
             })
             .transpose()?;
-        let ports = ConversationResult::ports();
-        values.retain(|name, _| ports.iter().any(|port| port.name == name.as_str()));
-        if !values.is_empty() {
-            ensure!(
-                self.result.is_none(),
-                InvalidSnafu {
-                    field: "workflow result",
-                    reason: "must be produced only once"
-                }
-            );
-            self.result = Some(ConversationResult::decode(values)?);
-        }
         Ok(delta)
     }
 
     pub fn result(&self) -> Option<&ConversationResult> {
-        self.result.as_ref()
+        self.terminal.result()
     }
 
     pub fn finish(self) -> Result<ConversationResult, ChatError> {
-        self.result.context(CaptureSnafu {
-            message: "workflow ended without a terminal conversation result",
-        })
+        self.terminal.finish()
     }
 }
 
@@ -514,7 +454,7 @@ mod output_tests {
 
     fn decoder(answer: bool) -> ConversationOutputDecoder {
         ConversationOutputDecoder::new(&ChatContract {
-            owns_title: false,
+            alternatives: ResultAlternatives::Both,
             parameters: Default::default(),
             answer_stream: answer,
             streaming: true,
@@ -531,7 +471,7 @@ mod output_tests {
         let mut decoder = decoder(true);
         decoder
             .accept(values(
-                json!({"status":"succeeded","text":"canonical","usages":[]}),
+                json!({"append":{"status":"succeeded","messages":[{"role":"assistant","content":"canonical"}],"usages":[]}}),
             ))
             .unwrap();
         assert!(
@@ -547,7 +487,7 @@ mod output_tests {
             .unwrap()
             .unwrap();
         assert_eq!(delta.text, "prefix");
-        assert_eq!(decoder.finish().unwrap().text, "canonical");
+        assert_eq!(decoder.finish().unwrap().final_text(), Some("canonical"));
     }
 
     #[test]
@@ -575,18 +515,37 @@ mod output_tests {
     }
 
     #[test]
+    fn invalid_previews_cannot_hide_a_conflicting_terminal_result() {
+        let first = json!({"append":{"status":"succeeded","messages":[{"role":"assistant","content":"canonical"}],"usages":[]}});
+        for preview in [
+            json!(null),
+            json!("invalid"),
+            json!({"text":"","model_call_id":"model"}),
+        ] {
+            let mut decoder = decoder(true);
+            decoder.accept(values(first.clone())).unwrap();
+            let mut second = first.clone();
+            second["answer"] = preview;
+            assert!(decoder.accept(values(second)).is_err());
+            assert!(decoder.result().is_none());
+            assert!(decoder.finish().is_err());
+        }
+    }
+
+    #[test]
     fn native_conversation_records_require_one_complete_terminal_result() {
         assert!(matches!(
             decoder(true).finish(),
             Err(ChatError::Capture { .. })
         ));
         let mut decoder = decoder(true);
-        let result = json!({"status":"succeeded","text":"canonical","usages":[]});
+        let result = json!({"append":{"status":"succeeded","messages":[{"role":"assistant","content":"canonical"}],"usages":[]}});
         decoder.accept(values(result.clone())).unwrap();
         assert!(matches!(
             decoder.accept(values(result)),
             Err(ChatError::Invalid { .. })
         ));
-        assert_eq!(decoder.result().unwrap().text, "canonical");
+        assert!(decoder.result().is_none());
+        assert!(decoder.finish().is_err());
     }
 }

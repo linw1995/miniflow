@@ -1,37 +1,10 @@
-//! Bounded model replies retained by the owning application for save-only retry.
+//! Bounded terminal results retained by the owning application for save-only retry.
 
 use super::{InvocationState, TurnExit};
-use crate::{ChatDatabase, ChatError, Completion, Invocation, error::*, turn};
+use crate::{ChatDatabase, ChatError, Completion, Invocation, error::*};
 use snafu::{IntoError, ensure};
 
 pub const MAX_RECOVERY_BYTES: usize = 16 * 1024 * 1024;
-
-enum Delivered {
-    Succeeded(Completion),
-    Failed {
-        error: String,
-        usages: Vec<crate::CallUsage>,
-    },
-}
-
-fn delivered(
-    mut result: crate::ConversationResult,
-    invocation: &Invocation,
-) -> Result<Delivered, ChatError> {
-    result.validate()?;
-    if result.status == "succeeded" {
-        result.error = None;
-        Ok(Delivered::Succeeded(Completion {
-            invocation: invocation.clone(),
-            result,
-        }))
-    } else {
-        Ok(Delivered::Failed {
-            error: result.error.expect("validated failure has an error"),
-            usages: result.usages,
-        })
-    }
-}
 
 #[derive(Clone, Debug)]
 pub struct UncommittedCompletion {
@@ -42,6 +15,7 @@ pub struct UncommittedCompletion {
 #[derive(Clone, Debug)]
 pub enum CompletionState {
     NotBegun,
+    /// The complete terminal result is durable, whether its business status succeeded or failed.
     Committed(Completion),
     Uncommitted(UncommittedCompletion),
     Finished(crate::Turn),
@@ -81,22 +55,21 @@ impl ChatDatabase {
     ) -> Result<ReconciledCompletion, ChatError> {
         let stored = self.inspect_invocation(invocation)?;
         let mut diagnostics = Vec::new();
-        let delivered =
-            result.map(|result| result.and_then(|result| delivered(result, invocation)));
+        let delivered = result.map(|result| {
+            result.and_then(|result| {
+                self.validate_completion(invocation, &result)?;
+                Ok(Completion {
+                    invocation: invocation.clone(),
+                    result,
+                })
+            })
+        });
         if let InvocationState::Committed(saved) = stored {
             match delivered {
-                Some(Ok(Delivered::Succeeded(completion))) if completion != saved => diagnostics
-                    .push(
-                        InvalidSnafu {
-                            field: "model reply",
-                            reason: "disagrees with the committed reply",
-                        }
-                        .build(),
-                    ),
-                Some(Ok(Delivered::Failed { .. })) => diagnostics.push(
+                Some(Ok(completion)) if completion != saved => diagnostics.push(
                     InvalidSnafu {
                         field: "workflow result",
-                        reason: "failure arrived after committed success",
+                        reason: "disagrees with the committed terminal result",
                     }
                     .build(),
                 ),
@@ -109,9 +82,7 @@ impl ChatDatabase {
             });
         }
         match delivered {
-            Some(Ok(Delivered::Succeeded(completion)))
-                if matches!(stored, InvocationState::Running) =>
-            {
+            Some(Ok(completion)) if matches!(stored, InvocationState::Running) => {
                 return Ok(ReconciledCompletion {
                     state: CompletionState::Uncommitted(UncommittedCompletion {
                         database_path: self.path().to_owned(),
@@ -120,45 +91,17 @@ impl ChatDatabase {
                     diagnostics,
                 });
             }
-            Some(Ok(Delivered::Failed { error, usages }))
-                if matches!(stored, InvocationState::Running) =>
-            {
-                self.fail_turn_with_usages(invocation.clone(), &error, usages)?;
-            }
-            Some(Ok(Delivered::Failed { error, usages })) => {
-                if let InvocationState::Finished(turn) = &stored
-                    && turn.state == "failed"
-                {
-                    let call = self.call(&invocation.call_id)?;
-                    if call.usages.as_deref() == Some(usages.as_slice())
-                        && call.error.as_deref() == Some(turn::failure_summary(&error))
-                    {
-                        return Ok(ReconciledCompletion {
-                            state: CompletionState::Finished(turn.clone()),
-                            diagnostics,
-                        });
-                    }
-                }
-                diagnostics.push(
-                    InvalidSnafu {
-                        field: "workflow result",
-                        reason: "disagrees with the finished execution",
-                    }
-                    .build(),
-                );
-            }
             Some(Err(source)) => diagnostics.push(source),
             Some(Ok(_)) => diagnostics.push(
                 InvalidSnafu {
-                    field: "model reply",
-                    reason: "requires the parent's admitted invocation",
+                    field: "workflow result",
+                    reason: "requires the parent's admitted running invocation",
                 }
                 .build(),
             ),
             None => {}
         }
-        let finalized = self.finalize_invocation(invocation.clone(), outcome, summary)?;
-        let state = match finalized {
+        let state = match self.finalize_invocation(invocation.clone(), outcome, summary)? {
             InvocationState::NotBegun => CompletionState::NotBegun,
             InvocationState::Committed(completion) => CompletionState::Committed(completion),
             InvocationState::Finished(turn) => CompletionState::Finished(turn),
@@ -207,7 +150,7 @@ impl ChatDatabase {
         self.finalize_invocation(
             pending.completion.invocation.clone(),
             TurnExit::Cancelled,
-            "uncommitted reply abandoned",
+            "uncommitted terminal result abandoned",
         )
     }
 }

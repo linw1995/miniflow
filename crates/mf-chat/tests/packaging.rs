@@ -185,12 +185,18 @@ fn conversation_example_hosts_a_supplied_workflow() {
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
     assert_eq!(completions.len(), 2);
-    assert_eq!(completions[0]["result"]["text"], "first answer");
-    assert_eq!(completions[1]["result"]["text"], "second answer");
+    assert_eq!(
+        completions[0]["result"]["append"]["messages"][0]["content"],
+        "first answer"
+    );
+    assert_eq!(
+        completions[1]["result"]["append"]["messages"][0]["content"],
+        "second answer"
+    );
     let database = mf_chat::ChatDatabase::open(path).unwrap();
     let id = completions[0]["invocation"]["session_id"].as_str().unwrap();
     assert_eq!(database.session(id).unwrap().title, "Generated title");
-    assert_eq!(database.history(id).unwrap().history.len(), 4);
+    assert_eq!(database.model_context(id).unwrap().messages.len(), 5);
     assert_eq!(
         database
             .usage(Default::default())

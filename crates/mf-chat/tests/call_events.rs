@@ -33,7 +33,7 @@ impl ConversationBackend for Backend {
         assert!(usage.timing.is_none());
         usage.started_at = Some(0);
         Ok(ConversationResult {
-            text: "answer".into(),
+            update: ConversationResult::assistant("answer").update,
             usages: vec![usage],
             ..Default::default()
         })
@@ -68,7 +68,7 @@ fn observer_free_hosts_persist_source_event_differences_and_reload_history() {
     let database = ChatDatabase::open(&path).unwrap();
     let messages = database.messages(&session.id, 10, None).unwrap();
     assert_eq!(
-        messages.messages[1].usages.as_ref().unwrap()[0].timing,
+        messages.messages[0].usages.as_ref().unwrap()[0].timing,
         Some(expected)
     );
     assert_eq!(

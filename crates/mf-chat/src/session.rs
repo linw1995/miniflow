@@ -94,23 +94,6 @@ pub struct MessagePageOutputs {
     pub page: MessagePage,
 }
 
-#[derive(Clone, Debug, NodeValue)]
-pub struct HistoryInputs {
-    pub database_path: String,
-    pub session_id: String,
-}
-
-#[derive(Clone, Debug, NodeValue)]
-pub struct HistoryContext {
-    pub history: Vec<mfn_llm::ChatMessage>,
-    pub system: Option<String>,
-}
-
-#[derive(Clone, Debug, NodeValue)]
-pub struct HistoryOutputs {
-    pub context: HistoryContext,
-}
-
 pub fn now() -> Result<i64, ChatError> {
     let elapsed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -139,48 +122,6 @@ pub fn load(connection: &mut SqliteConnection, id: &str) -> Result<Session, Chat
             operation: "load chat session",
         })?
         .context(SessionMissingSnafu { id })
-}
-
-pub fn history(connection: &mut SqliteConnection, id: &str) -> Result<HistoryContext, ChatError> {
-    let session = load(connection, id)?;
-    let mut result = Vec::new();
-    let mut after = -1i64;
-    loop {
-        let page: Vec<Message> = messages::table
-            .inner_join(turns::table)
-            .filter(messages::session_id.eq(id))
-            .filter(turns::state.eq("succeeded"))
-            .filter(messages::sequence.gt(after))
-            .order(messages::sequence.asc())
-            .limit(100)
-            .select(Message::as_select())
-            .load(connection)
-            .context(DatabaseSnafu {
-                operation: "load successful chat history",
-            })?;
-        if page.is_empty() {
-            break;
-        }
-        for message in page {
-            let mut values = mf_runtime::NodeValues::from([
-                ("role".into(), message.role.into()),
-                ("content".into(), message.content.into()),
-            ]);
-            mf_runtime::encode_output(&mut values, "metadata", message.metadata)?;
-            let history_message = mf_runtime::decode_required_input(
-                "history",
-                Some(mf_runtime::ValueRef::object(
-                    values.into_iter().map(|(key, value)| (key.into(), value)),
-                )),
-            )?;
-            after = message.sequence;
-            result.push(history_message);
-        }
-    }
-    Ok(HistoryContext {
-        history: result,
-        system: session.system,
-    })
 }
 
 fn create(input: CreateSessionInputs) -> Result<SessionOutputs, ChatError> {
@@ -230,12 +171,16 @@ fn create_with_source(
         next_sequence: 0,
         created_at: timestamp,
         updated_at: timestamp,
+        context_revision: 0,
     };
     let mut connection = storage::connect(Path::new(&input.database_path))?;
-    diesel::insert_into(sessions::table)
-        .values(&session)
-        .execute(&mut connection)?;
-    Ok(SessionOutputs { session })
+    connection.immediate_transaction(|connection| {
+        diesel::insert_into(sessions::table)
+            .values(&session)
+            .execute(connection)?;
+        crate::context::seed(connection, &session)?;
+        Ok(SessionOutputs { session })
+    })
 }
 
 fn get(input: SessionInputs) -> Result<SessionOutputs, ChatError> {
@@ -362,16 +307,11 @@ fn message_page(input: MessagesInputs) -> Result<MessagePageOutputs, ChatError> 
         } else {
             None
         };
-        let turn_ids: Vec<_> = rows
-            .iter()
-            .filter(|(message, _)| message.role == "assistant")
-            .map(|(message, _)| &message.turn_id)
-            .collect();
+        let turn_ids: Vec<_> = rows.iter().map(|(message, _)| &message.turn_id).collect();
         let calls = model_calls::table
             .filter(model_calls::session_id.eq(&input.session_id))
             .filter(model_calls::turn_id.eq_any(turn_ids))
             .filter(model_calls::purpose.eq("conversation"))
-            .filter(model_calls::disposition.eq("committed"))
             .select((model_calls::turn_id, model_calls::usages))
             .load::<(Option<String>, storage::StoredJson<Vec<crate::CallUsage>>)>(connection)
             .context(DatabaseSnafu {
@@ -386,11 +326,7 @@ fn message_page(input: MessagesInputs) -> Result<MessagePageOutputs, ChatError> 
                 messages: rows
                     .into_iter()
                     .map(|(message, turn_state)| MessageRecord {
-                        usages: if message.role == "assistant" {
-                            usages.remove(&message.turn_id).flatten()
-                        } else {
-                            None
-                        },
+                        usages: usages.remove(&message.turn_id).flatten(),
                         message,
                         turn_state,
                     })
@@ -398,13 +334,6 @@ fn message_page(input: MessagesInputs) -> Result<MessagePageOutputs, ChatError> 
                 next_after,
             },
         })
-    })
-}
-
-fn load_history(input: HistoryInputs) -> Result<HistoryOutputs, ChatError> {
-    let mut connection = storage::connect(Path::new(&input.database_path))?;
-    Ok(HistoryOutputs {
-        context: connection.transaction(|connection| history(connection, &input.session_id))?,
     })
 }
 
@@ -456,13 +385,6 @@ register_operation!(
     MessagesInputs,
     MessagePageOutputs,
     message_page
-);
-register_operation!(
-    "mf_chat.history.load",
-    LoadHistory,
-    HistoryInputs,
-    HistoryOutputs,
-    load_history
 );
 
 impl ChatDatabase {
@@ -593,18 +515,6 @@ impl ChatDatabase {
         })?;
         Ok(result.page)
     }
-
-    pub fn history(&self, id: &str) -> Result<HistoryContext, ChatError> {
-        let result: HistoryOutputs = load_history(HistoryInputs {
-            database_path: self
-                .path()
-                .to_str()
-                .context(PathSnafu { path: self.path() })?
-                .into(),
-            session_id: id.into(),
-        })?;
-        Ok(result.context)
-    }
 }
 
 #[cfg(test)]
@@ -625,7 +535,7 @@ mod tests {
             "mf_chat.session.archive",
             "mf_chat.session.restore",
             "mf_chat.messages.list",
-            "mf_chat.history.load",
+            "mf_chat.context.load",
         ] {
             registry
                 .get(kind)
@@ -690,31 +600,48 @@ mod tests {
             .create_session("default", Some("instructions".into()), None)
             .unwrap();
         let other = database.create_session("default", None, None).unwrap();
-        let mut connection = storage::connect(database.path()).unwrap();
-        connection
-            .batch_execute(&format!(
-                "INSERT INTO turns VALUES ('good', '{}', NULL, 0, 'succeeded', 1, 2, NULL);
-             INSERT INTO turns VALUES ('bad', '{}', NULL, 2, 'failed', 3, 4, 'failed');
-             INSERT INTO messages (id, session_id, turn_id, sequence, role, content, created_at) VALUES ('u', '{}', 'good', 0, 'user', 'question', 1);
-             INSERT INTO messages (id, session_id, turn_id, sequence, role, content, created_at) VALUES ('a', '{}', 'good', 1, 'assistant', replace(hex(zeroblob(1048576)), '00', 'x'), 2);
-             INSERT INTO messages (id, session_id, turn_id, sequence, role, content, created_at) VALUES ('b', '{}', 'bad', 2, 'user', 'failed question', 3);",
-                session.id, session.id, session.id, session.id, session.id
-            ))
+        let identity = crate::ModelIdentity {
+            profile: "default".into(),
+            model: None,
+        };
+        let good = database
+            .begin_turn(&session.id, "question", identity.clone(), None)
             .unwrap();
-        let context = database.history(&session.id).unwrap();
-        assert_eq!(context.history.len(), 2);
+        database
+            .complete_turn(
+                good.invocation,
+                crate::ConversationResult::assistant("x".repeat(1048576)),
+            )
+            .unwrap();
+        let bad = database
+            .begin_turn(&session.id, "failed question", identity, None)
+            .unwrap();
+        database
+            .fail_turn(bad.invocation, "failed", "failed")
+            .unwrap();
+        let context = database.model_context(&session.id).unwrap();
+        assert_eq!(context.messages.len(), 3);
+        assert_eq!(context.revision, 1);
         assert!(
-            matches!(&context.history[0], mfn_llm::ChatMessage::User { content, .. } if content == "question")
+            matches!(&context.messages[0], mfn_llm::ChatMessage::System { content, .. } if content == "instructions")
         );
         assert!(
-            matches!(&context.history[1], mfn_llm::ChatMessage::Assistant { content, .. } if content.len() == 1048576)
+            matches!(&context.messages[1], mfn_llm::ChatMessage::User { content, .. } if content == "question")
         );
-        assert_eq!(context.system.as_deref(), Some("instructions"));
-        assert!(database.history(&other.id).unwrap().history.is_empty());
+        assert!(
+            matches!(&context.messages[2], mfn_llm::ChatMessage::Assistant { content, .. } if content.len() == 1048576)
+        );
+        assert!(
+            database
+                .model_context(&other.id)
+                .unwrap()
+                .messages
+                .is_empty()
+        );
         let page = database.messages(&session.id, 2, None).unwrap();
         let tail = database.messages(&session.id, 2, page.next_after).unwrap();
         assert_eq!(tail.messages[0].turn_state, "failed");
-        assert_eq!(tail.messages[0].message.content, "failed question");
+        assert_eq!(tail.messages[0].message.content(), "failed question");
     }
 
     #[test]
@@ -756,7 +683,7 @@ mod tests {
             Err(ChatError::Invalid { field: "title", .. })
         ));
         assert_eq!(database.session(&owner.id).unwrap().title, owner.title);
-        let default = HistoryInputs::from_values(mf_runtime::Inputs::from([
+        let default = crate::nodes::ModelContextInputs::from_values(mf_runtime::Inputs::from([
             (
                 "database_path".into(),
                 database.path().to_str().unwrap().into(),
@@ -764,6 +691,12 @@ mod tests {
             ("session_id".into(), owner.id.clone().into()),
         ]))
         .unwrap();
-        assert!(load_history(default).unwrap().context.history.is_empty());
+        assert!(
+            database
+                .model_context(&default.session_id)
+                .unwrap()
+                .messages
+                .is_empty()
+        );
     }
 }

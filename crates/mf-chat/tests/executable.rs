@@ -115,7 +115,22 @@ fn builtin_titles_skip_missing_ambiguous_wrongly_typed_or_empty_provider_inputs(
 }
 
 #[test]
-fn declared_title_output_reserves_title_generation_for_the_user_flow() {
+fn builtin_titles_accept_an_explicit_empty_key_without_losing_its_secret_marker() {
+    let contract = ChatContract::from_manifest(&manifest()).unwrap();
+    let parameters = mf_runtime::resolve_workflow_inputs(
+        &contract.parameters,
+        &WorkflowArguments::try_from(json!({"params.model":"keyless-model","params.api_key":""}))
+            .unwrap(),
+        |_| None,
+    )
+    .unwrap();
+    let title = contract.builtin_title_parameters(&parameters).unwrap();
+    assert_eq!(title.0["params.api_key"].as_str(), Some(""));
+    assert!(title.0["params.api_key"].is_secret());
+}
+
+#[test]
+fn a_separate_title_output_is_not_an_ownership_hint() {
     let mut manifest = manifest();
     manifest.graph.definition.outputs.push(
         serde_json::from_value(json!({
@@ -127,8 +142,58 @@ fn declared_title_output_reserves_title_generation_for_the_user_flow() {
     assert!(
         contract
             .builtin_title_parameters(&parameters(&contract))
-            .is_none()
+            .is_some()
     );
+}
+
+#[test]
+fn invalid_request_suffixes_fail_before_argument_binding() {
+    for messages in [
+        json!([]),
+        json!([{"role":"system","content":"No current user"}]),
+        json!([{"role":"assistant","content":"Not a submission"}]),
+        json!([{"role":"user","content":""}]),
+    ] {
+        let request = mf_chat::ConversationInputs {
+            context: None,
+            messages: serde_json::from_value(messages).unwrap(),
+        };
+        assert!(matches!(
+            request.validate(),
+            Err(mf_chat::ChatError::Invalid {
+                field: "messages",
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
+fn prepared_result_producers_must_have_object_compatible_metadata() {
+    for name in ["append", "replace_context"] {
+        let definition = serde_json::from_value(json!({
+            "version":"2026-11-13", "dependencies":{},
+            "nodes":[
+                {"id":"params","kind":"builtin.parameters","config":{"parameters":{"messages":{"type":{"list":"object"}}}}},
+                {"id":"wrong","kind":"builtin.code","config":{"language":"cel","inputs":{},"code":{"value":"'not an object'"}}}
+            ],
+            "outputs":[{"name":name,"node":"wrong","port":"value"}]
+        })).unwrap();
+        let Err(error) = mf_chat::WorkflowProfile::new("default", definition, Default::default())
+        else {
+            panic!("expected invalid output metadata")
+        };
+        assert!(
+            matches!(
+                error,
+                mf_chat::ChatError::Invalid {
+                    field: "chat outputs",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
 }
 
 #[test]
@@ -138,26 +203,28 @@ fn conversation_inputs_are_bound_separately_from_parameters() {
     let parameters = parameters(&contract);
     let input = mf_chat::ConversationInputs {
         context: None,
-        prompt: "hello".into(),
-        system: None,
-        history: None,
+        messages: vec![mfn_llm::ChatMessage::User {
+            content: "hello".into(),
+            metadata: None,
+        }],
     };
     let arguments = contract.arguments(input, &parameters).unwrap();
     manifest.input_schema.validate(&arguments).unwrap();
-    assert_eq!(arguments.0["params.prompt"].as_str(), Some("hello"));
-    assert_eq!(arguments.0["params.system"].as_str(), Some(""));
     assert_eq!(
-        serde_json::to_value(&arguments).unwrap()["params.history"],
-        json!([])
+        serde_json::to_value(&arguments).unwrap()["params.messages"],
+        json!([{"role":"user","content":"hello"}])
     );
+    assert!(!arguments.0.contains_key("params.history"));
+    assert!(!arguments.0.contains_key("params.system"));
     assert!(
         contract
             .arguments(
                 mf_chat::ConversationInputs {
                     context: None,
-                    prompt: "override".into(),
-                    system: None,
-                    history: None
+                    messages: vec![mfn_llm::ChatMessage::User {
+                        content: "override".into(),
+                        metadata: None
+                    }]
                 },
                 &arguments
             )
@@ -172,7 +239,14 @@ fn contract_accepts_multiple_models_and_arbitrary_output_sources() {
     second.id = "another-model".into();
     manifest.graph.definition.nodes.push(second);
     manifest.graph.execution_order.push("another-model".into());
-    for mut edge in manifest.graph.definition.edges.clone() {
+    for mut edge in manifest
+        .graph
+        .definition
+        .edges
+        .clone()
+        .into_iter()
+        .filter(|edge| edge.to_node.as_str() == "chat")
+    {
         edge.to_node = "another-model".into();
         manifest.graph.definition.edges.push(edge);
     }
@@ -181,7 +255,7 @@ fn contract_accepts_multiple_models_and_arbitrary_output_sources() {
         .definition
         .outputs
         .iter_mut()
-        .find(|output| output.name == "text")
+        .find(|output| output.name == "append")
         .unwrap()
         .node = "another-model".into();
     ChatContract::from_manifest(&manifest).unwrap();
@@ -199,7 +273,7 @@ fn preflight_checks_transport_and_external_ports() {
         .inputs
         .get_mut("params")
         .unwrap()
-        .get_mut("prompt")
+        .get_mut("messages")
         .unwrap()
         .value_type = mf_runtime::ValueType::Boolean;
     let mut missing = original.clone();
@@ -208,7 +282,7 @@ fn preflight_checks_transport_and_external_ports() {
         .inputs
         .get_mut("params")
         .unwrap()
-        .remove("prompt");
+        .remove("messages");
     let mut ambiguous = original.clone();
     let mut source = ambiguous.graph.definition.nodes[0].clone();
     source.id = "other".into();
@@ -230,25 +304,22 @@ fn preflight_checks_transport_and_external_ports() {
     for invalid in [wrong_type, missing, ambiguous, stdin] {
         assert!(ChatContract::from_manifest(&invalid).is_err());
     }
-    for name in ["status", "text", "usages"] {
-        let mut invalid = original.clone();
-        invalid
-            .graph
-            .definition
-            .outputs
-            .retain(|output| output.name != name);
-        assert!(ChatContract::from_manifest(&invalid).is_err());
-    }
-    let mut optional = original;
-    optional
-        .graph
-        .definition
-        .outputs
-        .iter_mut()
-        .find(|output| output.name == "usages")
-        .unwrap()
-        .optional = true;
-    assert!(ChatContract::from_manifest(&optional).is_err());
+    let mut missing_result = original.clone();
+    missing_result.graph.definition.outputs.clear();
+    assert!(ChatContract::from_manifest(&missing_result).is_err());
+    let mut both = original;
+    both.graph.definition.outputs.push(
+        serde_json::from_value(json!({
+            "name":"replace_context", "node":"result", "port":"value", "optional":true
+        }))
+        .unwrap(),
+    );
+    assert!(ChatContract::from_manifest(&both).is_err());
+    both.graph.definition.outputs[0].optional = true;
+    assert_eq!(
+        ChatContract::from_manifest(&both).unwrap().alternatives,
+        mf_chat::ResultAlternatives::Both
+    );
 }
 
 #[test]
@@ -262,19 +333,23 @@ fn history_metadata_round_trips_through_argument_binding() {
         .arguments(
             mf_chat::ConversationInputs {
                 context: None,
-                prompt: "continue".into(),
-                system: None,
-                history: Some(vec![mfn_llm::ChatMessage::Assistant {
-                    tool_calls: None,
-                    content: "prior reply".into(),
-                    metadata: Some(metadata.clone()),
-                }]),
+                messages: vec![
+                    mfn_llm::ChatMessage::Assistant {
+                        tool_calls: None,
+                        content: "prior reply".into(),
+                        metadata: Some(metadata.clone()),
+                    },
+                    mfn_llm::ChatMessage::User {
+                        content: "continue".into(),
+                        metadata: None,
+                    },
+                ],
             },
             &parameters(&contract),
         )
         .unwrap();
     let values =
-        mf_runtime::NodeValues::from([("messages".into(), arguments.0["params.history"].clone())]);
+        mf_runtime::NodeValues::from([("messages".into(), arguments.0["params.messages"].clone())]);
     assert_eq!(
         mfn_llm::LlmInputs::from_values(values).unwrap().messages[0],
         mfn_llm::ChatMessage::Assistant {
@@ -332,12 +407,12 @@ fn workflow_explicitly_combines_multiple_model_calls_on_success_and_failure() {
             definition.edges.push(serde_json::from_value(json!({"from_node":node,"from_output":"usages","to_node":"collect","to_input":input})).unwrap());
         }
         let usages = definition
-            .outputs
+            .edges
             .iter_mut()
-            .find(|output| output.name == "usages")
+            .find(|edge| edge.to_node.as_str() == "result" && edge.to_input == "usages")
             .unwrap();
-        usages.node = "collect".into();
-        usages.port = "value".into();
+        usages.from_node = "collect".into();
+        usages.from_output = "value".into();
         let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
         let plan = mf_compiler::compile_definition(&definition, &registry).unwrap();
         let manifest = plan.manifest(&registry).unwrap();
@@ -365,7 +440,7 @@ fn workflow_explicitly_combines_multiple_model_calls_on_success_and_failure() {
             )
             .unwrap();
         let output = serde_json::to_value(&outputs).unwrap();
-        let calls = output["usages"].as_array().unwrap();
+        let calls = output["append"]["usages"].as_array().unwrap();
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0]["node"]["id"], "first");
         assert_eq!(calls[1]["node"]["id"], "chat");
@@ -379,16 +454,11 @@ fn workflow_explicitly_combines_multiple_model_calls_on_success_and_failure() {
                 summary: "workflow finished",
             })
             .unwrap();
-        if fail_second {
-            assert!(
-                matches!(resolution.state, mf_chat::contract::CompletionState::Finished(turn) if turn.state == "failed")
-            );
-        } else {
-            let mf_chat::contract::CompletionState::Uncommitted(reply) = resolution.state else {
-                panic!("expected unsaved reply");
-            };
-            database.save_recovered(reply).unwrap();
-        }
+        let mf_chat::contract::CompletionState::Uncommitted(reply) = resolution.state else {
+            panic!("expected a complete unsaved result");
+        };
+        let saved = database.save_recovered(reply).unwrap();
+        assert_eq!(saved.result.status == "failed", fail_second);
         let usage = database.usage(Default::default()).unwrap().overall;
         assert_eq!(usage.attempted_calls, 2);
         assert_eq!(
@@ -416,7 +486,7 @@ fn loop_explicitly_accumulates_call_usages_and_stops_after_failure() {
         .unwrap();
         definition.outputs.retain(|output| output.name != "answer");
         definition.outputs.push(
-            serde_json::from_value(json!({"name":"history","node":"repeat","port":"history"}))
+            serde_json::from_value(json!({"name":"history","node":"repeat","port":"messages"}))
                 .unwrap(),
         );
         let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
@@ -429,14 +499,23 @@ fn loop_explicitly_accumulates_call_usages_and_stops_after_failure() {
         let previous = json!([{"role":"user","content":"prior question"},{"role":"assistant","content":"prior answer","metadata":{"tags":["retained"],"count":1}}]);
         let input = mf_chat::ConversationInputs {
             context: None,
-            prompt: "hello".into(),
-            system: Some("Keep context".into()),
-            history: Some(
-                <Vec<mfn_llm::ChatMessage> as mf_runtime::InputValue>::decode(
-                    previous.clone().into(),
-                )
-                .unwrap(),
-            ),
+            messages: {
+                let mut request = vec![mfn_llm::ChatMessage::System {
+                    content: "Keep context".into(),
+                    metadata: None,
+                }];
+                request.extend(
+                    <Vec<mfn_llm::ChatMessage> as mf_runtime::InputValue>::decode(
+                        previous.clone().into(),
+                    )
+                    .unwrap(),
+                );
+                request.push(mfn_llm::ChatMessage::User {
+                    content: "hello".into(),
+                    metadata: None,
+                });
+                request
+            },
         };
         let outputs = mf_compiler::execute_compiled_with_inputs(
             &plan,
@@ -446,9 +525,11 @@ fn loop_explicitly_accumulates_call_usages_and_stops_after_failure() {
         )
         .unwrap();
         let result = serde_json::to_value(&outputs).unwrap();
-        let mut expected = previous.as_array().unwrap().clone();
+        let mut expected = vec![json!({"role":"system","content":"Keep context"})];
+        expected.extend(previous.as_array().unwrap().clone());
+        expected.push(json!({"role":"user","content":"hello"}));
         if !failed {
-            expected.extend(json!([{"role":"user","content":"hello"},{"role":"assistant","content":"reply"},{"role":"user","content":"hello"},{"role":"assistant","content":"second reply"}]).as_array().unwrap().iter().cloned());
+            expected.extend(json!([{"role":"assistant","content":"reply"},{"role":"assistant","content":"second reply"}]).as_array().unwrap().iter().cloned());
         }
         assert_eq!(result["history"], json!(expected));
         assert!(
@@ -457,7 +538,7 @@ fn loop_explicitly_accumulates_call_usages_and_stops_after_failure() {
                 .iter()
                 .all(|request| !request.body.to_string().contains("retained"))
         );
-        let calls = result["usages"].as_array().unwrap();
+        let calls = result["append"]["usages"].as_array().unwrap();
         assert_eq!(calls.len(), if failed { 1 } else { 2 });
         assert_eq!(server.requests().len(), calls.len());
         for (index, call) in calls.iter().enumerate() {
@@ -468,11 +549,14 @@ fn loop_explicitly_accumulates_call_usages_and_stops_after_failure() {
             );
         }
         if failed {
-            assert_eq!(result["status"], "failed");
-            assert!(!result["error"].as_str().unwrap().is_empty());
+            assert_eq!(result["append"]["status"], "failed");
+            assert!(!result["append"]["error"].as_str().unwrap().is_empty());
         } else {
             assert_ne!(calls[0]["call_id"], calls[1]["call_id"]);
-            assert_eq!(result["metadata"]["strategy"], "iterative");
+            assert_eq!(
+                result["append"]["messages"][0]["metadata"]["strategy"],
+                "iterative"
+            );
         }
     }
 }
@@ -515,12 +599,12 @@ fn application_context_is_bound_by_the_common_contract_and_optional_titles_are_p
         context["title"],
         json!({"source":"provisional","revision":0,"attempted":false,"enabled":true})
     );
-    let bytes = serde_json::to_vec(&json!({
-        "status":"succeeded","text":"answer","title":"Generated","usages":[{
+    let bytes = serde_json::to_vec(&json!({"append":{
+        "status":"succeeded","messages":[{"role":"assistant","content":"answer"}],"title":"Generated","usages":[{
             "call_id":"title-attempt","model":"summary-model",
             "attribution":{"purpose":"title","profile":"summary"}
         }]
-    }))
+    }}))
     .unwrap();
     let resolution = database
         .reconcile_completion(mf_chat::contract::ConversationExit {
@@ -556,7 +640,7 @@ fn application_context_is_bound_by_the_common_contract_and_optional_titles_are_p
 #[test]
 fn common_results_preserve_sparse_fields_across_typed_and_json_transports() {
     let result = mf_chat::ConversationResult {
-        text: "answer".into(),
+        update: mf_chat::ConversationResult::assistant("answer").update,
         usages: vec![mf_chat::CallUsage {
             timing: None,
             call_id: "call".into(),
