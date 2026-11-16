@@ -405,6 +405,113 @@ mod tests {
     }
 
     #[test]
+    fn legacy_v6_exchanges_seed_context_and_terminal_results_exactly_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("chat.sqlite");
+        let database = ChatDatabase::open(&path).unwrap();
+        let session = database
+            .create_session(
+                "default",
+                Some("Instructions".into()),
+                Some("Existing".into()),
+            )
+            .unwrap();
+        let first = database
+            .begin_turn(
+                &session.id,
+                "first question",
+                crate::ModelIdentity {
+                    profile: "default".into(),
+                    model: None,
+                },
+                None,
+            )
+            .unwrap();
+        database
+            .complete_turn(
+                first.invocation.clone(),
+                crate::ConversationResult::assistant("first answer"),
+            )
+            .unwrap();
+        let second = database
+            .begin_turn(
+                &session.id,
+                "second question",
+                crate::ModelIdentity {
+                    profile: "default".into(),
+                    model: None,
+                },
+                None,
+            )
+            .unwrap();
+        database
+            .complete_turn(
+                second.invocation.clone(),
+                crate::ConversationResult::assistant("second answer"),
+            )
+            .unwrap();
+        let original = database.messages(&session.id, 50, None).unwrap().messages;
+        assert_eq!(original.len(), 4);
+        let mut connection = connect(&path).unwrap();
+        while connection.applied_migrations().unwrap().len() > 6 {
+            connection.revert_last_migration(MIGRATIONS).unwrap();
+        }
+        drop(connection);
+        drop(database);
+        let reopened = ChatDatabase::open(&path).unwrap();
+        let owner = reopened.session(&session.id).unwrap();
+        assert_eq!(owner.context_revision, 2);
+        let page = reopened.messages(&session.id, 50, None).unwrap().messages;
+        assert_eq!(
+            page.iter()
+                .map(|record| &record.message)
+                .collect::<Vec<_>>(),
+            original
+                .iter()
+                .map(|record| &record.message)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            reopened
+                .turn(&first.invocation.turn_id)
+                .unwrap()
+                .context_revision,
+            0
+        );
+        assert_eq!(
+            reopened
+                .turn(&second.invocation.turn_id)
+                .unwrap()
+                .context_revision,
+            1
+        );
+        let context = reopened.model_context(&session.id).unwrap();
+        assert_eq!(context.revision, 2);
+        assert_eq!(context.messages.len(), 5);
+        assert!(
+            matches!(&context.messages[0], mfn_llm::ChatMessage::System { content, .. } if content == "Instructions")
+        );
+        assert!(
+            matches!(&context.messages[4], mfn_llm::ChatMessage::Assistant { content, .. } if content == "second answer")
+        );
+        assert!(
+            reopened
+                .call(&first.invocation.call_id)
+                .unwrap()
+                .terminal_result
+                .is_some()
+        );
+        assert!(
+            reopened
+                .call(&second.invocation.call_id)
+                .unwrap()
+                .terminal_result
+                .is_some()
+        );
+        assert_eq!(reopened.model_context(&session.id).unwrap(), context);
+    }
+
+    #[test]
     fn ownership_precedes_initialization_and_is_released_on_failure() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("chat.sqlite");
