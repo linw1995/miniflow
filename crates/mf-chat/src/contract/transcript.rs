@@ -228,6 +228,12 @@ impl ConversationResult {
                 },
             )?;
         }
+        ensure!(
+            serde_json::to_vec(self).context(JsonSnafu)?.len() <= super::MAX_RECOVERY_BYTES,
+            RecoveryTooLargeSnafu {
+                limit: super::MAX_RECOVERY_BYTES
+            }
+        );
         Ok(())
     }
 

@@ -46,7 +46,7 @@ impl<T: serde::de::DeserializeOwned>
         >>::from_nullable_sql(value)?;
         Ok(Self(
             encoded
-                .map(|value| serde_json::from_str(&value))
+                .map(|value| mf_runtime::decode_unique_json(value.as_bytes()))
                 .transpose()?,
         ))
     }
@@ -69,6 +69,46 @@ impl<T: serde::Serialize + std::fmt::Debug>
             }
             None => Ok(diesel::serialize::IsNull::Yes),
         }
+    }
+}
+
+#[derive(Debug, diesel::expression::AsExpression, diesel::deserialize::FromSqlRow)]
+#[diesel(sql_type = diesel::sql_types::Text)]
+pub struct StoredMessage(mfn_llm::ChatMessage);
+
+impl From<mfn_llm::ChatMessage> for StoredMessage {
+    fn from(value: mfn_llm::ChatMessage) -> Self {
+        Self(value)
+    }
+}
+
+impl From<StoredMessage> for mfn_llm::ChatMessage {
+    fn from(value: StoredMessage) -> Self {
+        value.0
+    }
+}
+
+impl diesel::deserialize::FromSql<diesel::sql_types::Text, diesel::sqlite::Sqlite>
+    for StoredMessage
+{
+    fn from_sql(
+        value: diesel::sqlite::SqliteValue<'_, '_, '_>,
+    ) -> diesel::deserialize::Result<Self> {
+        let encoded = <String as diesel::deserialize::FromSql<
+            diesel::sql_types::Text,
+            diesel::sqlite::Sqlite,
+        >>::from_sql(value)?;
+        Ok(Self(mf_runtime::decode_unique_json(encoded.as_bytes())?))
+    }
+}
+
+impl diesel::serialize::ToSql<diesel::sql_types::Text, diesel::sqlite::Sqlite> for StoredMessage {
+    fn to_sql<'b>(
+        &'b self,
+        output: &mut diesel::serialize::Output<'b, '_, diesel::sqlite::Sqlite>,
+    ) -> diesel::serialize::Result {
+        output.set_value(serde_json::to_string(&self.0)?);
+        Ok(diesel::serialize::IsNull::No)
     }
 }
 
@@ -238,8 +278,16 @@ mod tests {
                 )
                 .unwrap();
             let counters = BTreeMap::from([("input_tokens".into(), tokens)]);
-            let metadata = (previous_version > 1)
-                .then(|| BTreeMap::from([("source".into(), "retained".into())]));
+            let metadata = (previous_version > 1).then(|| {
+                BTreeMap::from([
+                    ("source".into(), mf_runtime::ValueRef::from("retained")),
+                    ("nullable".into(), mf_runtime::ValueRef::null()),
+                    (
+                        "nested".into(),
+                        serde_json::json!({"value":null,"items":[null,true]}).into(),
+                    ),
+                ])
+            });
             let reported = crate::CallUsage {
                 timing: None,
                 attribution: None,
@@ -254,20 +302,28 @@ mod tests {
                 .complete_turn(
                     begun.invocation.clone(),
                     crate::ConversationResult {
-                        text: "old reply".into(),
+                        update: crate::MessageUpdate::Append {
+                            messages: vec![mfn_llm::ChatMessage::Assistant {
+                                content: "old reply".into(),
+                                tool_calls: None,
+                                metadata: metadata.clone(),
+                            }],
+                        },
                         usages: if has_list {
                             vec![reported.clone()]
                         } else {
                             Vec::new()
                         },
-                        metadata: metadata.clone(),
-                        finish_reason: None,
                         ..Default::default()
                     },
                 )
                 .unwrap();
             let original = database.call(&begun.invocation.call_id).unwrap();
             let mut connection = connect(&path).unwrap();
+            diesel::update(model_calls::table.find(&begun.invocation.call_id))
+                .set(model_calls::model.eq(Some("old-model")))
+                .execute(&mut connection)
+                .unwrap();
             if !has_list {
                 diesel::update(model_calls::table.find(&begun.invocation.call_id))
                     .set(model_calls::usages.eq::<Option<String>>(None))
@@ -313,10 +369,10 @@ mod tests {
             };
             assert_eq!(call.usages, Some(vec![expected]));
             assert_eq!(call.input_tokens, Some(tokens));
-            assert_eq!(call.result_text, original.result_text);
+            assert_eq!(call.result_text.as_deref(), Some("old reply"));
             assert_eq!(call.metadata, metadata);
             assert!(matches!(
-                &reopened.history(&session.id).unwrap().history[1],
+                &reopened.model_context(&session.id).unwrap().messages[1],
                 mfn_llm::ChatMessage::Assistant { metadata: actual, .. } if actual == &metadata
             ));
             assert_eq!(

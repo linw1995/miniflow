@@ -472,15 +472,17 @@ impl ChatView {
                         match resolution.state {
                             CompletionState::Committed(completion) => {
                                 self.preview = LivePreview::default();
+                                self.final_reply =
+                                    completion.result.final_text().map(str::to_owned);
                                 self.reply_usages = completion.result.usages;
-                                self.final_reply = Some(completion.result.text);
                                 self.notice = "Saved".into();
                             }
                             CompletionState::Uncommitted(pending) => {
                                 self.preview = LivePreview::default();
                                 self.retained = true;
+                                self.unsaved =
+                                    pending.completion.result.final_text().map(str::to_owned);
                                 self.reply_usages = pending.completion.result.usages;
-                                self.unsaved = Some(pending.completion.result.text);
                                 self.notice =
                                     "Reply not saved. Ctrl+P to save or discard it".into();
                             }
@@ -853,37 +855,48 @@ impl ChatView {
         let mut transcript = self.transcript.borrow_mut();
         transcript.begin(body.width);
         if let Some(page) = &self.page {
-            for record in &page.messages {
-                let assistant = record.message.role == "assistant";
-                // Messages and their live preview share one turn-scoped key so the
-                // authoritative text reuses the parsed preview document.
-                let key = format!(
-                    "turn:{}:{}",
-                    record.message.turn_id,
-                    if assistant { "assistant" } else { "you" }
-                );
+            let usages: std::collections::BTreeMap<_, _> = page
+                .messages
+                .iter()
+                .filter_map(|record| {
+                    record
+                        .usages
+                        .as_deref()
+                        .map(|usages| (record.message.turn_id.as_str(), usages))
+                })
+                .collect();
+            for (index, record) in page.messages.iter().enumerate() {
+                let assistant = record.message.role() == "assistant";
+                let key = format!("message:{}", record.message.id);
                 transcript.plain(
                     format!("{key}:label"),
                     vec![role_label(
-                        if assistant { "Assistant" } else { "You" },
+                        match record.message.role() {
+                            "assistant" => "Assistant",
+                            "tool" => "Tool",
+                            "system" => "System",
+                            _ => "You",
+                        },
                         Color::Cyan,
                         None,
                     )],
                 );
                 if assistant {
-                    transcript.markdown(format!("{key}:body"), &record.message.content);
+                    transcript.markdown(format!("{key}:body"), record.message.content());
                 } else {
                     transcript.literal(
                         format!("{key}:body"),
-                        &record.message.content,
+                        record.message.content(),
                         Style::default(),
                     );
                 }
                 let mut metadata = vec![];
-                if assistant {
-                    let calls = crate::performance::conversation_calls(
-                        record.usages.as_deref().unwrap_or_default(),
-                    );
+                let last_in_turn = page
+                    .messages
+                    .get(index + 1)
+                    .is_none_or(|next| next.message.turn_id != record.message.turn_id);
+                if last_in_turn && let Some(usages) = usages.get(record.message.turn_id.as_str()) {
+                    let calls = crate::performance::conversation_calls(usages);
                     metadata.push(Line::styled(
                         crate::performance::footer(&calls, body.width),
                         Style::default().fg(Color::DarkGray),
@@ -1156,7 +1169,7 @@ mod tests {
             {"call_id":"title", "model":"fixture", "timing":{"elapsed_us":10000,"first_token_us":1000},"usage":{"output_tokens":100},"attribution":{"purpose":"title"}}
         ])).unwrap();
         let response = mf_chat::ConversationResult {
-            text: "canonical answer".into(),
+            update: mf_chat::ConversationResult::assistant("canonical answer").update,
             usages: calls,
             ..Default::default()
         };
@@ -1455,11 +1468,14 @@ mod tests {
                 None,
             )
             .unwrap();
-        database.complete_turn(started.invocation, mf_chat::ConversationResult {
-            text: "Keep one execution lane and move infrequent actions into the command palette.".into(),
-            metadata: None, usages: vec![], finish_reason: None,
-        ..Default::default()
-}).unwrap();
+        database
+            .complete_turn(
+                started.invocation,
+                mf_chat::ConversationResult::assistant(
+                    "Keep one execution lane and move infrequent actions into the command palette.",
+                ),
+            )
+            .unwrap();
         view.page = Some(database.messages(&session.id, 50, None).unwrap());
         view.session = Some(session);
         view.notice.clear();
@@ -1589,13 +1605,7 @@ mod tests {
                 database
                     .complete_turn(
                         started.invocation,
-                        mf_chat::ConversationResult {
-                            text: format!("reply-{index}"),
-                            metadata: None,
-                            usages: vec![],
-                            finish_reason: None,
-                            ..Default::default()
-                        },
+                        mf_chat::ConversationResult::assistant(format!("reply-{index}")),
                     )
                     .unwrap();
             }
@@ -1638,7 +1648,7 @@ mod tests {
                 .last()
                 .unwrap()
                 .message
-                .content,
+                .content(),
             "reply-27"
         );
         assert!(view.retry_turn().is_none());
@@ -1656,7 +1666,7 @@ mod tests {
                 .last()
                 .unwrap()
                 .message
-                .content
+                .content()
                 == "reply-27"
         });
         view.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &controller);
@@ -1760,7 +1770,7 @@ mod tests {
         let offline = root.path().join("offline");
         launch.options.database_path = state.join("chat.sqlite");
         let path = launch.options.database_path.clone();
-        std::fs::write(launch.runner.executable().with_extension("script"), "#!/bin/sh\nsleep 0.3\nprintf '%s' '{\"status\":\"succeeded\",\"text\":\"paid reply\",\"usages\":[]}'\necho 'runner diagnostic' >&2\nkill -TERM $$\n").unwrap();
+        std::fs::write(launch.runner.executable().with_extension("script"), "#!/bin/sh\nsleep 0.3\nprintf '%s' '{\"append\":{\"status\":\"succeeded\",\"messages\":[{\"role\":\"assistant\",\"content\":\"paid reply\"}],\"usages\":[]}}'\necho 'runner diagnostic' >&2\nkill -TERM $$\n").unwrap();
         let mut view = ChatView::new(launch.runner.description()).unwrap();
         let controller = ChatController::open(launch).unwrap();
         view.editor.insert("question");
@@ -1849,10 +1859,7 @@ mod tests {
             resolution: Ok(ReconciledCompletion {
                 state: CompletionState::Committed(mf_chat::Completion {
                     invocation,
-                    result: mf_chat::ConversationResult {
-                        text: text.into(),
-                        ..Default::default()
-                    },
+                    result: mf_chat::ConversationResult::assistant(text),
                 }),
                 diagnostics: vec![],
             }),
@@ -1960,10 +1967,7 @@ mod tests {
             ._database
             .complete_turn(
                 invocation.clone(),
-                mf_chat::ConversationResult {
-                    text: "streamed answer".into(),
-                    ..Default::default()
-                },
+                mf_chat::ConversationResult::assistant("streamed answer"),
             )
             .unwrap();
         view.event(
@@ -2049,10 +2053,9 @@ mod tests {
                         database_path: controller._database.path().to_owned(),
                         completion: mf_chat::Completion {
                             invocation,
-                            result: mf_chat::ConversationResult {
-                                text: "complete unsaved reply".into(),
-                                ..Default::default()
-                            },
+                            result: mf_chat::ConversationResult::assistant(
+                                "complete unsaved reply",
+                            ),
                         },
                     }),
                     diagnostics: vec![],

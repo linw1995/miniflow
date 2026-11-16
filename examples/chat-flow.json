@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-23",
+  "version": "2026-11-13",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -20,6 +20,11 @@
       "kind": "builtin.parameters",
       "config": {
         "parameters": {
+          "messages": {
+            "type": {
+              "list": "object"
+            }
+          },
           "model": {
             "type": "string",
             "default": "your-model",
@@ -34,19 +39,6 @@
             "type": "string",
             "env": "OPENAI_API_KEY",
             "default": ""
-          },
-          "prompt": {
-            "type": "string"
-          },
-          "system": {
-            "type": "string",
-            "default": ""
-          },
-          "history": {
-            "type": {
-              "list": "object"
-            },
-            "default": []
           }
         }
       }
@@ -69,94 +61,102 @@
       "inputs": {
         "messages": {
           "from": {
-            "node": "chat_messages",
+            "node": "params",
             "port": "messages"
           }
         }
       }
     },
     {
-      "id": "chat_messages",
+      "id": "error",
       "kind": "builtin.code",
       "config": {
         "language": "cel",
         "inputs": {
-          "prompt": "string",
-          "history": {
+          "status": "string",
+          "usages": {
             "list": "object"
-          },
-          "system": "string"
+          }
         },
         "code": {
-          "messages": "(system == '' ? [] : [dyn({'role':'system','content':system})]) + history + [dyn({'role':'user','content':prompt})]"
+          "value": "status == 'failed' ? (usages.size() > 0 && has(usages[0].error) ? usages[0].error : 'Model call failed.') : ''"
         }
       },
       "inputs": {
-        "prompt": {
+        "status": {
           "from": {
-            "node": "params",
-            "port": "prompt"
+            "node": "chat",
+            "port": "status"
           }
         },
-        "history": {
+        "usages": {
           "from": {
-            "node": "params",
-            "port": "history"
+            "node": "chat",
+            "port": "usages"
+          }
+        }
+      }
+    },
+    {
+      "id": "result",
+      "kind": "builtin.object",
+      "config": {
+        "fields": {
+          "status": "string",
+          "messages": {
+            "list": "object"
+          },
+          "usages": {
+            "list": "object"
+          },
+          "error": "string"
+        }
+      },
+      "inputs": {
+        "status": {
+          "from": {
+            "node": "chat",
+            "port": "status"
           }
         },
-        "system": {
+        "messages": {
           "from": {
-            "node": "params",
-            "port": "system"
+            "node": "chat",
+            "port": "messages"
+          }
+        },
+        "usages": {
+          "from": {
+            "node": "chat",
+            "port": "usages"
+          }
+        },
+        "error": {
+          "from": {
+            "node": "error",
+            "port": "value"
           }
         }
       }
     }
   ],
-  "outputs": [
-    {
-      "name": "status",
-      "node": "chat",
-      "port": "status"
-    },
-    {
-      "name": "text",
-      "node": "chat",
-      "port": "text"
-    },
-    {
-      "name": "usages",
-      "node": "chat",
-      "port": "usages"
-    },
-    {
-      "name": "error",
-      "node": "chat",
-      "port": "error",
-      "optional": true
-    },
-    {
-      "name": "metadata",
-      "node": "chat",
-      "port": "metadata",
-      "optional": true
-    },
-    {
-      "name": "finish_reason",
-      "node": "chat",
-      "port": "finish_reason",
-      "optional": true
-    }
-  ],
   "clusters": [
     {
       "label": "Conversation",
-      "annotation": "Resolve conversation parameters and produce one model response with captured errors and usage.",
+      "annotation": "Resolve model parameters and produce an append result with captured errors and explicit usage.",
       "nodes": [
         "params",
         "chat",
-        "chat_messages"
+        "error",
+        "result"
       ]
+    }
+  ],
+  "outputs": [
+    {
+      "name": "append",
+      "node": "result",
+      "port": "value"
     }
   ]
 }

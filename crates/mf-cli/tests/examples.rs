@@ -64,6 +64,32 @@ fn streamed_calculator_calls() -> llm_support::Reply {
     streamed
 }
 
+fn append_result(messages: Value, usages: Value) -> Value {
+    json!({"append":{"status":"succeeded","messages":messages,"usages":usages,"error":""}})
+}
+
+fn assistant(text: &str) -> Value {
+    json!({"role":"assistant","content":text})
+}
+
+fn calculator_messages() -> Value {
+    json!([
+        {"role":"assistant","content":"","tool_calls":[
+            {"id":"call_add","name":"calculator","arguments":{"operation":"add","left":2.0,"right":3.0}},
+            {"id":"call_multiply","name":"calculator","arguments":{"operation":"multiply","left":3.0,"right":4.0}}
+        ]},
+        {"role":"tool","tool_call_id":"call_add","content":"5.0"},
+        {"role":"tool","tool_call_id":"call_multiply","content":"12.0"},
+        assistant(CALCULATOR_ANSWER)
+    ])
+}
+
+fn title_result(usages: Value) -> Value {
+    let mut result = append_result(json!([assistant("reply")]), usages);
+    result["append"]["title"] = "reply".into();
+    result
+}
+
 fn search_result() -> Value {
     json!({
         "rerank_score":2.4,"title":"DeepSeek release","url":"https://example.com/release",
@@ -90,29 +116,45 @@ fn examples() -> [(&'static str, Option<&'static str>, Value); 23] {
         (
             "chat-calculator-flow.json",
             None,
-            json!({"status":"succeeded", "text":CALCULATOR_ANSWER, "error":"", "usages":[agent_usage(0), agent_usage(1)]}),
+            append_result(
+                calculator_messages(),
+                json!([agent_usage(0), agent_usage(1)]),
+            ),
         ),
         (
             "chat-flow.json",
             None,
-            json!({"status":"succeeded", "text":"reply", "usages":[chat_usage(json!([]))], "finish_reason":"stop"}),
+            append_result(json!([assistant("reply")]), json!([chat_usage(json!([]))])),
         ),
         (
             "chat-loop-flow.json",
             None,
-            json!({"status":"succeeded", "text":"reply", "error":"", "metadata":{"strategy":"iterative"}, "usages":[chat_usage(json!([{"node":"repeat","index":0}])), chat_usage(json!([{"node":"repeat","index":1}]))]}),
+            append_result(
+                json!([
+                    {"role":"assistant","content":"reply","metadata":{"strategy":"iterative"}},
+                    {"role":"assistant","content":"reply","metadata":{"strategy":"iterative"}}
+                ]),
+                json!([
+                    chat_usage(json!([{"node":"repeat","index":0}])),
+                    chat_usage(json!([{"node":"repeat","index":1}]))
+                ]),
+            ),
         ),
         (
             "chat-title-flow.json",
             None,
-            json!({"status":"succeeded","text":"reply","title":"reply","finish_reason":"stop",
-                "usages":[title_usage("model", "conversation"), title_usage("title_model", "title")]}),
+            title_result(json!([
+                title_usage("model", "conversation"),
+                title_usage("title_model", "title")
+            ])),
         ),
         (
             "chat-nested-title-flow.json",
             None,
-            json!({"status":"succeeded","text":"reply","title":"reply","finish_reason":"stop",
-                "usages":[title_usage("model", "conversation"), nested_title_usage()]}),
+            title_result(json!([
+                title_usage("model", "conversation"),
+                nested_title_usage()
+            ])),
         ),
         ("else-if.json", None, json!({"medium": {"amount": 500}})),
         (
@@ -299,18 +341,18 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                 json!({"repeat.prompt":"Hello", "repeat.history":[], "repeat.text":""})
             } else if name == "chat-calculator-flow.json" {
                 json!({
-                    "params.prompt":CALCULATOR_PROMPT,
-                    "params.system":"Use the calculator.",
-                    "params.history":[
+                    "params.messages":[
+                        {"role":"system","content":"Use the calculator."},
                         {"role":"user","content":"Earlier question"},
-                        {"role":"assistant","content":"Earlier answer"}
+                        {"role":"assistant","content":"Earlier answer"},
+                        {"role":"user","content":CALCULATOR_PROMPT}
                     ],
                     "params.model":"example-model",
                     "params.base_url":server.base_url,
                     "params.api_key":"synthetic-calculator-key"
                 })
             } else if name.starts_with("chat-") {
-                json!({"params.prompt":"Hello", "params.model":"example-model", "params.base_url":server.base_url})
+                json!({"params.messages":[{"role":"user","content":"Hello"}], "params.model":"example-model", "params.base_url":server.base_url})
             } else if name == "llm-tools.json" {
                 json!({"model.messages":[{"role":"user","content":"Hello"}]})
             } else if name == "llm-parameters.json" {
@@ -382,7 +424,7 @@ fn documented_examples_compile_and_produce_expected_outputs() {
             assert_eq!(server.as_ref().unwrap().requests()[0].body["stream"], true);
             records
                 .into_iter()
-                .find(|record| record.get("status").is_some())
+                .find(|record| record.get("append").is_some())
                 .unwrap()
         } else {
             serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
@@ -394,7 +436,12 @@ fn documented_examples_compile_and_produce_expected_outputs() {
         };
         if name.starts_with("chat-") || name == "llm-tools.json" {
             let mut identities = std::collections::BTreeSet::new();
-            for usage in actual["usages"].as_array_mut().unwrap() {
+            let usages = if name.starts_with("chat-") {
+                &mut actual["append"]["usages"]
+            } else {
+                &mut actual["usages"]
+            };
+            for usage in usages.as_array_mut().unwrap() {
                 let id = usage["call_id"].as_str().unwrap().to_owned();
                 assert!(!id.is_empty() && identities.insert(id));
                 usage["call_id"] = "generated".into();

@@ -22,24 +22,16 @@
       "kind": "builtin.parameters",
       "config": {
         "parameters": {
-          "prompt": {
-            "type": "string"
+          "messages": {
+            "type": {
+              "list": "object"
+            }
           },
           "tools": {
             "type": {
               "map": "flow"
             },
             "secret": false
-          },
-          "system": {
-            "type": "string",
-            "default": ""
-          },
-          "history": {
-            "type": {
-              "list": "object"
-            },
-            "default": []
           },
           "model": {
             "type": "string",
@@ -75,43 +67,6 @@
           "from": {
             "node": "params",
             "port": "tool_properties"
-          }
-        }
-      }
-    },
-    {
-      "id": "initial_messages",
-      "kind": "builtin.code",
-      "config": {
-        "language": "cel",
-        "inputs": {
-          "prompt": "string",
-          "system": "string",
-          "history": {
-            "list": "object"
-          }
-        },
-        "code": {
-          "messages": "(system == '' ? [] : [dyn({'role':'system','content':system})]) + history + [dyn({'role':'user','content':prompt})]"
-        }
-      },
-      "inputs": {
-        "prompt": {
-          "from": {
-            "node": "params",
-            "port": "prompt"
-          }
-        },
-        "system": {
-          "from": {
-            "node": "params",
-            "port": "system"
-          }
-        },
-        "history": {
-          "from": {
-            "node": "params",
-            "port": "history"
           }
         }
       }
@@ -486,7 +441,7 @@
       "inputs": {
         "messages": {
           "from": {
-            "node": "initial_messages",
+            "node": "params",
             "port": "messages"
           }
         },

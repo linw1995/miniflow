@@ -35,10 +35,7 @@ impl ConversationBackend for Backend {
             }
         }
         self.returned.store(true, Ordering::Release);
-        Ok(ConversationResult {
-            text: "canonical".into(),
-            ..Default::default()
-        })
+        Ok(ConversationResult::assistant("canonical"))
     }
 }
 
@@ -62,7 +59,7 @@ fn setup() -> (tempfile::TempDir, ChatHost, String, Arc<Backend>) {
 fn terminal_only_jobs_join_without_an_unread_receiver() {
     let (_root, host, session, backend) = setup();
     let result = host.submit(&session, "hello").unwrap().join().unwrap();
-    assert_eq!(result.result.text, "canonical");
+    assert_eq!(result.result.final_text(), Some("canonical"));
     assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
     assert!(
         backend
@@ -88,7 +85,7 @@ fn explicit_subscription_precedes_launch_and_completion_does_not_cancel_closed_o
     assert_eq!(events[0].delta.text, "provisional");
     assert_eq!(&events[0].invocation, job.invocation());
     let result = job.join().unwrap();
-    assert_eq!(result.result.text, "canonical");
+    assert_eq!(result.result.final_text(), Some("canonical"));
     assert!(
         backend
             .cancellation
@@ -132,9 +129,9 @@ fn failed_final_drain_retains_authoritative_reply_for_save_only_retry() {
     let ChatError::Uncommitted { pending, .. } = job.join().unwrap_err() else {
         panic!("expected retained authoritative reply")
     };
-    assert_eq!(pending.completion.result.text, "canonical");
+    assert_eq!(pending.completion.result.final_text(), Some("canonical"));
     let saved = host.retry_completion(*pending).unwrap();
-    assert_eq!(saved.result.text, "canonical");
+    assert_eq!(saved.result.final_text(), Some("canonical"));
     assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
 }
 
@@ -157,7 +154,7 @@ impl mf_runtime::TypedTaskStreamNode for Embedded {
     {
         assert!(emitter.is_connected());
         assert!(context.output("begin.database_path").is_err());
-        if input.prompt != "legacy" {
+        if input.prompt()? != "legacy" {
             assert_eq!(
                 context.invocation_path(),
                 vec![mf_telemetry::event::ScopePathEntry::Call {
@@ -189,14 +186,14 @@ impl mf_runtime::TypedTaskStreamNode for Embedded {
                 model_call_id: call_id,
             },
         })?;
-        if input.prompt == "wait" {
+        if input.prompt()? == "wait" {
             return Err(context
                 .execute_future(context.cancellation().cancelled(), None)?
                 .into());
         }
         mf_telemetry::events::record(mfn_llm::REQUEST_FINISHED_EVENT, serde_json::json!(&usage));
         Ok(ConversationResult {
-            text: "isolated-final".into(),
+            update: ConversationResult::assistant("isolated-final").update,
             usages: vec![usage.into()],
             ..Default::default()
         }
@@ -213,7 +210,7 @@ fn embedded_profile() -> WorkflowProfile {
     let definition = mf_compiler::WorkflowDefinition::from_json(&serde_json::json!({
         "version":"2026-10-23", "dependencies":{},
         "nodes":[{"id":"begin","kind":"test.chat.streaming"}],
-        "outputs":[{"name":"answer","node":"begin","port":"delta"},{"name":"status","node":"begin","port":"status"},{"name":"text","node":"begin","port":"text"},{"name":"usages","node":"begin","port":"usages"}]
+        "outputs":[{"name":"answer","node":"begin","port":"delta","optional":true},{"name":"append","node":"begin","port":"append"}]
     }).to_string()).unwrap();
     WorkflowProfile::new("embedded", definition, Default::default()).unwrap()
 }
@@ -237,7 +234,7 @@ fn embedded_exports_preserve_user_identity_and_hide_colliding_application_contex
     }
     let completion = job.join().unwrap();
     assert_eq!(values, 1);
-    assert_eq!(completion.result.text, "isolated-final");
+    assert_eq!(completion.result.final_text(), Some("isolated-final"));
     let usage = &completion.result.usages[0];
     assert_eq!(Some(&usage.call_id), model_call.as_ref());
     assert!(usage.timing.as_ref().unwrap().first_token_us.is_some());
@@ -256,10 +253,14 @@ fn embedded_call_without_a_subscription_joins_with_its_terminal_result() {
         .create_session("embedded", None, None)
         .unwrap();
     let completion = host.submit(&session.id, "hello").unwrap().join().unwrap();
-    assert_eq!(completion.result.text, "isolated-final");
+    assert_eq!(completion.result.final_text(), Some("isolated-final"));
     assert_eq!(completion.result.usages.len(), 1);
     assert_eq!(
-        host.database().history(&session.id).unwrap().history.len(),
+        host.database()
+            .model_context(&session.id)
+            .unwrap()
+            .messages
+            .len(),
         2
     );
     host.close().unwrap();
@@ -291,7 +292,7 @@ fn embedded_call_drains_public_streams_without_an_answer_export() {
         .create_session("embedded", None, None)
         .unwrap();
     let completion = host.submit(&session.id, "hello").unwrap().join().unwrap();
-    assert_eq!(completion.result.text, "isolated-final");
+    assert_eq!(completion.result.final_text(), Some("isolated-final"));
     assert_eq!(completion.result.usages.len(), 1);
     host.close().unwrap();
 }
@@ -305,9 +306,10 @@ fn direct_embedded_invocation_reuses_the_call_stream_interface() {
         .invoke(
             &Invocation::new("session"),
             ConversationInputs {
-                prompt: "hello".into(),
-                system: None,
-                history: None,
+                messages: vec![mf_chat::ChatMessage::User {
+                    content: "hello".into(),
+                    metadata: None,
+                }],
                 context: None,
             },
             &mut ExecutionContext::default(),
@@ -318,7 +320,7 @@ fn direct_embedded_invocation_reuses_the_call_stream_interface() {
             Some(&mf_telemetry::observation::Observer::stderr(0)),
         )
         .unwrap();
-    assert_eq!(result.text, "isolated-final");
+    assert_eq!(result.final_text(), Some("isolated-final"));
     assert_eq!(deltas.len(), 1);
     assert_eq!(deltas[0].text, "prefix");
     assert_eq!(deltas[0].model_call_id, result.usages[0].call_id);
@@ -347,9 +349,9 @@ fn embedded_call_delivers_a_prefix_before_completion_and_shares_cancellation() {
     );
     assert!(
         host.database()
-            .history(&session.id)
+            .model_context(&session.id)
             .unwrap()
-            .history
+            .messages
             .is_empty()
     );
     host.close().unwrap();
@@ -399,9 +401,7 @@ fn embedded_native_stream_graphs_keep_their_coordinator() {
         ],
         "outputs":[
             {"name":"answer","node":"preview","port":"delta","optional":true},
-            {"name":"status","node":"begin","port":"status"},
-            {"name":"text","node":"begin","port":"text"},
-            {"name":"usages","node":"begin","port":"usages"}
+            {"name":"append","node":"begin","port":"append"}
         ]
     }))
     .unwrap();
@@ -416,7 +416,10 @@ fn embedded_native_stream_graphs_keep_their_coordinator() {
     let (job, receiver) = host.submit_stream(&session.id, "legacy").unwrap();
     assert_eq!(receiver.recv().unwrap().delta.text, "prefix");
     assert!(receiver.recv().is_err());
-    assert_eq!(job.join().unwrap().result.text, "isolated-final");
+    assert_eq!(
+        job.join().unwrap().result.final_text(),
+        Some("isolated-final")
+    );
     host.close().unwrap();
 }
 
@@ -449,6 +452,7 @@ fn pre_cancelled_requests_do_not_begin_application_or_embedded_flows() {
                 model: None,
             },
             retry_of: None,
+            result_alternatives: None,
         },
         backend.clone(),
         cancellation.clone(),
@@ -466,9 +470,10 @@ fn pre_cancelled_requests_do_not_begin_application_or_embedded_flows() {
     let result = backend.invoke(
         &invocation,
         ConversationInputs {
-            prompt: "hello".into(),
-            system: None,
-            history: None,
+            messages: vec![mf_chat::ChatMessage::User {
+                content: "hello".into(),
+                metadata: None,
+            }],
             context: None,
         },
         &mut context,
@@ -500,7 +505,7 @@ fn nonblocking_preview_consumption_releases_native_settlement() {
         std::thread::sleep(Duration::from_millis(1));
     }
     assert_eq!(events.len(), 2);
-    assert_eq!(job.join().unwrap().result.text, "canonical");
+    assert_eq!(job.join().unwrap().result.final_text(), Some("canonical"));
 }
 
 struct RetryBackend(AtomicUsize);
@@ -526,10 +531,7 @@ impl ConversationBackend for RetryBackend {
                 model_call_id: "retry-model".into(),
             })?;
         }
-        Ok(ConversationResult {
-            text: "retried-final".into(),
-            ..Default::default()
-        })
+        Ok(ConversationResult::assistant("retried-final"))
     }
 }
 
@@ -545,9 +547,9 @@ fn streaming_retries_use_new_invocations_and_preserve_failed_history() {
     assert!(original.join().is_err());
     assert!(
         host.database()
-            .history(&session.id)
+            .model_context(&session.id)
             .unwrap()
-            .history
+            .messages
             .is_empty()
     );
     let (retry, receiver) = host.retry_stream(&failed.turn_id).unwrap();
@@ -556,13 +558,20 @@ fn streaming_retries_use_new_invocations_and_preserve_failed_history() {
     assert_eq!(&event.invocation, retry.invocation());
     assert_eq!(event.delta.text, "retried");
     assert!(receiver.recv().is_err());
-    assert_eq!(retry.join().unwrap().result.text, "retried-final");
+    assert_eq!(
+        retry.join().unwrap().result.final_text(),
+        Some("retried-final")
+    );
     assert_eq!(
         host.database().turn(&failed.turn_id).unwrap().state,
         "failed"
     );
     assert_eq!(
-        host.database().history(&session.id).unwrap().history.len(),
+        host.database()
+            .model_context(&session.id)
+            .unwrap()
+            .messages
+            .len(),
         2
     );
     assert_eq!(backend.0.load(Ordering::SeqCst), 2);

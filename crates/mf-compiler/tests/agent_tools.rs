@@ -80,7 +80,7 @@ fn calculator_tools() -> BTreeMap<String, FlowTool> {
 
 fn inputs(server: &Server) -> Value {
     json!({
-        "params.prompt":"Calculate two plus three and three times four.",
+        "params.messages":[{"role":"user","content":"Calculate two plus three and three times four."}],
         "params.model":"example-model",
         "params.base_url":server.base_url,
         "params.api_key":"synthetic-agent-key"
@@ -334,7 +334,7 @@ fn zero_one_and_three_tool_supersets_keep_the_same_agent_source_and_ports() {
             .unwrap()
     };
     let parameters = node("params")["config"]["parameters"].as_object().unwrap();
-    assert_eq!(parameters.len(), 8);
+    assert_eq!(parameters.len(), 6);
     assert_eq!(parameters["tools"]["type"], json!({"map":"flow"}));
     assert_eq!(
         parameters["tool_properties"]["type"],
@@ -521,10 +521,12 @@ fn calculator_parallel_calls_preserve_provider_order_schema_and_usage_in_both_mo
         let server = Server::start(vec![tool_reply(calls.clone(), stream), completion]);
         let definition = configured_agent(calculator_tools());
         let mut args = inputs(&server);
-        args["params.system"] = json!("Use the calculator.");
-        args["params.history"] = json!([
+        let question = args["params.messages"][0].clone();
+        args["params.messages"] = json!([
+            {"role":"system","content":"Use the calculator."},
             {"role":"user", "content":"Earlier question"},
-            {"role":"assistant", "content":"Earlier answer"}
+            {"role":"assistant", "content":"Earlier answer"},
+            question
         ]);
         let output = if stream {
             let outputs = finite_stream(definition, args.clone());
@@ -559,12 +561,7 @@ fn calculator_parallel_calls_preserve_provider_order_schema_and_usage_in_both_mo
         assert_eq!(requests.len(), 2);
         assert_calculator_schema(&requests[0].body["tools"]);
         assert_eq!(requests[1].body["tools"], requests[0].body["tools"]);
-        let initial = json!([
-            {"role":"system", "content":"Use the calculator."},
-            {"role":"user", "content":"Earlier question"},
-            {"role":"assistant", "content":"Earlier answer"},
-            {"role":"user", "content":args["params.prompt"]}
-        ]);
+        let initial = args["params.messages"].clone();
         assert_eq!(json!(messages(&requests[0])), initial);
         // Preserve the provider's multipart system/assistant content encoding.
         let mut continued = requests[0].body["messages"].as_array().unwrap().clone();
@@ -603,9 +600,7 @@ fn empty_agent_completes_a_direct_answer_without_advertising_tools() {
     );
     assert_eq!(
         json!(messages(&requests[0])),
-        json!([
-            {"role":"user", "content":inputs(&server)["params.prompt"]}
-        ])
+        inputs(&server)["params.messages"]
     );
 }
 
@@ -615,7 +610,6 @@ fn agent_turn_forwards_finite_stream_answer_and_terminal_usage() {
     let mut definition = agent_turn_definition().unwrap();
     local_dependencies(&mut definition);
     let mut args = inputs(&server);
-    args.as_object_mut().unwrap().remove("params.prompt");
     args["params.messages"] = json!([{"role":"user", "content":"Hello"}]);
     let outputs = finite_stream(definition, args);
     let output = terminal(&outputs);

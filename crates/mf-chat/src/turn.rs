@@ -43,6 +43,7 @@ pub struct BeginTurnInputs {
     pub prompt: String,
     pub model: ModelIdentity,
     pub retry_of: Option<String>,
+    pub result_alternatives: Option<crate::ResultAlternatives>,
 }
 
 #[derive(Clone, Debug, NodeValue)]
@@ -210,11 +211,11 @@ pub fn begin(input: BeginTurnInputs) -> Result<TurnStarted, ChatError> {
                 }
             );
         }
-        let context = session::history(connection, &owner.id)?;
+        let mut context = crate::context::at(connection, &owner.id, owner.context_revision)?;
         let timestamp = session::now()?;
         let next = owner
             .next_sequence
-            .checked_add(2)
+            .checked_add(1)
             .context(ArithmeticSnafu {
                 operation: "reserve message order",
             })?;
@@ -227,17 +228,21 @@ pub fn begin(input: BeginTurnInputs) -> Result<TurnStarted, ChatError> {
             created_at: timestamp,
             finished_at: None,
             error: None,
+            context_revision: owner.context_revision,
+            result_alternatives: input.result_alternatives,
         };
         let message = crate::Message {
-            metadata: None,
             id: uuid::Uuid::new_v4().to_string(),
             session_id: owner.id.clone(),
             turn_id: turn.id.clone(),
             sequence: turn.sequence,
-            role: "user".into(),
-            content: input.prompt.clone(),
+            payload: mfn_llm::ChatMessage::User {
+                content: input.prompt.clone(),
+                metadata: None,
+            },
             created_at: timestamp,
         };
+        context.messages.push(message.payload.clone());
         let call = ModelCall {
             usages: None,
             metadata: None,
@@ -246,7 +251,7 @@ pub fn begin(input: BeginTurnInputs) -> Result<TurnStarted, ChatError> {
             turn_id: Some(turn.id.clone()),
             purpose: "conversation".into(),
             profile: input.model.profile.clone(),
-            model: input.model.model.clone(),
+            model: None,
             state: "running".into(),
             title_revision: Some(owner.title_revision),
             result_title: None,
@@ -259,9 +264,10 @@ pub fn begin(input: BeginTurnInputs) -> Result<TurnStarted, ChatError> {
             error: None,
             result_text: None,
             disposition: None,
+            terminal_result: None,
         };
         diesel::insert_into(turns::table)
-            .values(&turn)
+            .values(turn.clone())
             .execute(connection)
             .context(DatabaseSnafu {
                 operation: "begin chat turn",
@@ -302,10 +308,11 @@ pub fn begin(input: BeginTurnInputs) -> Result<TurnStarted, ChatError> {
                         attempted: crate::title::attempted(connection, &input.session_id)?,
                         enabled: true,
                     },
+                    model_context: crate::ModelContextRevision {
+                        revision: owner.context_revision,
+                    },
                 }),
-                prompt: input.prompt.clone(),
-                system: context.system,
-                history: Some(context.history),
+                messages: context.messages,
             },
         })
     })
@@ -386,47 +393,54 @@ fn validate_usage(usage: Option<&BTreeMap<String, i64>>) -> Result<(), ChatError
     Ok(())
 }
 
-pub fn validate_result(reply: &ConversationResult) -> Result<(), ChatError> {
+pub fn admitted_messages(
+    connection: &mut SqliteConnection,
+    turn: &Turn,
+) -> Result<Vec<mfn_llm::ChatMessage>, ChatError> {
+    let mut context = crate::context::at(connection, &turn.session_id, turn.context_revision)?;
+    let user = messages::table
+        .filter(messages::turn_id.eq(&turn.id))
+        .filter(messages::session_id.eq(&turn.session_id))
+        .filter(messages::sequence.eq(turn.sequence))
+        .select(crate::Message::as_select())
+        .first::<crate::Message>(connection)
+        .context(DatabaseSnafu {
+            operation: "load admitted user message",
+        })?;
     ensure!(
-        !reply.text.is_empty(),
+        matches!(user.payload, mfn_llm::ChatMessage::User { .. }),
         InvalidSnafu {
-            field: "text",
-            reason: "must be nonempty"
+            field: "admitted user",
+            reason: "must retain the original user message"
         }
     );
-    reply.validate()?;
-    ensure!(
-        reply.status == "succeeded",
-        InvalidSnafu {
-            field: "status",
-            reason: "completion requires a successful workflow result"
-        }
-    );
+    context.messages.push(user.payload);
+    Ok(context.messages)
+}
 
-    Ok(())
+pub fn validate_admitted(
+    connection: &mut SqliteConnection,
+    turn: &Turn,
+    response: &ConversationResult,
+) -> Result<(), ChatError> {
+    if let Some(alternatives) = turn.result_alternatives {
+        alternatives.validate(response)?;
+    }
+    response.validate_against(&admitted_messages(connection, turn)?)
+}
+
+pub fn validate_result(reply: &ConversationResult) -> Result<(), ChatError> {
+    reply.validate()
 }
 
 pub fn result_matches(call: &ModelCall, reply: &ConversationResult) -> bool {
-    call.result_text.as_deref() == Some(&reply.text)
-        && call.finish_reason == reply.finish_reason
-        && call.metadata == reply.metadata
-        && call.usages.as_deref().unwrap_or_default() == reply.usages.as_slice()
-        && call.result_title == reply.title
+    call.terminal_result.as_ref() == Some(reply)
 }
 
 pub fn saved_result(call: &ModelCall) -> Result<ConversationResult, ChatError> {
-    Ok(ConversationResult {
-        status: "succeeded".into(),
-        error: None,
-        title: call.result_title.clone(),
-        usages: call.usages.clone().unwrap_or_default(),
-        metadata: call.metadata.clone(),
-        text: call
-            .result_text
-            .clone()
-            .context(ConflictSnafu { id: &call.id })?,
-        finish_reason: call.finish_reason.clone(),
-    })
+    call.terminal_result
+        .clone()
+        .context(ConflictSnafu { id: &call.id })
 }
 
 pub fn save_response(
@@ -438,18 +452,17 @@ pub fn save_response(
 ) -> Result<(), ChatError> {
     diesel::update(model_calls::table.find(call_id))
         .set((
-            model_calls::state.eq("succeeded"),
+            model_calls::state.eq(&reply.status),
             model_calls::finished_at.eq(Some(timestamp)),
-            model_calls::finish_reason.eq(&reply.finish_reason),
-            model_calls::result_text.eq(Some(&reply.text)),
             model_calls::disposition.eq(Some(disposition)),
             model_calls::usages.eq(storage::StoredJson::from(Some(reply.usages.clone()))),
             model_calls::result_title.eq(&reply.title),
-            model_calls::metadata.eq(storage::StoredJson::from(reply.metadata.clone())),
+            model_calls::error.eq(reply.error.as_deref().map(failure_summary)),
+            model_calls::terminal_result.eq(storage::StoredJson::from(Some(reply.clone()))),
         ))
         .execute(connection)
         .context(DatabaseSnafu {
-            operation: "save model response and usage",
+            operation: "save terminal transcript and call facts",
         })?;
     Ok(())
 }
@@ -466,9 +479,15 @@ pub fn complete(input: CompleteTurnInputs) -> Result<CompletionOutputs, ChatErro
             ConflictSnafu { id: &call.id }
         );
         let turn = load_turn(connection, &input.invocation.turn_id)?;
-        if call.state == "succeeded" {
+        ensure!(
+            turn.session_id == call.session_id,
+            ConflictSnafu { id: &call.id }
+        );
+        if call.terminal_result.is_some() {
             ensure!(
-                turn.state == "succeeded" && result_matches(&call, &input.response),
+                turn.state == call.state
+                    && turn.state == input.response.status
+                    && result_matches(&call, &input.response),
                 ConflictSnafu { id: &call.id }
             );
             return Ok(CompletionOutputs {
@@ -482,25 +501,53 @@ pub fn complete(input: CompleteTurnInputs) -> Result<CompletionOutputs, ChatErro
             call.state == "running" && turn.state == "running",
             ConflictSnafu { id: &call.id }
         );
+        validate_admitted(connection, &turn, &input.response)?;
+        let owner = session::load(connection, &call.session_id)?;
+        if input.response.status == "succeeded" {
+            ensure!(
+                owner.context_revision == turn.context_revision,
+                ContextConflictSnafu {
+                    session_id: &owner.id,
+                    expected: turn.context_revision,
+                    actual: owner.context_revision
+                }
+            );
+        }
         let timestamp = session::now()?;
-        let message = crate::Message {
-            metadata: input.response.metadata.clone(),
-            id: uuid::Uuid::new_v4().to_string(),
-            session_id: call.session_id.clone(),
-            turn_id: turn.id.clone(),
-            sequence: turn.sequence.checked_add(1).context(ArithmeticSnafu {
-                operation: "order assistant message",
-            })?,
-            role: "assistant".into(),
-            content: input.response.text.clone(),
-            created_at: timestamp,
-        };
-        diesel::insert_into(messages::table)
-            .values(message)
-            .execute(connection)
-            .context(DatabaseSnafu {
-                operation: "save assistant message",
+        let count =
+            i64::try_from(input.response.display_messages().len()).context(IntegerSnafu {
+                operation: "count display additions",
             })?;
+        let next = owner
+            .next_sequence
+            .checked_add(count)
+            .context(ArithmeticSnafu {
+                operation: "allocate display message order",
+            })?;
+        for (index, payload) in input.response.display_messages().iter().enumerate() {
+            let offset = i64::try_from(index).context(IntegerSnafu {
+                operation: "order display additions",
+            })?;
+            let message = crate::Message {
+                id: uuid::Uuid::new_v4().to_string(),
+                session_id: owner.id.clone(),
+                turn_id: turn.id.clone(),
+                sequence: owner
+                    .next_sequence
+                    .checked_add(offset)
+                    .context(ArithmeticSnafu {
+                        operation: "order display message",
+                    })?,
+                payload: payload.clone(),
+                created_at: timestamp,
+            };
+            diesel::insert_into(messages::table)
+                .values(message)
+                .execute(connection)
+                .context(DatabaseSnafu {
+                    operation: "append display message",
+                })?;
+        }
         save_response(
             connection,
             &call.id,
@@ -508,26 +555,33 @@ pub fn complete(input: CompleteTurnInputs) -> Result<CompletionOutputs, ChatErro
             timestamp,
             "committed",
         )?;
-        crate::title::apply(
-            connection,
-            &call,
-            input.response.title.as_deref(),
-            timestamp,
-        )?;
         diesel::update(turns::table.find(&turn.id))
             .set((
-                turns::state.eq("succeeded"),
+                turns::state.eq(&input.response.status),
                 turns::finished_at.eq(Some(timestamp)),
+                turns::error.eq(input.response.error.as_deref().map(failure_summary)),
             ))
             .execute(connection)
             .context(DatabaseSnafu {
-                operation: "complete chat turn",
+                operation: "settle chat turn",
             })?;
-        diesel::update(sessions::table.find(&call.session_id))
-            .set(sessions::updated_at.eq(timestamp))
+        if input.response.status == "succeeded" {
+            crate::context::publish(connection, &owner, &turn, &input.response)?;
+            crate::title::apply(
+                connection,
+                &call,
+                input.response.title.as_deref(),
+                timestamp,
+            )?;
+        }
+        diesel::update(sessions::table.find(&owner.id))
+            .set((
+                sessions::next_sequence.eq(next),
+                sessions::updated_at.eq(timestamp),
+            ))
             .execute(connection)
             .context(DatabaseSnafu {
-                operation: "update completed session",
+                operation: "advance transcript allocation",
             })?;
         Ok(CompletionOutputs {
             completion: Completion {
@@ -663,14 +717,22 @@ fn get_call(input: RecordInputs) -> Result<CallOutputs, ChatError> {
 pub fn get_request(input: RecordInputs) -> Result<TurnRequestOutputs, ChatError> {
     let mut connection = storage::connect(Path::new(&input.database_path))?;
     let turn = load_turn(&mut connection, &input.id)?;
-    let prompt = messages::table
+    let user = messages::table
         .filter(messages::turn_id.eq(&turn.id))
-        .filter(messages::role.eq("user"))
-        .select(messages::content)
-        .first::<String>(&mut connection)
+        .filter(messages::sequence.eq(turn.sequence))
+        .select(crate::Message::as_select())
+        .first::<crate::Message>(&mut connection)
         .context(DatabaseSnafu {
             operation: "load original turn prompt",
         })?;
+    ensure!(
+        user.role() == "user",
+        InvalidSnafu {
+            field: "turn request",
+            reason: "requires the admitted user"
+        }
+    );
+    let prompt = user.content().to_owned();
     Ok(TurnRequestOutputs { turn, prompt })
 }
 
@@ -793,6 +855,29 @@ impl ChatDatabase {
             prompt: prompt.into(),
             model,
             retry_of,
+            result_alternatives: None,
+        })
+    }
+
+    pub fn validate_completion(
+        &self,
+        invocation: &Invocation,
+        response: &ConversationResult,
+    ) -> Result<(), ChatError> {
+        let mut connection = storage::connect(self.path())?;
+        connection.transaction(|connection| {
+            let call = load_call(connection, &invocation.call_id)?;
+            let turn = load_turn(connection, &invocation.turn_id)?;
+            ensure!(
+                call.session_id == invocation.session_id
+                    && turn.session_id == invocation.session_id
+                    && call.turn_id.as_deref() == Some(invocation.turn_id.as_str())
+                    && call.purpose == "conversation",
+                ConflictSnafu {
+                    id: &invocation.call_id
+                }
+            );
+            validate_admitted(connection, &turn, response)
         })
     }
 
@@ -929,10 +1014,7 @@ mod tests {
                 ])),
                 error: None,
             }],
-            metadata: None,
-            text: text.into(),
-            finish_reason: Some("stop".into()),
-            ..Default::default()
+            ..ConversationResult::assistant(text)
         }
     }
 
@@ -1031,14 +1113,15 @@ mod tests {
             .unwrap();
         assert_ne!(first.invocation.call_id, second.invocation.call_id);
         assert_ne!(first.invocation.turn_id, second.invocation.turn_id);
-        assert!(second.request.history.unwrap().is_empty());
+        assert_eq!(second.request.messages.len(), 1);
+        assert_eq!(second.request.prompt().unwrap(), "retry");
         database
             .complete_turn(second.invocation.clone(), reply("answer"))
             .unwrap();
-        let history = database.history(&session.id).unwrap();
-        assert_eq!(history.history.len(), 2);
+        let history = database.model_context(&session.id).unwrap();
+        assert_eq!(history.messages.len(), 2);
         assert!(
-            matches!(&history.history[0], mfn_llm::ChatMessage::User { content, .. } if content == "retry")
+            matches!(&history.messages[0], mfn_llm::ChatMessage::User { content, .. } if content == "retry")
         );
         assert_eq!(
             database.turn(&second.invocation.turn_id).unwrap().retry_of,
@@ -1108,7 +1191,13 @@ mod tests {
         let call = reopened.call(&begun.invocation.call_id).unwrap();
         assert_eq!(call.state, "interrupted");
         assert_eq!(call.total_tokens, None);
-        assert!(reopened.history(&session.id).unwrap().history.is_empty());
+        assert!(
+            reopened
+                .model_context(&session.id)
+                .unwrap()
+                .messages
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1131,6 +1220,7 @@ mod tests {
             prompt: "question".into(),
             model: identity(),
             retry_of: None,
+            result_alternatives: None,
         };
         let mut prompt = base.clone();
         prompt.prompt.clear();
@@ -1178,7 +1268,9 @@ mod tests {
             response: reply("answer"),
         };
         let mut empty = base.clone();
-        empty.response.text.clear();
+        empty.response.update = crate::MessageUpdate::Append {
+            messages: Vec::new(),
+        };
         let mut negative = base.clone();
         negative.response.usages[0].usage = Some(BTreeMap::from([("input_tokens".into(), -1)]));
         let mut unsupported = base.clone();

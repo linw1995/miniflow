@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-25",
+  "version": "2026-11-13",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -25,18 +25,10 @@
       "kind": "builtin.parameters",
       "config": {
         "parameters": {
-          "prompt": {
-            "type": "string"
-          },
-          "system": {
-            "type": "string",
-            "default": ""
-          },
-          "history": {
+          "messages": {
             "type": {
               "list": "object"
-            },
-            "default": []
+            }
           },
           "context": {
             "type": "object",
@@ -46,6 +38,9 @@
                 "revision": 0,
                 "attempted": false,
                 "enabled": true
+              },
+              "model_context": {
+                "revision": 0
               }
             }
           },
@@ -88,7 +83,30 @@
       "inputs": {
         "messages": {
           "from": {
-            "node": "model_messages",
+            "node": "params",
+            "port": "messages"
+          }
+        }
+      }
+    },
+    {
+      "id": "title_source",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "messages": {
+            "list": "object"
+          }
+        },
+        "code": {
+          "prompt": "messages[messages.size() - 1].content"
+        }
+      },
+      "inputs": {
+        "messages": {
+          "from": {
+            "node": "params",
             "port": "messages"
           }
         }
@@ -103,7 +121,7 @@
       "inputs": {
         "params.prompt": {
           "from": {
-            "node": "params",
+            "node": "title_source",
             "port": "prompt"
           }
         },
@@ -178,87 +196,143 @@
       }
     },
     {
-      "id": "model_messages",
+      "id": "title_available",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "yes",
+            "condition": {
+              "source": {
+                "output": "title.title",
+                "path": ""
+              },
+              "operator": "exists"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "selected_title",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "from": {
+            "node": "title",
+            "port": "title"
+          }
+        }
+      }
+    },
+    {
+      "id": "missing_title",
+      "kind": "builtin.constant",
+      "config": {
+        "value": ""
+      }
+    },
+    {
+      "id": "title_value",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "selected_title",
+              "port": "value"
+            },
+            {
+              "node": "missing_title",
+              "port": "value"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "result",
       "kind": "builtin.code",
       "config": {
         "language": "cel",
         "inputs": {
-          "prompt": "string",
-          "history": {
+          "status": "string",
+          "messages": {
             "list": "object"
           },
-          "system": "string"
+          "primary_usages": {
+            "list": "object"
+          },
+          "usages": {
+            "list": "object"
+          },
+          "title": "string"
         },
         "code": {
-          "messages": "(system == '' ? [] : [dyn({'role':'system','content':system})]) + history + [dyn({'role':'user','content':prompt})]"
+          "value": "title == '' ? {'status':dyn(status),'messages':dyn(messages),'usages':dyn(usages),'error':dyn(status == 'failed' ? primary_usages[0].error : '')} : {'status':dyn(status),'messages':dyn(messages),'usages':dyn(usages),'error':dyn(''),'title':dyn(title)}"
         }
       },
       "inputs": {
-        "prompt": {
+        "status": {
           "from": {
-            "node": "params",
-            "port": "prompt"
+            "node": "model",
+            "port": "status"
           }
         },
-        "history": {
+        "messages": {
           "from": {
-            "node": "params",
-            "port": "history"
+            "node": "model",
+            "port": "messages"
           }
         },
-        "system": {
+        "primary_usages": {
           "from": {
-            "node": "params",
-            "port": "system"
+            "node": "model",
+            "port": "usages"
+          }
+        },
+        "usages": {
+          "from": {
+            "node": "usages",
+            "port": "value"
+          }
+        },
+        "title": {
+          "from": {
+            "node": "title_value",
+            "port": "value"
           }
         }
       }
     }
   ],
+  "edges": [
+    {
+      "from_node": "title",
+      "to_node": "title_available"
+    },
+    {
+      "from_node": "title_available",
+      "from_output": "yes",
+      "to_node": "selected_title"
+    },
+    {
+      "from_node": "title_available",
+      "from_output": "else",
+      "to_node": "missing_title"
+    }
+  ],
   "outputs": [
     {
-      "name": "status",
-      "node": "model",
-      "port": "status"
-    },
-    {
-      "name": "text",
-      "node": "model",
-      "port": "text"
-    },
-    {
-      "name": "error",
-      "node": "model",
-      "port": "error",
-      "optional": true
-    },
-    {
-      "name": "metadata",
-      "node": "model",
-      "port": "metadata",
-      "optional": true
-    },
-    {
-      "name": "finish_reason",
-      "node": "model",
-      "port": "finish_reason",
-      "optional": true
-    },
-    {
-      "name": "usages",
-      "node": "usages",
+      "name": "append",
+      "node": "result",
       "port": "value"
-    },
-    {
-      "name": "title",
-      "node": "title",
-      "port": "title",
-      "optional": true
     },
     {
       "name": "answer",
       "node": "model",
-      "port": "delta"
+      "port": "delta",
+      "optional": true
     }
   ]
 }

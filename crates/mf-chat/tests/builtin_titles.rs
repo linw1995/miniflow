@@ -49,7 +49,7 @@ fn builtin_title_runs_once_and_persists_usage_with_the_answer() {
             .unwrap()
             .join()
             .unwrap();
-        assert_eq!(first.result.text, "First answer");
+        assert_eq!(first.result.final_text(), Some("First answer"));
         assert_eq!(
             first.result.title.as_deref(),
             (!failed).then_some("Generated title")
@@ -92,11 +92,15 @@ fn builtin_title_runs_once_and_persists_usage_with_the_answer() {
             .unwrap()
             .join()
             .unwrap();
-        assert_eq!(second.result.text, "Second answer");
+        assert_eq!(second.result.final_text(), Some("Second answer"));
         assert_eq!(second.result.usages.len(), 1);
         assert!(second.result.title.is_none());
         assert_eq!(
-            host.database().history(&session.id).unwrap().history.len(),
+            host.database()
+                .model_context(&session.id)
+                .unwrap()
+                .messages
+                .len(),
             4
         );
         assert_eq!(
@@ -180,9 +184,9 @@ fn cancelling_the_builtin_title_does_not_commit_an_intermediate_answer() {
     );
     assert!(
         host.database()
-            .history(&session.id)
+            .model_context(&session.id)
             .unwrap()
-            .history
+            .messages
             .is_empty()
     );
     host.close().unwrap();
@@ -220,22 +224,26 @@ fn conversation_finish_retains_the_title_for_save_only_retry() {
     );
     assert!(
         host.database()
-            .history(&session.id)
+            .model_context(&session.id)
             .unwrap()
-            .history
+            .messages
             .is_empty()
     );
     connection
         .batch_execute("DROP TRIGGER reject_title;")
         .unwrap();
     let saved = host.retry_completion(*pending).unwrap();
-    assert_eq!(saved.result.text, "Answer");
+    assert_eq!(saved.result.final_text(), Some("Answer"));
     assert_eq!(
         host.database().session(&session.id).unwrap().title,
         "Generated title"
     );
     assert_eq!(
-        host.database().history(&session.id).unwrap().history.len(),
+        host.database()
+            .model_context(&session.id)
+            .unwrap()
+            .messages
+            .len(),
         2
     );
     assert_eq!(server.requests().len(), 2);

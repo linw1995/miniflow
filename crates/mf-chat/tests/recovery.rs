@@ -45,9 +45,13 @@ fn metadata() -> mfn_llm::MessageMetadata {
 fn reply() -> ConversationResult {
     ConversationResult {
         usages: usages(),
-        metadata: Some(metadata()),
-        text: "paid reply".into(),
-        finish_reason: None,
+        update: mf_chat::MessageUpdate::Append {
+            messages: vec![mfn_llm::ChatMessage::Assistant {
+                content: "paid reply".into(),
+                tool_calls: None,
+                metadata: Some(metadata()),
+            }],
+        },
         ..Default::default()
     }
 }
@@ -55,9 +59,13 @@ fn stdout(text: &str) -> Vec<u8> {
     serde_json::to_vec(
         &ConversationResult {
             usages: usages(),
-            metadata: Some(metadata()),
-            text: text.into(),
-            finish_reason: None,
+            update: mf_chat::MessageUpdate::Append {
+                messages: vec![mfn_llm::ChatMessage::Assistant {
+                    content: text.into(),
+                    tool_calls: None,
+                    metadata: Some(metadata()),
+                }],
+            },
             ..Default::default()
         }
         .into_values()
@@ -68,7 +76,7 @@ fn stdout(text: &str) -> Vec<u8> {
 fn failure(database: &ChatDatabase, enabled: bool) {
     let mut connection =
         diesel::SqliteConnection::establish(database.path().to_str().unwrap()).unwrap();
-    connection.batch_execute(if enabled {"CREATE TRIGGER fail_reply BEFORE INSERT ON messages WHEN NEW.role='assistant' BEGIN SELECT RAISE(ABORT, 'synthetic save failure'); END;"} else {"DROP TRIGGER fail_reply;"}).unwrap();
+    connection.batch_execute(if enabled {"CREATE TRIGGER fail_reply BEFORE INSERT ON messages WHEN json_extract(NEW.payload, '$.role')='assistant' BEGIN SELECT RAISE(ABORT, 'synthetic save failure'); END;"} else {"DROP TRIGGER fail_reply;"}).unwrap();
 }
 
 #[test]
@@ -99,9 +107,9 @@ fn parent_save_retry_retains_the_original_reply_without_starting_another_call() 
     let saved = database.save_recovered(pending.clone()).unwrap();
     assert!(matches!(
         &database
-            .history(&invocation.session_id)
+            .model_context(&invocation.session_id)
             .unwrap()
-            .history[1],
+            .messages[1],
         mfn_llm::ChatMessage::Assistant { metadata: actual, .. } if actual == &Some(metadata())
     ));
     assert_eq!(saved.result, reply());
@@ -116,7 +124,13 @@ fn parent_save_retry_retains_the_original_reply_without_starting_another_call() 
     assert_eq!(performance.first_token.reported_calls, 1);
     assert_eq!(performance.end_to_end.tokens_per_second, None);
     let mut conflicting = reply();
-    conflicting.metadata = None;
+    let mf_chat::MessageUpdate::Append { messages } = &mut conflicting.update else {
+        unreachable!()
+    };
+    let mfn_llm::ChatMessage::Assistant { metadata, .. } = &mut messages[0] else {
+        unreachable!()
+    };
+    *metadata = None;
     assert!(
         database
             .complete_turn(invocation.clone(), conflicting)
@@ -273,19 +287,26 @@ fn late_output_cannot_admit_or_revive_a_conversation() {
         } else {
             assert!(matches!(resolution.state, CompletionState::NotBegun));
         }
-        assert!(matches!(
-            resolution.diagnostics.as_slice(),
-            [mf_chat::ChatError::Invalid {
-                field: "model reply",
-                ..
-            }]
-        ));
+        if invocation == cancelled {
+            assert!(matches!(
+                resolution.diagnostics.as_slice(),
+                [mf_chat::ChatError::Invalid {
+                    field: "workflow result",
+                    ..
+                }]
+            ));
+        } else {
+            assert!(matches!(
+                resolution.diagnostics.as_slice(),
+                [mf_chat::ChatError::CallMissing { .. }]
+            ));
+        }
     }
     assert!(
         database
-            .history(&cancelled.session_id)
+            .model_context(&cancelled.session_id)
             .unwrap()
-            .history
+            .messages
             .is_empty()
     );
     assert_eq!(
@@ -294,6 +315,13 @@ fn late_output_cannot_admit_or_revive_a_conversation() {
             .unwrap()
             .overall
             .attempted_calls,
+        0
+    );
+    assert_eq!(
+        database
+            .usage(Default::default())
+            .unwrap()
+            .unreported_invocations,
         1
     );
 }
@@ -317,7 +345,7 @@ fn failed_workflow_persists_all_reported_calls_atomically_without_an_assistant_m
     failed.error = Some("provider unavailable".into());
     reported.push(failed);
     let bytes = serde_json::to_vec(
-        &json!({"status":"failed", "usages":reported, "error":"workflow failed"}),
+        &json!({"append":{"status":"failed", "messages":[], "usages":reported, "error":"workflow failed"}}),
     )
     .unwrap();
     let exit = || ConversationExit {
@@ -328,14 +356,21 @@ fn failed_workflow_persists_all_reported_calls_atomically_without_an_assistant_m
     };
     let mut connection = diesel::SqliteConnection::establish(path.to_str().unwrap()).unwrap();
     connection.batch_execute("CREATE TRIGGER reject_usages BEFORE UPDATE OF usages ON model_calls BEGIN SELECT RAISE(ABORT, 'save failed'); END;").unwrap();
-    assert!(database.reconcile_completion(exit()).is_err());
+    let CompletionState::Uncommitted(pending) =
+        database.reconcile_completion(exit()).unwrap().state
+    else {
+        panic!("expected a retained failed result");
+    };
+    assert!(database.save_recovered(pending.clone()).is_err());
     assert_eq!(database.turn(&invocation.turn_id).unwrap().state, "running");
     assert!(database.call(&invocation.call_id).unwrap().usages.is_none());
     connection
         .batch_execute("DROP TRIGGER reject_usages;")
         .unwrap();
+    database.save_recovered(pending).unwrap();
     assert!(
-        matches!(database.reconcile_completion(exit()).unwrap().state, CompletionState::Finished(turn) if turn.state == "failed")
+        matches!(database.reconcile_completion(exit()).unwrap().state,
+        CompletionState::Committed(completion) if completion.result.status == "failed")
     );
     assert!(
         database
@@ -354,9 +389,9 @@ fn failed_workflow_persists_all_reported_calls_atomically_without_an_assistant_m
     );
     assert!(
         database
-            .history(&invocation.session_id)
+            .model_context(&invocation.session_id)
             .unwrap()
-            .history
+            .messages
             .is_empty()
     );
     let statistics = database.usage(Default::default()).unwrap().overall;
@@ -405,13 +440,13 @@ fn returned_history_cannot_rewrite_saved_message_metadata() {
     let second = database
         .begin_turn(&first.session_id, "next", profile.clone(), None)
         .unwrap();
-    assert!(matches!(&second.request.history.unwrap()[1],
+    assert!(matches!(&second.request.messages[1],
         mfn_llm::ChatMessage::Assistant { metadata: actual, .. } if actual == &Some(metadata())
     ));
     let mut output: serde_json::Value = serde_json::from_slice(&stdout("next reply")).unwrap();
     output["history"] =
         json!([{"role":"assistant","content":"rewritten","metadata":{"changed":true}}]);
-    output["metadata"] = json!({"current":true});
+    output["append"]["messages"][0]["metadata"] = json!({"current":true});
     let bytes = serde_json::to_vec(&output).unwrap();
     let resolution = database
         .reconcile_completion(ConversationExit {
@@ -425,7 +460,7 @@ fn returned_history_cannot_rewrite_saved_message_metadata() {
         panic!("expected retained reply");
     };
     database.save_recovered(pending).unwrap();
-    let history = database.history(&first.session_id).unwrap().history;
+    let history = database.model_context(&first.session_id).unwrap().messages;
     assert_eq!(
         history[1],
         mfn_llm::ChatMessage::Assistant {
@@ -469,13 +504,7 @@ fn unreported_workflow_invocations_are_not_counted_as_zero_model_calls() {
     database
         .complete_turn(
             known_empty.invocation,
-            ConversationResult {
-                text: "no model was needed".into(),
-                usages: Vec::new(),
-                metadata: None,
-                finish_reason: None,
-                ..Default::default()
-            },
+            ConversationResult::assistant("no model was needed"),
         )
         .unwrap();
     let statistics = database.usage(Default::default()).unwrap();
@@ -508,14 +537,19 @@ fn failed_results_cannot_overwrite_committed_or_different_terminal_results() {
     assert_eq!(resolution.diagnostics.len(), 1);
     let invocation = begin(&database);
     let mut invalid_completion = failed.clone();
-    invalid_completion.text = "intermediate answer".into();
+    invalid_completion.update = mf_chat::MessageUpdate::Append {
+        messages: vec![mf_chat::ChatMessage::User {
+            content: "not a generated role".into(),
+            metadata: None,
+        }],
+    };
     assert!(
         database
             .complete_turn(invocation.clone(), invalid_completion)
             .is_err()
     );
     assert_eq!(database.turn(&invocation.turn_id).unwrap().state, "running");
-    database
+    let resolution = database
         .reconcile_result(
             &invocation,
             Some(Ok(failed.clone())),
@@ -523,6 +557,10 @@ fn failed_results_cannot_overwrite_committed_or_different_terminal_results() {
             "failure",
         )
         .unwrap();
+    let CompletionState::Uncommitted(pending) = resolution.state else {
+        panic!("expected failed save-only result")
+    };
+    database.save_recovered(pending).unwrap();
     let original = database.call(&invocation.call_id).unwrap();
     let mut conflicting = failed.clone();
     conflicting.error = Some("different failure".into());

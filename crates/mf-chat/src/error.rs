@@ -87,6 +87,16 @@ pub enum ChatError {
     CallMissing { id: String },
     #[snafu(display("model call {id:?} has a conflicting identity, state, or response"))]
     Conflict { id: String },
+    #[snafu(display("model context {revision} for session {session_id:?} does not exist"))]
+    ContextMissing { session_id: String, revision: i64 },
+    #[snafu(display(
+        "model context for session {session_id:?} changed from {expected} to {actual}"
+    ))]
+    ContextConflict {
+        session_id: String,
+        expected: i64,
+        actual: i64,
+    },
     #[snafu(display("could not {operation}: {source}"))]
     Integer {
         operation: &'static str,

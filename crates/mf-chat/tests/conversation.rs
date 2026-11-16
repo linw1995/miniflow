@@ -123,7 +123,7 @@ fn cancellation_during_title_generation_does_not_recover_an_intermediate_answer(
     let server = Server::start(vec![Reply::text("answer"), title]);
     let result = probe(&server, "title_cancel", None);
     assert_eq!(result["state"], "cancelled");
-    assert_eq!(result["history"], 0);
+    assert_eq!(result["history"], 1);
     assert_eq!(result["unreported"], 1);
 }
 
@@ -255,7 +255,7 @@ fn execution_probe() {
             job.cancel();
             assert!(job.join().is_err());
             json!({"state":host.database().turn(&invocation.turn_id).unwrap().state,
-                "history":host.database().history(&session.id).unwrap().history.len(),
+                "history":host.database().model_context(&session.id).unwrap().messages.len(),
                 "unreported":host.database().usage(Default::default()).unwrap().unreported_invocations})
         }
         "title_auto" | "title_before" | "title_rename" | "title_failure" | "title_persistence" => {
@@ -327,7 +327,7 @@ fn execution_probe() {
         "conversation" | "no_metadata" => {
             let first = host.submit(&session.id, "first").unwrap().join().unwrap();
             let second = host.submit(&session.id, "second").unwrap().join().unwrap();
-            json!({"first":first, "second":second, "messages":host.database().history(&session.id).unwrap().history.len()})
+            json!({"first":first, "second":second, "messages":host.database().model_context(&session.id).unwrap().messages.len()})
         }
         "cancel" => {
             let job = host.submit(&session.id, "cancel me").unwrap();
@@ -336,7 +336,7 @@ fn execution_probe() {
             job.cancel();
             assert!(job.join().is_err());
             json!({"state":host.database().turn(&invocation.turn_id).unwrap().state,
-                "history":host.database().history(&session.id).unwrap().history.len()})
+                "history":host.database().model_context(&session.id).unwrap().messages.len()})
         }
         "capacity" => {
             let job = host.submit(&session.id, "pending").unwrap();
@@ -372,7 +372,7 @@ fn execution_probe() {
             );
             first.cancel();
             assert!(first.join().is_err());
-            json!({"fast":second.result.text, "other_messages":host.database().history(&other.id).unwrap().history.len()})
+            json!({"fast":second.result.final_text(), "other_messages":host.database().model_context(&other.id).unwrap().messages.len()})
         }
         "persistence" => {
             let mut connection =
@@ -402,7 +402,7 @@ fn execution_probe() {
                 .batch_execute("DROP TRIGGER reject_completion;")
                 .unwrap();
             let completion = host.retry_completion(*pending).unwrap();
-            json!({"text":completion.result.text, "messages":host.database().messages(&session.id, 10, None).unwrap().messages.len()})
+            json!({"text":completion.result.final_text(), "messages":host.database().messages(&session.id, 10, None).unwrap().messages.len()})
         }
         "abandon" => {
             let mut connection =
@@ -466,7 +466,7 @@ fn execution_probe() {
                 })
             ));
             json!({"result":result, "original_state":host.database().turn(&invocation.turn_id).unwrap().state,
-                "history":host.database().history(&session.id).unwrap().history.len()})
+                "history":host.database().model_context(&session.id).unwrap().messages.len()})
         }
         "cleanup" => {
             let mut connection =
@@ -521,16 +521,16 @@ fn embedded_conversation_preserves_two_turn_history_and_sparse_metadata() {
     second.body = body.to_string();
     let server = Server::start(vec![Reply::text("first answer"), second]);
     let result = probe(&server, "conversation", None);
-    assert_eq!(result["messages"], 4);
+    assert_eq!(result["messages"], 5);
     for turn in ["first", "second"] {
         let usage: mf_chat::CallUsage =
-            serde_json::from_value(result[turn]["result"]["usages"][0].clone()).unwrap();
+            serde_json::from_value(result[turn]["result"]["append"]["usages"][0].clone()).unwrap();
         let timing = usage.timing.unwrap();
         assert!(timing.is_valid() && timing.elapsed_us > 0);
         assert_eq!(timing.first_token_us, None);
     }
     assert_eq!(
-        result["second"]["result"]["usages"][0]["usage"],
+        result["second"]["result"]["append"]["usages"][0]["usage"],
         json!({"output_tokens":1})
     );
     let requests = server.requests();
@@ -564,7 +564,7 @@ fn cancellation_finalizes_the_turn_without_history() {
     let server = Server::start(vec![reply]);
     let result = probe(&server, "cancel", None);
     assert_eq!(result["state"], "cancelled");
-    assert_eq!(result["history"], 0);
+    assert_eq!(result["history"], 1);
 }
 
 #[test]
@@ -580,7 +580,7 @@ fn absent_system_and_usage_do_not_skip_response_persistence() {
     let server = Server::start(vec![reply.clone(), reply]);
     let result = probe(&server, "no_metadata", None);
     assert_eq!(result["messages"], 4);
-    assert!(result["first"]["result"]["usages"][0]["usage"].is_null());
+    assert!(result["first"]["result"]["append"]["usages"][0]["usage"].is_null());
     assert!(result["first"]["result"]["finish_reason"].is_null());
     assert_eq!(messages(&server.requests()[0]).len(), 1);
 }
@@ -719,8 +719,11 @@ fn abandoning_a_reply_preserves_identity_and_allows_a_fresh_polled_retry() {
     let server = Server::start(vec![Reply::text("uncommitted"), reply]);
     let result = probe(&server, "abandon", None);
     assert_eq!(result["original_state"], "cancelled");
-    assert_eq!(result["history"], 2);
-    assert_eq!(result["result"]["result"]["text"], "retry answer");
+    assert_eq!(result["history"], 3);
+    assert_eq!(
+        result["result"]["result"]["append"]["messages"][0]["content"],
+        "retry answer"
+    );
     let requests = server.requests();
     assert_eq!(requests.len(), 2);
     assert_eq!(messages(&requests[0]), messages(&requests[1]));

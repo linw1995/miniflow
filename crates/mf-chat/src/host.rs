@@ -275,6 +275,7 @@ impl ChatHost {
                 model: None,
             },
             retry_of,
+            result_alternatives: None,
         };
         let completed = Arc::new(AtomicBool::new(false));
         let worker_completed = completed.clone();
@@ -446,7 +447,22 @@ impl Inner {
             preview,
         )?;
         match resolution.state {
-            crate::contract::CompletionState::Committed(completion) => Ok(completion),
+            crate::contract::CompletionState::Committed(completion)
+                if completion.result.status == "succeeded" =>
+            {
+                Ok(completion)
+            }
+            crate::contract::CompletionState::Committed(completion) => WorkflowFailureSnafu {
+                message: crate::turn::failure_summary(
+                    completion
+                        .result
+                        .error
+                        .as_deref()
+                        .expect("validated failed result has an error"),
+                )
+                .to_owned(),
+            }
+            .fail(),
             crate::contract::CompletionState::Uncommitted(pending) => {
                 let source = resolution
                     .diagnostics

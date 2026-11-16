@@ -2,7 +2,7 @@
 
 use crate::{
     ChatDatabase, ChatError, Completion, ConversationInputs, ConversationResult, Invocation,
-    PreviewConsumer, PreviewEvent, Turn,
+    PreviewConsumer, PreviewEvent,
     contract::{ChatContract, CompletionState, ReconciledCompletion, TurnExit},
     error::*,
     flows,
@@ -97,6 +97,35 @@ impl WorkflowProfile {
         parameters: WorkflowArguments,
     ) -> Result<Self, ChatError> {
         let contract = ChatContract::from_manifest(&plan.manifest(registry)?)?;
+        let (nodes, _) = mf_compiler::prepare_definition(&plan.graph.definition, registry)?;
+        for output in plan
+            .graph
+            .definition
+            .outputs
+            .iter()
+            .filter(|output| matches!(output.name.as_ref(), "append" | "replace_context"))
+        {
+            let producer = nodes
+                .iter()
+                .find(|node| node.definition_id == output.node)
+                .expect("compiled output producer");
+            let port = producer
+                .metadata
+                .ports
+                .outputs
+                .iter()
+                .find(|port| port.name == output.port)
+                .expect("compiled output port");
+            ensure!(
+                port.value_type
+                    .compatibility_with(&mf_runtime::ValueType::Object)
+                    != mf_runtime::TypeCompatibility::Incompatible,
+                InvalidSnafu {
+                    field: "chat outputs",
+                    reason: "result alternatives require object-valued producers"
+                }
+            );
+        }
         let parameters =
             mf_runtime::resolve_workflow_inputs(&contract.parameters, &parameters, |name| {
                 std::env::var_os(name)
@@ -359,8 +388,7 @@ impl EmbeddedBackend {
 
 #[derive(Clone, Debug, NodeValue)]
 pub struct Settlement {
-    pub completion: Option<Completion>,
-    pub turn: Option<Turn>,
+    pub completion: Completion,
 }
 
 #[derive(Clone, Debug, NodeValue)]
@@ -374,31 +402,9 @@ fn settle(input: CompleteTurnInputs) -> Result<SettlementOutputs, ChatError> {
 }
 
 fn settle_result(input: CompleteTurnInputs) -> Result<Settlement, ChatError> {
-    input.response.validate()?;
-    if input.response.status == "succeeded" {
-        Ok(Settlement {
-            completion: Some(crate::turn::complete(input)?.completion),
-            turn: None,
-        })
-    } else {
-        crate::turn::fail(crate::nodes::FailTurnInputs {
-            database_path: input.database_path.clone(),
-            invocation: input.invocation.clone(),
-            state: "failed".into(),
-            error: input
-                .response
-                .error
-                .expect("validated failure has an error"),
-            usages: Some(input.response.usages),
-        })?;
-        Ok(Settlement {
-            completion: None,
-            turn: Some(crate::turn::load_turn(
-                &mut crate::storage::connect(std::path::Path::new(&input.database_path))?,
-                &input.invocation.turn_id,
-            )?),
-        })
-    }
+    Ok(Settlement {
+        completion: crate::turn::complete(input)?.completion,
+    })
 }
 
 register_operation!(
@@ -412,7 +418,7 @@ register_operation!(
 #[derive(Clone, Debug, NodeValue)]
 struct TitleGenerationContext {
     prompt: String,
-    context: crate::contract::TitleContext,
+    context: crate::contract::ConversationContext,
     model: mf_runtime::ValueRef,
     base_url: mf_runtime::ValueRef,
     api_key: mf_runtime::ValueRef,
@@ -437,8 +443,8 @@ impl TitleGenerationContext {
                 })
         };
         Ok(Some(Self {
-            prompt: request.prompt.clone(),
-            context: context.title.clone(),
+            prompt: request.prompt()?.to_owned(),
+            context: context.clone(),
             model: parameter("model")?,
             base_url: parameter("base_url")?,
             api_key: parameter("api_key")?,
@@ -570,7 +576,9 @@ impl TypedStreamNode for InvokeWorkflow {
         }
         let mut response = response?;
         calls.lock().unwrap().apply(&mut response.usages);
-        response.validate()?;
+        let mut connection = crate::storage::connect(std::path::Path::new(&input.database_path))?;
+        let admitted = crate::turn::load_turn(&mut connection, &input.invocation.turn_id)?;
+        crate::turn::validate_admitted(&mut connection, &admitted, &response)?;
         if self.title_parameters.is_none() {
             *self
                 .delivered
@@ -650,11 +658,15 @@ impl mf_runtime::TypedTaskNode for PrepareTitle {
         Ok(PreparedTitle {
             enabled: true,
             prompt: Some(title.prompt),
-            text: Some(completed.result.text),
+            text: Some(
+                completed
+                    .result
+                    .final_text()
+                    .expect("validated success has an answer")
+                    .to_owned(),
+            ),
             status: Some(completed.result.status),
-            context: Some(crate::contract::ConversationContext {
-                title: title.context,
-            }),
+            context: Some(title.context),
             model: Some(title.model),
             base_url: Some(title.base_url),
             api_key: Some(title.api_key),
@@ -950,6 +962,7 @@ impl mf_runtime::TypedTaskNode for CompleteWorkflow {
             }
         }
         let mut response = ConversationResult::decode(values)?;
+        response.validate_against(&input.started.request.messages)?;
         self.capture
             .calls
             .lock()
@@ -1069,6 +1082,7 @@ fn register_runner(
                         .then_some(&mut preview as &mut dyn FnMut(_) -> _),
                     Some(&observer),
                 )?;
+                contract.alternatives.validate(&result)?;
                 let mut values = result.into_values()?;
                 values.retain(|name, _| names.contains(name));
                 Ok(values)
@@ -1274,7 +1288,7 @@ pub fn run_conversation(
 
 pub fn run_conversation_with_preview(
     database: &ChatDatabase,
-    request: BeginTurnInputs,
+    mut request: BeginTurnInputs,
     backend: Arc<dyn ConversationBackend>,
     cancellation: StreamCancellation,
     automatic_titles: bool,
@@ -1319,6 +1333,9 @@ pub fn run_conversation_with_preview(
     } else {
         None
     };
+    if let Some((manifest, _)) = &composed {
+        request.result_alternatives = Some(ChatContract::from_manifest(manifest)?.alternatives);
+    }
     let ConversationPlan { mut plan, bindings } = if let Some((manifest, parameters)) = composed {
         compose_conversation(
             &manifest,
@@ -1445,15 +1462,7 @@ pub fn run_conversation_with_preview(
     })();
     match result {
         Ok(settlement) => {
-            let state = if let Some(completion) = settlement.completion {
-                CompletionState::Committed(completion)
-            } else {
-                CompletionState::Finished(
-                    settlement
-                        .turn
-                        .expect("settlement returns a terminal state"),
-                )
-            };
+            let state = CompletionState::Committed(settlement.completion);
             Ok(ReconciledCompletion {
                 state,
                 diagnostics: vec![],
@@ -1527,16 +1536,14 @@ mod tests {
             _: Self::Input,
             context: &mut ExecutionContext,
         ) -> Result<TypedNodeResult<Self::Output>, mf_runtime::NodeExecutionError> {
-            Ok(ConversationResult {
-                text: if context.output("begin.database_path").is_ok() {
+            Ok(
+                ConversationResult::assistant(if context.output("begin.database_path").is_ok() {
                     "leaked"
                 } else {
                     "isolated"
-                }
+                })
                 .into(),
-                ..Default::default()
-            }
-            .into())
+            )
         }
     }
 
@@ -1593,9 +1600,10 @@ mod tests {
                     database_path: "chat.sqlite".into(),
                     invocation: Invocation::new("session"),
                     request: ConversationInputs {
-                        prompt: "Hello".into(),
-                        system: None,
-                        history: None,
+                        messages: vec![mfn_llm::ChatMessage::User {
+                            content: "Hello".into(),
+                            metadata: None,
+                        }],
                         context: None,
                     },
                 }
@@ -1625,9 +1633,7 @@ mod tests {
             "version":"2026-10-19", "dependencies":{},
             "nodes":[{"id":"backend","kind":"test.chat.context"}],
             "outputs":[
-                {"name":"status","node":"backend","port":"status"},
-                {"name":"text","node":"backend","port":"text"},
-                {"name":"usages","node":"backend","port":"usages"}
+                {"name":"append","node":"backend","port":"append"}
             ]
         }"#,
         )
@@ -1638,9 +1644,10 @@ mod tests {
             .invoke(
                 &Invocation::new("session"),
                 ConversationInputs {
-                    prompt: "hello".into(),
-                    system: None,
-                    history: None,
+                    messages: vec![mfn_llm::ChatMessage::User {
+                        content: "hello".into(),
+                        metadata: None,
+                    }],
                     context: None,
                 },
                 &mut context,
@@ -1648,7 +1655,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        assert_eq!(result.text, "isolated");
+        assert_eq!(result.final_text(), Some("isolated"));
         assert!(context.output("begin.database_path").is_ok());
     }
 
@@ -1665,10 +1672,7 @@ mod tests {
         ) -> Result<ConversationResult, ChatError> {
             assert!(input.context.is_some());
             self.0.fetch_add(1, Ordering::Relaxed);
-            Ok(ConversationResult {
-                text: "answer".into(),
-                ..Default::default()
-            })
+            Ok(ConversationResult::assistant("answer"))
         }
     }
 
@@ -1680,10 +1684,7 @@ mod tests {
                     database_path: "chat.sqlite".into(),
                     invocation: Invocation::new("session"),
                     title_context: None,
-                    result: ConversationResult {
-                        text: "canonical".into(),
-                        ..Default::default()
-                    },
+                    result: ConversationResult::assistant("canonical"),
                 }),
             },
         }
@@ -1746,8 +1747,8 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .result
-                .text,
-            "canonical"
+                .final_text(),
+            Some("canonical")
         );
         assert!(effects.emissions[0].result.skipped.contains("preview"));
         assert_eq!(route.buffered_items(), Some(0));
@@ -1762,10 +1763,12 @@ mod tests {
         };
         let mut event = final_event();
         let request = ConversationInputs {
-            prompt: "Prompt".into(),
-            system: None,
-            history: None,
+            messages: vec![mfn_llm::ChatMessage::User {
+                content: "Prompt".into(),
+                metadata: None,
+            }],
             context: Some(crate::contract::ConversationContext {
+                model_context: crate::ModelContextRevision { revision: 0 },
                 title: crate::contract::TitleContext {
                     source: "provisional".into(),
                     revision: 0,
@@ -1828,11 +1831,14 @@ mod tests {
             let mut completed = final_event().event.completed.unwrap();
             completed.title_context = Some(TitleGenerationContext {
                 prompt: "Prompt".into(),
-                context: crate::contract::TitleContext {
-                    source: "provisional".into(),
-                    revision: 0,
-                    attempted: false,
-                    enabled: true,
+                context: crate::contract::ConversationContext {
+                    model_context: crate::ModelContextRevision { revision: 0 },
+                    title: crate::contract::TitleContext {
+                        source: "provisional".into(),
+                        revision: 0,
+                        attempted: false,
+                        enabled: true,
+                    },
                 },
                 model: "model".into(),
                 base_url: "http://localhost/v1".into(),
@@ -1934,9 +1940,10 @@ mod tests {
             database_path: "unused.sqlite".into(),
             invocation: Invocation::new("session"),
             request: ConversationInputs {
-                prompt: "hello".into(),
-                system: None,
-                history: None,
+                messages: vec![mfn_llm::ChatMessage::User {
+                    content: "hello".into(),
+                    metadata: None,
+                }],
                 context: None,
             },
         };
@@ -2009,6 +2016,7 @@ mod tests {
                 model: None,
             },
             retry_of: None,
+            result_alternatives: None,
         };
         let result = run_conversation(
             &database,
