@@ -1,4 +1,4 @@
-//! OpenAI-compatible function tools and conversation conversion for the LLM node.
+//! Shared transcript validation and OpenAI-compatible function tool conversion.
 
 use crate::{
     ChatMessage, InvalidInputSnafu, LlmExecutionError, LlmInputs, UnsupportedOutputSnafu,
@@ -6,7 +6,7 @@ use crate::{
 };
 use mf_runtime::{NodeEnum, NodeValue, ValueRef};
 use rig_core::{completion::CompletionRequest, message as rig};
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, PartialEq, Eq, NodeValue)]
@@ -86,6 +86,126 @@ pub struct CallResult {
     pub finish_reason: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TranscriptMode {
+    /// Every tool call has a matching result; an empty context snapshot is valid.
+    Complete,
+    /// Only the final tool-call batch may have results still outstanding.
+    Partial,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("message transcript `{path}` requires {requirement}"))]
+pub struct TranscriptError {
+    pub path: String,
+    pub requirement: &'static str,
+}
+
+/// Validates message structure without provider configuration or request construction.
+///
+/// Empty transcripts are valid. Callers enforce request- or turn-specific requirements,
+/// such as a nonempty request or a final assistant answer, separately.
+pub fn validate_transcript(
+    messages: &[ChatMessage],
+    mode: TranscriptMode,
+) -> Result<(), TranscriptError> {
+    let mut validator = TranscriptValidator::default();
+    for (index, message) in messages.iter().enumerate() {
+        validator.message(message, &format!("/messages/{index}"))?;
+    }
+    validator.finish(mode, "/messages")
+}
+
+#[derive(Default)]
+struct TranscriptValidator<'a> {
+    pending: BTreeMap<&'a str, &'a str>,
+    seen: BTreeSet<&'a str>,
+}
+
+impl<'a> TranscriptValidator<'a> {
+    fn message(
+        &mut self,
+        message: &'a ChatMessage,
+        path: &str,
+    ) -> Result<Option<&'a str>, TranscriptError> {
+        if !matches!(message, ChatMessage::ToolResult { .. }) {
+            require_transcript(
+                self.pending.is_empty(),
+                path,
+                "all pending tool results before another system, user or assistant message",
+            )?;
+        }
+        match message {
+            ChatMessage::System { content, .. } | ChatMessage::User { content, .. } => {
+                require_transcript(
+                    !content.is_empty(),
+                    &format!("{path}/content"),
+                    "nonempty text",
+                )?;
+            }
+            ChatMessage::Assistant {
+                content,
+                tool_calls,
+                ..
+            } => {
+                let calls = tool_calls.as_deref().unwrap_or_default();
+                require_transcript(
+                    !content.is_empty() || !calls.is_empty(),
+                    &format!("{path}/content"),
+                    "nonempty text or tool calls",
+                )?;
+                for (index, call) in calls.iter().enumerate() {
+                    let path = format!("{path}/tool_calls/{index}");
+                    require_transcript(
+                        !call.id.trim().is_empty(),
+                        &format!("{path}/id"),
+                        "a nonblank tool call ID",
+                    )?;
+                    require_transcript(
+                        self.seen.insert(call.id.as_str()),
+                        &format!("{path}/id"),
+                        "unique tool call IDs",
+                    )?;
+                    require_transcript(
+                        valid_name(&call.name),
+                        &format!("{path}/name"),
+                        "a tool name of 1-64 ASCII letters, digits, underscores or hyphens",
+                    )?;
+                    self.pending.insert(call.id.as_str(), call.name.as_str());
+                }
+            }
+            ChatMessage::ToolResult { tool_call_id, .. } => {
+                return self.tool_result(tool_call_id, path).map(Some);
+            }
+        }
+        Ok(None)
+    }
+
+    fn tool_result(&mut self, id: &str, path: &str) -> Result<&'a str, TranscriptError> {
+        self.pending.remove(id).context(TranscriptSnafu {
+            path: format!("{path}/tool_call_id"),
+            requirement: "a tool_call_id matching one pending assistant call",
+        })
+    }
+
+    fn finish(self, mode: TranscriptMode, path: &str) -> Result<(), TranscriptError> {
+        require_transcript(
+            mode == TranscriptMode::Partial || self.pending.is_empty(),
+            path,
+            "a result for every pending tool call",
+        )
+    }
+}
+
+fn require_transcript(
+    condition: bool,
+    path: &str,
+    requirement: &'static str,
+) -> Result<(), TranscriptError> {
+    ensure!(condition, TranscriptSnafu { path, requirement });
+    Ok(())
+}
+
 pub fn prepare_request(inputs: &LlmInputs) -> Result<CompletionRequest, LlmExecutionError> {
     let mut names = BTreeSet::new();
     let mut tools = Vec::new();
@@ -111,33 +231,17 @@ pub fn prepare_request(inputs: &LlmInputs) -> Result<CompletionRequest, LlmExecu
         });
     }
 
-    let mut pending = BTreeMap::new();
-    let mut seen = BTreeSet::new();
+    let mut validator = TranscriptValidator::default();
     let mut messages = Vec::new();
     for (index, message) in inputs.messages.iter().enumerate() {
-        let path = format!("/messages/{index}");
-        if !matches!(message, ChatMessage::ToolResult { .. }) {
-            require(
-                pending.is_empty(),
-                &path,
-                "all pending tool results before another system, user or assistant message",
-            )?;
-        }
+        let tool_name = validator
+            .message(message, &format!("/messages/{index}"))
+            .context(crate::TranscriptSnafu)?;
         let converted = match message {
-            ChatMessage::System { content, .. } | ChatMessage::User { content, .. } => {
-                require(
-                    !content.is_empty(),
-                    &format!("{path}/content"),
-                    "nonempty text",
-                )?;
-                if matches!(message, ChatMessage::System { .. }) {
-                    rig::Message::System {
-                        content: content.clone(),
-                    }
-                } else {
-                    rig::Message::user(content)
-                }
-            }
+            ChatMessage::System { content, .. } => rig::Message::System {
+                content: content.clone(),
+            },
+            ChatMessage::User { content, .. } => rig::Message::user(content),
             ChatMessage::Assistant {
                 content: text,
                 tool_calls,
@@ -148,13 +252,6 @@ pub fn prepare_request(inputs: &LlmInputs) -> Result<CompletionRequest, LlmExecu
                     content.push(rig::AssistantContent::Text(text.clone().into()));
                 }
                 for call in tool_calls.as_deref().unwrap_or_default() {
-                    require(
-                        !call.id.trim().is_empty() && seen.insert(&call.id),
-                        &path,
-                        "nonblank unique tool call IDs",
-                    )?;
-                    require(valid_name(&call.name), &path, "a valid tool name")?;
-                    pending.insert(call.id.as_str(), call.name.as_str());
                     content.push(rig::AssistantContent::ToolCall(rig::ToolCall::from_wire(
                         call.id.clone(),
                         rig::ToolFunction::new(
@@ -164,11 +261,6 @@ pub fn prepare_request(inputs: &LlmInputs) -> Result<CompletionRequest, LlmExecu
                         ),
                     )));
                 }
-                require(
-                    !content.is_empty(),
-                    &format!("{path}/content"),
-                    "nonempty text or tool calls",
-                )?;
                 rig::Message::Assistant { id: None, content }
             }
             ChatMessage::ToolResult {
@@ -178,9 +270,8 @@ pub fn prepare_request(inputs: &LlmInputs) -> Result<CompletionRequest, LlmExecu
             } => rig::Message::tool_results(vec![encode_tool_result(
                 tool_call_id,
                 content,
-                &mut pending,
-                &path,
-            )?]),
+                tool_name.expect("validated tool result matched an assistant call"),
+            )]),
         };
         messages.push(converted);
     }
@@ -190,44 +281,34 @@ pub fn prepare_request(inputs: &LlmInputs) -> Result<CompletionRequest, LlmExecu
             .iter()
             .enumerate()
             .map(|(index, result)| {
-                encode_tool_result(
-                    &result.tool_call_id,
-                    &result.content,
-                    &mut pending,
-                    &format!("/tool_results/{index}"),
-                )
+                validator
+                    .tool_result(&result.tool_call_id, &format!("/tool_results/{index}"))
+                    .map(|name| encode_tool_result(&result.tool_call_id, &result.content, name))
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()
+            .context(crate::TranscriptSnafu)?;
         messages.push(rig::Message::tool_results(results));
     }
-    require(
-        pending.is_empty(),
-        if inputs.tool_results.is_empty() {
-            "/messages"
-        } else {
-            "/tool_results"
-        },
-        "a result for every pending tool call",
-    )?;
+    validator
+        .finish(
+            TranscriptMode::Complete,
+            if inputs.tool_results.is_empty() {
+                "/messages"
+            } else {
+                "/tool_results"
+            },
+        )
+        .context(crate::TranscriptSnafu)?;
     require(!messages.is_empty(), "/messages", "a nonempty message list")?;
     Ok(CompletionRequest::from(messages).tools(tools))
 }
 
-fn encode_tool_result(
-    id: &str,
-    content: &str,
-    pending: &mut BTreeMap<&str, &str>,
-    path: &str,
-) -> Result<rig::ToolResult, LlmExecutionError> {
-    let name = pending.remove(id).context(InvalidInputSnafu {
-        path: format!("{path}/tool_call_id"),
-        requirement: "a tool_call_id matching one pending assistant call",
-    })?;
-    Ok(rig::ToolResult {
+fn encode_tool_result(id: &str, content: &str, name: &str) -> rig::ToolResult {
+    rig::ToolResult {
         call: rig::CallId::from_wire(id),
         name: rig::ToolName::new(name).expect("validated pending tool name"),
         content: vec![rig::ToolResultContent::Text(content.into())],
-    })
+    }
 }
 
 pub fn assistant_message(result: &CallResult) -> ChatMessage {

@@ -1,7 +1,10 @@
 pub mod call;
 pub mod flows;
 pub mod tools;
-pub use call::{CallOutcome, ToolCall, ToolCallEvent, ToolDefinition, ToolResult};
+pub use call::{
+    CallOutcome, ToolCall, ToolCallEvent, ToolDefinition, ToolResult, TranscriptError,
+    TranscriptMode, validate_transcript,
+};
 mod streaming;
 #[cfg(feature = "test-support")]
 #[path = "../tests/support/mod.rs"]
@@ -103,6 +106,30 @@ pub enum ChatMessage {
         metadata: Option<MessageMetadata>,
     },
 }
+
+// Persistence delegates to the native codecs instead of maintaining a second field schema.
+macro_rules! impl_message_serde {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl serde::Serialize for $ty {
+                fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                    let value = mf_runtime::OutputValue::encode(self.clone())
+                        .map_err(serde::ser::Error::custom)?;
+                    serde::Serialize::serialize(&value, serializer)
+                }
+            }
+
+            impl<'de> serde::Deserialize<'de> for $ty {
+                fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                    let value = <ValueRef as serde::Deserialize>::deserialize(deserializer)?;
+                    mf_runtime::InputValue::decode(value).map_err(serde::de::Error::custom)
+                }
+            }
+        )+
+    };
+}
+
+impl_message_serde!(ChatMessage, ToolCall, ToolResult);
 
 #[derive(Clone, Debug, NodeValue)]
 pub struct LlmInputs {
@@ -359,6 +386,8 @@ fn parse_config(value: Value) -> Result<Config, NodeBuildError> {
 pub enum LlmExecutionError {
     #[snafu(transparent)]
     Configuration { source: LlmConfigError },
+    #[snafu(display("invalid LLM request transcript: {source}"))]
+    Transcript { source: TranscriptError },
     #[snafu(display("LLM input `{path}` requires {requirement}"))]
     InvalidInput {
         path: String,

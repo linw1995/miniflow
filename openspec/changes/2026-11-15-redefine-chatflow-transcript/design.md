@@ -2,7 +2,8 @@
 
 ## Status and scope
 
-Proposed design only. This change does not implement the protocol.
+Implementation is in progress. Shared message codecs and transcript validation are the first
+foundation; chatflow admission, durable context, Agent exports, and UI integration remain pending.
 
 A chatflow owns its Agent loop, tools, failure policy, and explicit accounting. `mf-chat` owns
 admission, durable state, recovery, and presentation. Separate the append-only conversation

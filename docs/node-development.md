@@ -25,7 +25,20 @@ in the provider request and must match pending assistant call IDs. Flows own his
 `ToolResult` variants. Only the assistant variant carries `tool_calls`; the tool-result variant
 requires `tool_call_id`. `ToolResult` converts into `ChatMessage::ToolResult` for caller-managed history.
 Individual messages use `InputValue::decode` and `OutputValue::encode`; enclosing node contracts
-continue to use `NodeValue`.
+continue to use `NodeValue`. `ChatMessage`, `ToolCall`, and `ToolResult` also implement Serde by
+calling those same native codecs, so persisted JSON preserves strict role-specific fields, required
+arguments, optional omission, and metadata. Use `mf_runtime::decode_unique_json` at bounded external
+JSON byte boundaries to reject duplicate keys before typed decoding. Serialization retains business
+values, including secret payloads, and rejects native Flow capabilities instead of redacting them
+or writing placeholders.
+
+`mfn_llm::validate_transcript` checks content, tool names, unique nonblank call IDs, and matching
+results without provider configuration, request construction, or I/O. `TranscriptMode::Complete`
+requires all calls to be resolved; `TranscriptMode::Partial` permits outstanding results only in the
+final call batch. Both modes accept an empty transcript, so callers can validate an empty context
+snapshot; model requests still require messages. `TranscriptError` reports the indexed failing path
+and remains a typed source of request-preparation errors. Callers own additional rules such as a
+final assistant answer and validate independent context/display views separately.
 See [terminal conversations](workflows.md#llm-configuration-and-conversation-values) and
 [tool calls](workflows.md#llm-tool-calls).
 

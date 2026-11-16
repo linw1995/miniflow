@@ -1,7 +1,7 @@
 ## 1. Shared messages and chatflow contract
 
-- [ ] Extract provider-independent complete/pending-prefix transcript validation in `mfn-llm` with typed indexed errors.
-- [ ] Add strict JSON persistence support for the existing `ChatMessage` and `ToolCall` codecs; test runtime/JSON parity.
+- [x] Extract provider-independent complete/pending-prefix transcript validation in `mfn-llm` with typed indexed errors.
+- [x] Add strict JSON persistence support for the existing `ChatMessage` and `ToolCall` codecs; test runtime/JSON parity.
 - [ ] Bind admitted model context plus current user through `messages`; expose context revision through optional application context.
 - [ ] Normalize self-contained append/replace_context result objects into internal facts and MessageUpdate variants, without a Flow update/kind wrapper.
 - [ ] Keep status/usages/error/title inside each result; support append-only, replace-only, or two optional branch outputs with at least one advertised.
