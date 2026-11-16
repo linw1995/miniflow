@@ -32,7 +32,7 @@ Public admission and execution switch together with durable storage; no legacy-r
 
 - [ ] Keep built-in conversation orchestration separate from user answer/tool/compaction policy, shared persistence handlers, host resource management, and abort cleanup.
 - [ ] Make `mfn-llm.agent` consume messages, append terminal assistants, and export only generated assistant/tool additions.
-- [ ] Retain completed rounds and usages on captured failures and iteration limits, preserving ordered parallel tool results.
+- [x] Retain completed rounds and usages on captured failures and iteration limits, preserving ordered parallel tool results.
 - [ ] Export a single incremental result as append; assemble Agent status/messages/usages with an ordinary object only when needed, not a branch merge.
 - [ ] Add a replacement example returning full continuation context and original display additions, including compaction of this turn's tool output.
 - [ ] Update application completion and registered runners to handle produced/skipped alternative ports without skipping settlement on an inactive branch.

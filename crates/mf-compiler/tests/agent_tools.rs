@@ -171,6 +171,19 @@ fn assert_success(output: &Value, text: &str, calls: usize) {
     assert_eq!(output["status"], "succeeded", "{output}");
     assert_eq!(output["text"], text);
     assert!(output.get("error").is_none_or(|error| error == ""));
+    let generated = <Vec<mfn_llm::ChatMessage> as mf_runtime::InputValue>::decode(
+        output["messages"].clone().into(),
+    )
+    .unwrap();
+    mfn_llm::validate_transcript(&generated, mfn_llm::TranscriptMode::Complete).unwrap();
+    assert!(generated.iter().all(|message| matches!(
+        message,
+        mfn_llm::ChatMessage::Assistant { .. } | mfn_llm::ChatMessage::ToolResult { .. }
+    )));
+    assert_eq!(
+        output["messages"].as_array().unwrap().last().unwrap()["content"],
+        text
+    );
     let usages = output["usages"].as_array().unwrap();
     assert_eq!(usages.len(), calls);
     for usage in usages {
@@ -343,10 +356,10 @@ fn zero_one_and_three_tool_supersets_keep_the_same_agent_source_and_ports() {
     assert_eq!(shared_inputs["tool_properties"], json!({"map":"object"}));
     assert_eq!(shared_inputs["tool_definitions"], json!({"list":"object"}));
     let variables = repeat["config"]["variables"].as_array().unwrap();
-    assert_eq!(variables.len(), 5);
+    assert_eq!(variables.len(), 6);
     assert!(variables.iter().all(|variable| variable["type"] != "flow"));
     let body = &repeat["config"]["body"];
-    assert_eq!(body["outputs"].as_array().unwrap().len(), 5);
+    assert_eq!(body["outputs"].as_array().unwrap().len(), 6);
     assert!(
         body["nodes"]
             .as_array()
@@ -513,7 +526,7 @@ fn calculator_parallel_calls_preserve_provider_order_schema_and_usage_in_both_mo
             {"role":"user", "content":"Earlier question"},
             {"role":"assistant", "content":"Earlier answer"}
         ]);
-        if stream {
+        let output = if stream {
             let outputs = finite_stream(definition, args.clone());
             assert_success(terminal(&outputs), "Five and twelve", 2);
             assert_eq!(
@@ -523,11 +536,25 @@ fn calculator_parallel_calls_preserve_provider_order_schema_and_usage_in_both_mo
                     .collect::<String>(),
                 "Five and twelve"
             );
+            terminal(&outputs).clone()
         } else {
             let (output, recording) = memory(definition, args.clone());
             assert_success(&output, "Five and twelve", 2);
             assert_catalog_once_outside_loop(&recording, 1);
-        }
+            output
+        };
+        assert_eq!(
+            output["messages"],
+            json!([
+                {"role":"assistant","content":"","tool_calls":[
+                    {"id":"addition","name":"calculator","arguments":{"operation":"add","left":2.0,"right":3.0}},
+                    {"id":"product","name":"calculator","arguments":{"operation":"multiply","left":3.0,"right":4.0}}
+                ]},
+                {"role":"tool","tool_call_id":"addition","content":"5.0"},
+                {"role":"tool","tool_call_id":"product","content":"12.0"},
+                {"role":"assistant","content":"Five and twelve"}
+            ])
+        );
         let requests = server.requests();
         assert_eq!(requests.len(), 2);
         assert_calculator_schema(&requests[0].body["tools"]);
@@ -561,6 +588,10 @@ fn empty_agent_completes_a_direct_answer_without_advertising_tools() {
     let server = Server::start(vec![Reply::text("Direct answer")]);
     let (output, recording) = memory(configured_agent(BTreeMap::new()), inputs(&server));
     assert_success(&output, "Direct answer", 1);
+    assert_eq!(
+        output["messages"],
+        json!([{"role":"assistant","content":"Direct answer"}])
+    );
     assert_catalog_once_outside_loop(&recording, 0);
     let requests = server.requests();
     assert_eq!(requests.len(), 1);
@@ -609,6 +640,7 @@ fn provider_failure_is_a_failed_agent_result_without_another_turn() {
     let (output, _) = memory(configured_agent(calculator_tools()), inputs(&server));
     assert_eq!(output["status"], "failed");
     assert_eq!(output["text"], "");
+    assert_eq!(output["messages"], json!([]));
     let error = output["error"].as_str().unwrap();
     assert!(error.contains("401"), "{output}");
     assert!(!output.to_string().contains("PRIVATE_PROVIDER_SENTINEL"));
@@ -616,6 +648,43 @@ fn provider_failure_is_a_failed_agent_result_without_another_turn() {
     assert_eq!(output["usages"].as_array().unwrap().len(), 1);
     assert!(output["usages"][0]["error"].as_str().is_some());
     assert_eq!(server.requests().len(), 1);
+}
+
+#[test]
+fn later_model_failure_retains_completed_rounds_without_a_placeholder() {
+    for captured in [true, false] {
+        let mut failure = Reply::json(json!({"error":{"message":"Unavailable"}}));
+        failure.status = 503;
+        if !captured {
+            let mut payload: Value = serde_json::from_str(&Reply::text("").body).unwrap();
+            payload["choices"][0]["finish_reason"] = "content_filter".into();
+            failure = Reply::json(payload);
+        }
+        let server = Server::start(vec![
+            tool_reply(
+                json!([call(
+                    "completed",
+                    "calculator",
+                    json!({"operation":"add","left":2.0,"right":3.0})
+                )]),
+                false,
+            ),
+            failure,
+        ]);
+        let (output, _) = memory(configured_agent(calculator_tools()), inputs(&server));
+        assert_eq!(output["status"], "failed");
+        assert_eq!(output["usages"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            output["messages"],
+            json!([
+                {"role":"assistant","content":"","tool_calls":[
+                    {"id":"completed","name":"calculator","arguments":{"operation":"add","left":2.0,"right":3.0}}
+                ]},
+                {"role":"tool","tool_call_id":"completed","content":"5.0"}
+            ])
+        );
+        assert_eq!(server.requests().len(), 2);
+    }
 }
 
 #[test]
@@ -643,6 +712,16 @@ fn native_agent_loop_stops_after_eight_tool_turns() {
         "{output}"
     );
     assert_eq!(output["usages"].as_array().unwrap().len(), 8);
+    let generated = output["messages"].as_array().unwrap();
+    assert_eq!(generated.len(), 16);
+    for (round, exchange) in generated.as_chunks::<2>().0.iter().enumerate() {
+        assert_eq!(exchange[0]["role"], "assistant");
+        assert_eq!(exchange[0]["tool_calls"][0]["id"], format!("round-{round}"));
+        assert_eq!(
+            exchange[1],
+            json!({"role":"tool","tool_call_id":format!("round-{round}"),"content":"5.0"})
+        );
+    }
     let requests = server.requests();
     assert_eq!(requests.len(), 8);
     for (round, request) in requests.iter().enumerate() {
@@ -774,7 +853,7 @@ fn secret_tool_results_reach_the_model_but_not_agent_snapshots_or_catalog() {
             .unwrap(),
         &json!({"role":"tool", "tool_call_id":"private-result", "content":SECRET})
     );
-    assert!(!output.to_string().contains(SECRET));
+    assert_eq!(output["messages"][1]["content"], SECRET);
     let history = recording.history();
     assert!(
         history

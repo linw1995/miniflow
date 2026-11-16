@@ -18,7 +18,11 @@ The optional [`mfn-llm`](../crates/builtin-nodes/llm/) package registers `builti
 a current assistant `message` output, and optional typed `delta` and `tool_call` streams. Select it explicitly to add its HTTP transport dependencies.
 Its factory validates configuration without credentials or I/O; execution uses optional shared future driving.
 The node also accepts function `tools` and explicit `tool_results`, both optional list inputs, and returns
-tool calls in its current assistant message and its `tool_calls` output. Explicit results follow `messages`
+tool calls in its current assistant message and its `tool_calls` output. The required `messages`
+output is the generated zero-or-one-message addition: it is empty for captured failures without a
+message, never an input echo or placeholder. Agent composition accumulates these additions and
+ordered tool results, including the terminal assistant, without conflating them with request history.
+Explicit results follow `messages`
 in the provider request and must match pending assistant call IDs. Flows own history and persistence.
 `ToolDefinition`, `ToolCall`, `ToolResult`, and `ToolCallEvent` are exported by `mfn_llm`;
 `ChatMessage` derives `NodeEnum` with the `role` tag and has `System`, `User`, `Assistant`, and

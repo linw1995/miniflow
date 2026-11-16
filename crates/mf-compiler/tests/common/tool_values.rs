@@ -184,6 +184,7 @@ pub fn configured_agent(tools: BTreeMap<String, FlowTool>) -> WorkflowDefinition
         {"name":"answer","node":"agent","port":"answer","optional":true},
         {"name":"status","node":"agent","port":"status"},
         {"name":"text","node":"agent","port":"text"},
+        {"name":"messages","node":"agent","port":"messages"},
         {"name":"usages","node":"agent","port":"usages"},
         {"name":"error","node":"agent","port":"error","optional":true}
     ]);
