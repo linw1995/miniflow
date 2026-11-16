@@ -53,7 +53,8 @@ fn generated_task_and_stream_runners_reject_runtime_contract_changes_before_disp
             assert!(!output.status.success(), "{mode} was accepted");
             let diagnostic = String::from_utf8_lossy(&output.stderr);
             assert!(
-                diagnostic.contains("interface drift") && diagnostic.contains("/source.~1~0"),
+                diagnostic.contains("prepared metadata differs from the compiled contract")
+                    && diagnostic.contains("source./~"),
                 "{diagnostic}"
             );
             assert!(!marker.exists(), "{mode} dispatched business execution");

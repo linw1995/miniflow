@@ -54,6 +54,10 @@ pub enum BindError {
     ))]
     Kind { definition_id: DefinitionId },
     #[snafu(display(
+        "compiled node `{definition_id}` success-dependency capability differs from its compiled contract"
+    ))]
+    SuccessDependencies { definition_id: DefinitionId },
+    #[snafu(display(
         "compiled node `{definition_id}` Flow bindings differ from its provider declaration"
     ))]
     Bindings { definition_id: DefinitionId },
@@ -141,7 +145,7 @@ pub fn bind(
             .and_then(NodeExecution::as_task_node)
             .is_some_and(|task| task.supports_success_dependencies())
             == supports_success_dependencies,
-        KindSnafu {
+        SuccessDependenciesSnafu {
             definition_id: node.definition_id.clone()
         }
     );

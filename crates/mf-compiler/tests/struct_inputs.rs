@@ -269,7 +269,8 @@ fn generated_struct_inputs_match_memory_and_freeze_the_interface() {
         let diagnostic = String::from_utf8_lossy(&output.stderr);
         assert!(!output.status.success());
         assert!(
-            diagnostic.contains("interface drift") && diagnostic.contains("/typed.~1~0/count"),
+            diagnostic.contains("prepared metadata differs from the compiled contract")
+                && diagnostic.contains("typed./~"),
             "{diagnostic}"
         );
         assert!(!marker.exists());

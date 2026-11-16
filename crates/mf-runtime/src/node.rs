@@ -681,8 +681,8 @@ pub fn output_id(node: &str, port: &str) -> String {
 
 #[derive(Debug, Snafu)]
 pub enum NodeBuildError {
-    #[snafu(display("prepared metadata differs from the compiled typed generation contract"))]
-    GenerationMetadataMismatch,
+    #[snafu(display("prepared metadata differs from the compiled contract: {component}"))]
+    GenerationMetadataMismatch { component: &'static str },
     #[snafu(transparent)]
     Generation { source: TypedGenerationError },
 
@@ -1148,10 +1148,32 @@ pub fn verify_generated_metadata(
     actual: &NodeMetadata,
     expected: &NodeContract,
 ) -> Result<(), NodeBuildError> {
-    ensure!(
-        NodeContract::from(actual) == *expected,
-        GenerationMetadataMismatchSnafu
-    );
+    for (component, matches) in [
+        ("prepared port contract", actual.ports == expected.ports),
+        (
+            "prepared port contract (stream outputs)",
+            actual.stream_outputs == expected.stream_outputs,
+        ),
+        (
+            "exclusive output contract",
+            actual.exclusive_outputs == expected.exclusive_outputs,
+        ),
+        (
+            "input bindings",
+            actual.input_bindings == expected.input_bindings,
+        ),
+        (
+            "context references",
+            actual.context_references == expected.context_references,
+        ),
+        ("stdin ownership", actual.stdin == expected.stdin),
+        (
+            "typed generation declaration",
+            actual.typed_generation == expected.typed_generation,
+        ),
+    ] {
+        ensure!(matches, GenerationMetadataMismatchSnafu { component });
+    }
     Ok(())
 }
 

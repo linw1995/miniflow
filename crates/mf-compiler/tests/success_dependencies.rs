@@ -837,7 +837,11 @@ fn standalone_success_dependencies_match_memory_and_preserve_manifests() {
                 .output()
                 .unwrap();
             assert!(!rejected.status.success());
-            assert!(String::from_utf8_lossy(&rejected.stderr).contains("ordinary Tasks"));
+            let diagnostic = String::from_utf8_lossy(&rejected.stderr);
+            assert!(
+                diagnostic.contains("success-dependency capability differs"),
+                "{diagnostic}"
+            );
             assert!(
                 !path.exists(),
                 "preparation must reject drift before any side effect"
