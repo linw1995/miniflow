@@ -658,6 +658,7 @@ fn skipped_body_nodes_report_their_item_and_dependency() {
 }
 
 fn assert_generated_observation(project: &Path, scratch: &Path) {
+    common::link_compiler_for_custom_host(project);
     let plan = mf_compiler::CompiledWorkflow::from_json(
         &fs::read_to_string(project.join("workflow-plan.json")).unwrap(),
     )

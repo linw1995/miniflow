@@ -504,6 +504,7 @@ fn generated_tasks_share_startup_binding_and_validation() {
         &RunnerOptions { telemetry: false },
     )
     .unwrap();
+    common::link_compiler_for_custom_host(&project);
     fs::write(
         project.join("src/workflow.rs"),
         plan.generate_artifacts().unwrap().rust_source,

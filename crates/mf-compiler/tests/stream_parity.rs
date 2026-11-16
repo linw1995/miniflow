@@ -223,7 +223,7 @@ fn main() {
         text = text.replace("[dependencies]", "[dependencies]\ninventory = \"0.3.24\"");
         text = text.replace(
             "[build-dependencies]",
-            "[build-dependencies]\ninventory = \"0.3.24\"\nserde_json = \"1.0.151\"",
+            "[build-dependencies]\ninventory = \"0.3.24\"",
         );
         fs::write(&manifest, text).unwrap();
         let build = mf_compiler::cargo_command(&project)

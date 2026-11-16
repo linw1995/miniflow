@@ -66,8 +66,8 @@ A constant such as `[1, "x"]` connected to a `List(Int64)` input fails build val
 branch. No validation process is launched after compilation.
 
 The generated executable embeds the graph metadata and node configuration. Node configuration is emitted as Rust string
-literals in the generated workflow source. Normal execution resolves type metadata along fixed bindings, then uses
-generated node calls and prints selected outputs as JSON. It does not require the definition, lock, plugin sources, or
+literals in the generated workflow source. Normal execution checks provider declarations, attaches compiler-proved
+output types, binds fixed plans, and uses generated node calls to print selected outputs as JSON. It does not require the definition, lock, plugin sources, or
 Cargo at runtime. The embedded manifest contains a date-versioned JSON graph record with workflow identity,
 node IDs/kinds, named data/control edges, and execution order. Loop-capable runners use description version
 `2026-09-29` and also describe each nested body's path and local graph. The record excludes configuration and business
@@ -85,7 +85,10 @@ The runner links the manifest into a dedicated ELF or Mach-O section and needs n
 Runtime helpers read graph and interface views from the descriptor; generated runners use them for observation and inspection.
 TUI preflight reads the section directly without constructing providers. Missing or corrupt manifests and unsupported
 executable formats are rejected without launching an inspection process; older runners must be recompiled.
-Normal execution compares freshly prepared startup declarations with the manifest before dispatch.
+The standalone runner has no normal dependency on `mf-compiler`. Startup does not parse a compiled graph, infer types,
+partition execution domains, or derive child interfaces. Generated Rust contains the fixed layouts, contracts, and typed
+fast paths; providers are initialized once and checked structurally against their build-time declarations.
+Normal execution compares freshly prepared startup declarations with the inspection descriptor before dispatch.
 Changes to input identities, types, required flags, or stdin conditions fail with node/port/resource context.
 Runtime initialization failures and interface drift are reported at startup, before business execution or source consumption.
 

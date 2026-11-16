@@ -576,13 +576,19 @@ fn finalize_origin_identity(
     Ok(resolved.definition)
 }
 
-pub type ScopeLayouts = BTreeMap<
-    Vec<DefinitionId>,
-    (
-        mf_runtime::ExecutionDomains,
-        Vec<mf_runtime::SubgraphStreamOutput>,
-    ),
->;
+#[derive(Default)]
+pub struct ScopeLayout {
+    pub domains: Option<mf_runtime::ExecutionDomains>,
+    pub streams: Vec<mf_runtime::SubgraphStreamOutput>,
+    pub declarations: Vec<mf_runtime::NodeContract>,
+    pub contracts: Vec<mf_runtime::NodeContract>,
+    pub kinds: Vec<mf_runtime::generated::ExecutorKind>,
+    pub success_dependencies: Vec<bool>,
+    pub input_schema: mf_runtime::WorkflowInputSchema,
+    pub interface: Option<mf_runtime::SubgraphInterface>,
+}
+
+pub type ScopeLayouts = BTreeMap<Vec<DefinitionId>, ScopeLayout>;
 
 struct GraphPreparation<'a> {
     registry: &'a NodeRegistry,
@@ -661,6 +667,12 @@ fn prepare_graph(
         .fail();
     }
 
+    let declarations = preparation.body_layouts.as_ref().map(|_| {
+        order
+            .iter()
+            .map(|id| mf_runtime::NodeContract::from(&nodes[indices[id]].metadata))
+            .collect()
+    });
     let mut inference = TypeInferenceState::default();
     for id in &order {
         let dependencies = incoming.get(id.as_str()).map_or(&[][..], Vec::as_slice);
@@ -673,6 +685,40 @@ fn prepare_graph(
         )
     }))
     .context(FlowConstructionSnafu)?;
+    if let Some(layouts) = preparation.body_layouts.as_mut() {
+        layouts.insert(
+            preparation.path.clone(),
+            ScopeLayout {
+                success_dependencies: order
+                    .iter()
+                    .map(|id| {
+                        nodes[indices[id]]
+                            .node
+                            .as_ref()
+                            .and_then(mf_runtime::NodeExecution::as_task_node)
+                            .is_some_and(|task| task.supports_success_dependencies())
+                    })
+                    .collect(),
+                declarations: declarations.expect("requested declarations"),
+                contracts: order
+                    .iter()
+                    .map(|id| mf_runtime::NodeContract::from(&nodes[indices[id]].metadata))
+                    .collect(),
+                kinds: order
+                    .iter()
+                    .map(|id| {
+                        mf_runtime::generated::ExecutorKind::of(
+                            nodes[indices[id]]
+                                .node
+                                .as_ref()
+                                .expect("prepared execution"),
+                        )
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+        );
+    }
     Ok((nodes, order))
 }
 
@@ -2405,7 +2451,10 @@ fn prepare_subgraph_body(
                 output
             })
             .collect();
-        layouts.insert(path.clone(), (flow.execution_domains().clone(), streams));
+        let layout = layouts.get_mut(&path).expect("prepared child contracts");
+        layout.domains = Some(flow.execution_domains().clone());
+        layout.streams = streams;
+        layout.input_schema = flow.input_schema().clone();
     }
     let flow = flow
         .with_stream_outputs(stream_outputs)
@@ -2413,12 +2462,23 @@ fn prepare_subgraph_body(
             definition_id: node.id.clone(),
             kind: node.kind.clone(),
         })?;
-    Ok(PreparedSubgraph::from_flow(flow, identities)
+    let prepared = PreparedSubgraph::from_flow(flow, identities)
         .with_relations(graph.relations.clone())
         .with_origin_source(
             preparation.origin_identity.clone(),
             path.iter().map(ToString::to_string).collect(),
-        ))
+        );
+    if let Some(layouts) = preparation.body_layouts.as_mut() {
+        layouts
+            .get_mut(&path)
+            .expect("prepared child contracts")
+            .interface = Some(mf_runtime::SubgraphInterface {
+            outputs: prepared.outputs.clone(),
+            stream_outputs: prepared.stream_outputs.clone(),
+            input_metadata: prepared.input_metadata().clone(),
+        });
+    }
+    Ok(prepared)
 }
 
 /// Prepare every selected child before the single registry factory dispatch.

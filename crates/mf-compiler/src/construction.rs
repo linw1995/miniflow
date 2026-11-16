@@ -821,6 +821,10 @@ impl FlowBuilder {
 #[derive(Debug, Snafu)]
 pub enum WorkflowBuildError {
     #[snafu(transparent)]
+    GeneratedBinding {
+        source: mf_runtime::generated::BindError,
+    },
+    #[snafu(transparent)]
     WorkflowInputs { source: crate::WorkflowInputError },
     #[snafu(transparent)]
     FlowBuild { source: FlowBuildError },

@@ -13,6 +13,7 @@ mod flow_properties;
 mod flow_value;
 #[cfg(feature = "async")]
 mod future_execution;
+pub mod generated;
 mod iteration;
 mod loop_node;
 mod node;
@@ -132,8 +133,8 @@ pub use stream_plan::{
     StreamOutputSelector, StreamPlan, StreamProgram,
 };
 pub use subgraph::{
-    PreparedSubgraph, SubgraphFlowInputMetadata, SubgraphInputMetadata, SubgraphNode,
-    SubgraphOrigin, SubgraphStream, SubgraphStreamOutput, SubgraphStreamSender,
+    PreparedSubgraph, SubgraphFlowInputMetadata, SubgraphInputMetadata, SubgraphInterface,
+    SubgraphNode, SubgraphOrigin, SubgraphStream, SubgraphStreamOutput, SubgraphStreamSender,
 };
 pub use task_stream::{
     DiscardSink, EmissionSink, Emitter, TaskStreamExecutor, TaskStreamNode, TypedEmitter,

@@ -476,7 +476,7 @@ pub fn write_dependency_project_with_resources(
     sources: &str,
 ) -> Result<(), DependencyProjectError> {
     let plan_json = plan.to_json().context(PlanSnafu)?;
-    let (manifest, imports) = project_manifest(&plan.graph.definition, support, options)?;
+    let (manifest, imports) = project_manifest(&plan.graph.definition, support, options, false)?;
     let build = format!("{imports}{BUILD}");
     let main = format!("{imports}{MAIN}");
     write_project_files(
@@ -499,6 +499,7 @@ fn project_manifest(
     definition: &crate::WorkflowDefinition,
     support: &SupportPackages,
     options: &RunnerOptions,
+    compiler_runtime: bool,
 ) -> Result<(String, String), DependencyProjectError> {
     let mut features = Vec::new();
     if options.telemetry {
@@ -520,9 +521,11 @@ fn project_manifest(
                 quoted(&path_string(&crates_dir.join(package))?)
             ),
         };
-        manifest.push_str(&format!(
-            "{package} = {{ {source}, default-features = false }}\n"
-        ));
+        if package != "mf-compiler" || compiler_runtime {
+            manifest.push_str(&format!(
+                "{package} = {{ {source}, default-features = false }}\n"
+            ));
+        }
         if package == "mf-compiler" {
             build_dependencies.push_str(&format!(
                 "{package} = {{ {source}, default-features = false, features = [\"codegen\"] }}\n"
@@ -577,7 +580,7 @@ pub fn write_resolution_project(
     support: &SupportPackages,
     options: &RunnerOptions,
 ) -> Result<(), DependencyProjectError> {
-    let (manifest, imports) = project_manifest(definition, support, options)?;
+    let (manifest, imports) = project_manifest(definition, support, options, true)?;
     let main = format!(
         "{imports}{}",
         r#"

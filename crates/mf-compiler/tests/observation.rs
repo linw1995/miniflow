@@ -663,6 +663,7 @@ fn generated_execution_matches_memory_for_success_and_failures() {
             },
         )
         .unwrap();
+        common::link_compiler_for_custom_host(&project);
         let manifest = fs::read_to_string(project.join("Cargo.toml")).unwrap();
         fs::write(project.join("Cargo.toml"), format!(r#"{manifest}
 opentelemetry = {{ version = "0.33.0", default-features = false, features = ["logs", "trace"] }}

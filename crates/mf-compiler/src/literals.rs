@@ -182,6 +182,95 @@ pub fn input_schema(schema: &WorkflowInputSchema) -> TokenStream {
     })
 }
 
+pub fn subgraph_interface(interface: &mf_runtime::SubgraphInterface) -> TokenStream {
+    let outputs = interface.outputs.iter().map(port);
+    let streams = interface.stream_outputs.iter().map(port);
+    let flows = interface.input_metadata.flows.iter().map(|flow| {
+        let nodes = flow.nodes.iter().map(|id| {
+            let id = id.as_str();
+            quote!(#id.into())
+        });
+        let inputs = input_schema(&flow.inputs);
+        quote!(mf_runtime::SubgraphFlowInputMetadata { nodes: vec![#(#nodes),*], inputs: #inputs })
+    });
+    quote!(mf_runtime::SubgraphInterface {
+        outputs: vec![#(#outputs),*],
+        stream_outputs: vec![#(#streams),*],
+        input_metadata: mf_runtime::SubgraphInputMetadata {
+            flows: vec![#(#flows),*]
+        },
+    })
+}
+
+pub fn value_types(values: &std::collections::BTreeMap<String, ValueType>) -> TokenStream {
+    let entries = values.iter().map(|(name, ty)| {
+        let ty = value_type(ty);
+        quote!((#name.into(), #ty))
+    });
+    quote!(std::collections::BTreeMap::from([#(#entries),*]))
+}
+
+pub fn root_scope(root: &mf_runtime::RootScopeRelations) -> TokenStream {
+    let input = root.input.as_str();
+    let values = value_types(&root.values);
+    let initial = root.initial.iter().map(|(name, value)| {
+        let value = json(value);
+        quote!((#name.into(), #value))
+    });
+    let writes = root.writes.iter().map(|(id, name)| {
+        let id = id.as_str();
+        quote!((#id.into(), #name.into()))
+    });
+    quote!(mf_runtime::RootScopeRelations {
+        input: #input.into(), values: #values,
+        initial: std::collections::BTreeMap::from([#(#initial),*]),
+        writes: std::collections::BTreeMap::from([#(#writes),*]),
+    })
+}
+
+pub fn relations(relations: &mf_runtime::GraphRelations) -> TokenStream {
+    let root = option(relations.root.as_ref(), root_scope);
+    let scope = option(relations.scope.as_ref(), |scope| {
+        let input = scope.input.as_str();
+        let values = value_types(&scope.values);
+        let outputs = scope
+            .state_outputs
+            .iter()
+            .map(|(name, output)| quote!((#name.into(), #output.into())));
+        let writes = scope.writes.iter().map(|(id, name)| {
+            let id = id.as_str();
+            quote!((#id.into(), #name.into()))
+        });
+        let exits = scope.exits.iter().map(|id| {
+            let id = id.as_str();
+            quote!(#id.into())
+        });
+        quote!(mf_runtime::ScopeRelations {
+            input: #input.into(), values: #values,
+            state_outputs: std::collections::BTreeMap::from([#(#outputs),*]),
+            writes: std::collections::BTreeMap::from([#(#writes),*]),
+            exits: std::collections::BTreeSet::from([#(#exits),*]),
+        })
+    });
+    let streams = relations.streams.iter().map(|(name, output)| {
+        let node = output.node.as_str(); let port = &output.port;
+        quote!((#name.into(), mf_runtime::OutputReferenceDefinition { node: #node.into(), port: #port.into() }))
+    });
+    let routers = relations.router_writes.iter().map(|(id, write)| {
+        let id = id.as_str(); let router = write.router.as_str(); let routes = &write.routes; let enables = &write.enables;
+        quote!((#id.into(), mf_runtime::RouterWrite { router: #router.into(), routes: vec![#(#routes.into()),*], enables: vec![#(#enables.into()),*] }))
+    });
+    let host = option(relations.host.as_ref(), |name| quote!(#name.into()));
+    let key = option(relations.key.as_ref(), |name| quote!(#name.into()));
+    let static_binding = relations.static_binding;
+    quote!(mf_runtime::GraphRelations {
+        scope: #scope, root: #root,
+        streams: std::collections::BTreeMap::from([#(#streams),*]),
+        router_writes: std::collections::BTreeMap::from([#(#routers),*]),
+        host: #host, key: #key, static_binding: #static_binding,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

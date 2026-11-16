@@ -114,6 +114,22 @@ fn generates_layouts_and_configured_interfaces_from_one_preparation() {
         }
         let repeated = plan.generate_execution_plans(&registry).unwrap();
         assert_eq!(artifacts, repeated);
+        let standalone = plan.generate_runner_execution_plans(&registry).unwrap();
+        let entry = standalone
+            .resolved_workflow
+            .generate_runner_artifacts()
+            .unwrap();
+        for source in [&standalone.rust_source, &entry.rust_source] {
+            syn::parse_file(source).unwrap();
+            for forbidden in [
+                "mf_compiler",
+                "TypeInferenceState",
+                "CompiledGraph",
+                "workflow_input_schema",
+            ] {
+                assert!(!source.contains(forbidden), "{forbidden}: {source}");
+            }
+        }
 
         let before = PREPARATIONS.load(Ordering::SeqCst);
         let embedded = plan.generate_embedded_artifacts().unwrap();

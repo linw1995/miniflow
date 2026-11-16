@@ -205,7 +205,9 @@ automatically a runner accepted by `mf run --tui`.
 first discovers the provider closure in temporary provider-linked processes, then performs one complete
 source resolution in the stable selected-provider process. It freezes the resulting `CompiledWorkflow`
 before generating the runner project. Standalone startup does not re-read files, discover providers,
-or resolve sources; deleting authoring files after compilation remains supported. This differs from
+resolve sources, validate graphs, or repeat type inference. Generated Rust binds provider instances to compiler-resolved
+contracts, child interfaces, and fixed execution layouts. Typed fast paths and dynamic fallback share the same instances.
+`mf-compiler` is a build dependency, not a standalone runtime dependency. Deleting authoring files after compilation remains supported. This differs from
 an embedded module's explicit host `plan(registry)` entry point. The separate
 `CompiledWorkflow::generate_embedded_artifacts` API also retains its already-frozen, zero-argument
 `plan()` entry point rather than adopting resource-bundle resolution.

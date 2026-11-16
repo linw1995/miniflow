@@ -86,7 +86,7 @@ pub enum PlanError {
     #[snafu(display("compiled plan selects output name `{name}` more than once"))]
     DuplicateOutputName { name: String },
     #[cfg(feature = "codegen")]
-    #[snafu(display("generated Rust code is invalid: {source}"))]
+    #[snafu(display("generated Rust code is invalid: {source}"), visibility(pub))]
     GeneratedSyntax { source: syn::Error },
     #[snafu(display("invalid lowering configuration for node `{definition_id}`: {message}"))]
     InvalidLoweringConfig {
@@ -461,7 +461,29 @@ impl CompiledWorkflow {
     /// Generate only the entry points used by the standalone runner.
     #[cfg(feature = "codegen")]
     pub fn generate_runner_artifacts(&self) -> Result<GeneratedWorkflowArtifacts, PlanError> {
-        self.generate_artifacts_with_helpers(false)
+        crate::describe_compiled(self)?;
+        if self.graph.definition.execution.is_some() {
+            return crate::fixed::stream_artifacts(self);
+        }
+        let generated = quote! {
+            include!(concat!(env!("OUT_DIR"), "/flow-plans.rs"));
+            pub fn prepare_workflow(
+                registry: &mf_runtime::NodeRegistry,
+                observation: Option<&mut mf_runtime::RunObservation>,
+            ) -> Result<mf_runtime::Flow, mf_runtime::generated::BindError> {
+                mf_prepare_generated_workflow!(registry, observation)
+            }
+            pub fn run_workflow_in_context(
+                flow: &mf_runtime::Flow, state: &mut mf_runtime::ExecutionContext,
+            ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
+                mf_runtime::FlowRuntime::default().execute_in_context(flow, state)
+            }
+        };
+        let syntax = syn::parse2(generated).context(GeneratedSyntaxSnafu)?;
+        Ok(GeneratedWorkflowArtifacts {
+            rust_source: prettyplease::unparse(&syntax),
+            plan_json: self.to_json()?,
+        })
     }
 
     #[cfg(feature = "codegen")]
@@ -723,11 +745,10 @@ fn generate_stream_artifacts(
 }
 
 #[cfg(feature = "codegen")]
-enum ScopeBuild<'a> {
+enum ScopeBuild {
     PreparationOnly,
     Dynamic,
     Call,
-    Typed(&'a BTreeMap<DefinitionId, (TokenStream, TokenStream)>),
 }
 
 #[cfg(feature = "codegen")]
@@ -756,7 +777,7 @@ fn generate_scope(
     scope: &str,
     static_scope: &[String],
     preparation_error_override: Option<&TokenStream>,
-    build: ScopeBuild<'_>,
+    build: ScopeBuild,
 ) -> Result<(Vec<TokenStream>, Vec<TokenStream>, syn::Ident), PlanError> {
     let definition = &graph.definition;
     let order = &graph.execution_order;
@@ -822,25 +843,6 @@ fn generate_scope(
                 }
             }
         });
-        if graph.relations.instruction(id).is_none()
-            && let ScopeBuild::Typed(constructors) = &build
-            && let Some((constructor, expected)) = constructors.get(id)
-        {
-            let handle = format_ident!("typed_root_{index}");
-            preparations.push(quote! {
-                let #handle = #constructor.inspect_err(|error| { #preparation_report })?;
-                let mut #node_ident = mf_runtime::FlowNode::new(#id_lit, #handle.prepared());
-                #inference_ident.resolve_node(&mut #node_ident, &[#(#bindings),*])
-                    .inspect_err(|error| { #preparation_report })
-                    .boxed().context(mf_compiler::WorkflowMetadataSnafu { definition_id: #id_lit })?;
-                let expected = #expected;
-                mf_runtime::verify_generated_metadata(&#node_ident.metadata, &expected)
-                    .context(mf_compiler::WorkflowNodeConstructionSnafu { definition_id: mf_runtime::DefinitionId::from(#id_lit) })
-                    .inspect_err(|error| { #preparation_report })?;
-            });
-            node_idents.push(node_ident);
-            continue;
-        }
         let constructor = match graph.relations.instruction(id) {
             Some(mf_runtime::ScopeInstruction::RootInput) => {
                 let root = graph
@@ -1014,7 +1016,7 @@ fn dependency_tokens(dependencies: &[crate::ExecutionDependency<'_>]) -> Vec<Tok
 }
 
 #[cfg(feature = "codegen")]
-fn child_scope_name(
+pub fn child_scope_name(
     scope: &str,
     index: usize,
     binding_index: usize,
@@ -1110,7 +1112,7 @@ fn subgraphs_preparation(
         prepared.push(quote! {
             let #flow = (|| -> Result<mf_runtime::Flow, mf_compiler::WorkflowBuildError> {
                 #(#preparations)*
-                #bind_streams(#flow)
+                Ok(#bind_streams(#flow)?)
             })().context(mf_compiler::WorkflowSubgraphSnafu { definition_id: #id })?;
             // from_flow expects validated terminal outputs. Keep construction failures
             // recoverable when a generated runner is linked to changed host metadata.
@@ -1242,7 +1244,7 @@ impl CompiledWorkflow {
         &self,
         nodes: Vec<crate::FlowNode>,
         order: Vec<DefinitionId>,
-        body_layouts: crate::compiler::ScopeLayouts,
+        mut body_layouts: crate::compiler::ScopeLayouts,
         standard: bool,
     ) -> Result<GeneratedExecutionArtifacts, PlanError> {
         let node_targets_json =
@@ -1264,30 +1266,42 @@ impl CompiledWorkflow {
             flow
         };
         let schema = flow.input_schema().clone();
+        let root_name = if self.graph.definition.execution.is_some() {
+            "stream"
+        } else {
+            "root"
+        };
+        let root_layout = body_layouts
+            .get_mut(&Vec::new())
+            .expect("prepared root contracts");
+        root_layout.input_schema = schema.clone();
+        let root_schema = format_ident!("input_schema_{root_name}");
         let schema_tokens = crate::literals::input_schema(&schema);
-        let mut layouts = vec![quote! {
-            pub fn compiled_input_schema() -> mf_runtime::WorkflowInputSchema { #schema_tokens }
-        }];
+        let mut layouts = if standard {
+            vec![
+                crate::fixed::bindings(root_name, root_layout),
+                quote! { pub fn compiled_input_schema() -> mf_runtime::WorkflowInputSchema { #root_schema() } },
+            ]
+        } else {
+            vec![quote! {
+                pub fn compiled_input_schema() -> mf_runtime::WorkflowInputSchema { #schema_tokens }
+            }]
+        };
         if !self.graph.children.is_empty() {
             let workflow_id = self
                 .graph
                 .workflow_id()
                 .context(crate::compiler::GraphSnafu)?;
-            let identity = LitStr::new(
-                &serde_json::to_string(&workflow_id).context(SerializeSnafu)?,
-                Span::call_site(),
-            );
+            let identity = LitStr::new(workflow_id.as_str(), Span::call_site());
             // This graph already has its published execution mode. Do not prepare
             // providers (or consult the authored, unresolved graph) to recover its ID.
             layouts.push(quote! {
                 fn mf_compiled_flow_origin(
                     path: Vec<String>,
-                ) -> Result<mf_runtime::FlowOrigin, mf_compiler::WorkflowBuildError> {
+                ) -> Result<mf_runtime::FlowOrigin, mf_runtime::generated::BindError> {
                     use snafu::ResultExt as _;
-                    let workflow_id = serde_json::from_str(#identity)
-                        .context(mf_compiler::WorkflowInvalidEmbeddedConfigSnafu {
-                            definition_id: mf_runtime::DefinitionId::from("<workflow>"),
-                        })?;
+                    let workflow_id = mf_telemetry::identity::WorkflowId::try_from(#identity.to_owned())
+                        .context(mf_runtime::generated::IdentitySnafu)?;
                     Ok(mf_runtime::FlowOrigin { workflow_id, path })
                 }
             });
@@ -1320,11 +1334,11 @@ impl CompiledWorkflow {
                 Ok(quote! {
                     let expected = #expected;
                     mf_runtime::verify_generated_metadata(&_prepared.plan().nodes()[#index].metadata, &expected)
-                        .context(mf_compiler::WorkflowNodeConstructionSnafu { definition_id: mf_runtime::DefinitionId::from(#id) })?;
+                        .context(mf_runtime::generated::NodeSnafu { definition_id: mf_runtime::DefinitionId::from(#id) })?;
                 })
             }).collect::<Result<Vec<_>, PlanError>>()?;
             layouts.push(quote! {
-                pub fn verify_stream_metadata(_prepared: &mf_runtime::PreparedStream) -> Result<(), mf_compiler::WorkflowBuildError> {
+                pub fn verify_stream_metadata(_prepared: &mf_runtime::PreparedStream) -> Result<(), mf_runtime::generated::BindError> {
                     use snafu::ResultExt as _;
                     #(#metadata_checks)*
                     Ok(())
@@ -1346,6 +1360,7 @@ impl CompiledWorkflow {
                 &mut Vec::new(),
                 &body_layouts,
                 &mut layouts,
+                standard,
             )?;
         } else {
             let flow = flow.into_tasks().map_err(crate::WorkflowBuildError::from)?;
@@ -1365,6 +1380,7 @@ impl CompiledWorkflow {
                 &mut Vec::new(),
                 &body_layouts,
                 &mut layouts,
+                standard,
             )?;
         }
         let syntax: syn::File =
@@ -1531,12 +1547,9 @@ fn typed_preparation_tokens(
         let expected =
             crate::literals::node_contract(&mf_runtime::NodeContract::from(&node.metadata));
         constructors.insert(node.definition_id.clone(), (quote! {
-            (|| -> Result<_, mf_compiler::WorkflowBuildError> {
-                mf_compiler::validate_node_flow_parameters(registry, #id, #kind, #config, &[])?;
-                let config = serde_json::from_str(#config).context(mf_compiler::WorkflowInvalidEmbeddedConfigSnafu {
-                    definition_id: mf_runtime::DefinitionId::from(#id),
-                })?;
-                let handle = ::#provider::#(#parts)::* (config).context(mf_compiler::WorkflowNodeConstructionSnafu {
+            (|| -> Result<_, mf_runtime::generated::BindError> {
+                let (_, config) = mf_runtime::generated::configuration(registry, #id, #kind, #config, &[])?;
+                let handle = ::#provider::#(#parts)::* (config).context(mf_runtime::generated::NodeSnafu {
                     definition_id: mf_runtime::DefinitionId::from(#id),
                 })?;
                 fn verify_fields<N: mf_runtime::TypedTaskNode>(_: &mf_runtime::TypedTaskHandle<N>)
@@ -1552,13 +1565,8 @@ fn typed_preparation_tokens(
             })()
         }, expected));
     }
-    let (preparations, _, root) = generate_scope(
-        &workflow.graph,
-        "root",
-        &[],
-        None,
-        ScopeBuild::Typed(&constructors),
-    )?;
+    let (preparations, _, root) =
+        crate::fixed::scope(&workflow.graph, "root", &[], &constructors, true, None)?;
     let mut bindings = Vec::new();
     for domain in flow.execution_domains().domains() {
         let segments: Vec<_> = plan
@@ -1672,10 +1680,12 @@ fn typed_preparation_tokens(
         #[macro_export]
         macro_rules! mf_prepare_generated_workflow {
             ($registry:expr, $observation:expr) => {{
+                #[allow(unused_imports)]
                 use snafu::ResultExt as _;
                 #typed_import
                 #registry_binding
                 let mut observation = $observation;
+                let _ = &mut observation;
                 #(#preparations)*
                 let #root = #root.with_generated_domains(vec![#(#bindings),*]);
                 Ok(#root)
@@ -1773,21 +1783,24 @@ fn subgraph_stream_tokens(
 ) -> Result<TokenStream, PlanError> {
     let bind = format_ident!("bind_stream_outputs_{scope}");
     let id = LitStr::new(id.as_str(), Span::call_site());
-    let bindings = outputs.iter().map(|output| {
-        let node = output.node.index();
-        let optional = output.optional;
-        let name = LitStr::new(&output.name,Span::call_site());
-        let port = LitStr::new(&serde_json::to_string(&output.port).context(SerializeSnafu)?,Span::call_site());
-        Ok(quote! { mf_runtime::SubgraphStreamOutput {
-            node:mf_runtime::NodeId::new(#node), name:#name.into(),
-            optional: #optional,
-            port:serde_json::from_str(#port).context(mf_compiler::WorkflowInvalidEmbeddedConfigSnafu {definition_id:#id})?,
-        } })
-    }).collect::<Result<Vec<_>,PlanError>>()?;
+    let bindings = outputs
+        .iter()
+        .map(|output| {
+            let node = output.node.index();
+            let optional = output.optional;
+            let name = LitStr::new(&output.name, Span::call_site());
+            let port = crate::literals::port(&output.port);
+            Ok(quote! { mf_runtime::SubgraphStreamOutput {
+                node:mf_runtime::NodeId::new(#node), name:#name.into(),
+                optional: #optional,
+                port: #port,
+            } })
+        })
+        .collect::<Result<Vec<_>, PlanError>>()?;
     Ok(quote! {
-        fn #bind(flow:mf_runtime::Flow) -> Result<mf_runtime::Flow,mf_compiler::WorkflowBuildError> {
+        fn #bind(flow:mf_runtime::Flow) -> Result<mf_runtime::Flow,mf_runtime::generated::BindError> {
             use snafu::ResultExt as _;
-            flow.with_stream_outputs(vec![#(#bindings),*]).context(mf_compiler::WorkflowNodeConstructionSnafu {definition_id:#id})
+            flow.with_stream_outputs(vec![#(#bindings),*]).context(mf_runtime::generated::NodeSnafu {definition_id:#id})
         }
     })
 }
@@ -1799,6 +1812,7 @@ fn collect_body_layouts(
     path: &mut Vec<DefinitionId>,
     body_layouts: &crate::compiler::ScopeLayouts,
     layouts: &mut Vec<TokenStream>,
+    standard: bool,
 ) -> Result<(), PlanError> {
     for (index, id) in graph.execution_order.iter().enumerate() {
         let node = graph
@@ -1812,7 +1826,15 @@ fn collect_body_layouts(
         {
             let mut body = body.clone();
             path.push(body.child_scope_key(node, name).into());
-            let (domains, streams) = &body_layouts[path.as_slice()];
+            let layout = &body_layouts[path.as_slice()];
+            let domains = layout.domains.as_ref().expect("prepared child domains");
+            let streams = &layout.streams;
+            if standard {
+                layouts.push(crate::fixed::bindings(
+                    &child_scope_name(scope, index, binding_index, node, name, &body),
+                    layout,
+                ));
+            }
             let body_scope = child_scope_name(scope, index, binding_index, node, name, &body);
             layouts.push(subgraph_stream_tokens(&body_scope, &node.id, streams)?);
             if body.relations.is_callable() {
@@ -1826,7 +1848,7 @@ fn collect_body_layouts(
                 &body_scope,
                 domains,
             ));
-            collect_body_layouts(&body, &body_scope, path, body_layouts, layouts)?;
+            collect_body_layouts(&body, &body_scope, path, body_layouts, layouts, standard)?;
             path.pop();
         }
     }
@@ -2146,12 +2168,12 @@ mod tests {
         assert!(
             artifacts
                 .rust_source
-                .contains("instantiate_node_with_metadata")
+                .contains("mf_runtime::generated::instantiate")
         );
         assert!(
             !artifacts
                 .rust_source
-                .contains("instantiate_subgraphs_with_metadata")
+                .contains("PreparedSubgraph::from_plan")
         );
 
         let config = serde_json::to_string(&definition.nodes[1].config).unwrap();

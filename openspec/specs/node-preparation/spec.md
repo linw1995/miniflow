@@ -169,6 +169,16 @@ The compiler SHALL own workflow graph validation, domain partitioning, and workf
 - **WHEN** a generated runner initializes executors for its compiled layout
 - **THEN** runtime binding consumes the validated layout without partitioning or validating a graph and without a compiler dependency
 
+#### Scenario: Bind compiler-proved output types
+
+- **WHEN** compilation refines a provider output from its original declaration using predecessor evidence
+- **THEN** generated startup checks the original provider declaration and attaches the proved output contract without repeating inference
+
+#### Scenario: Bind a child interface
+
+- **WHEN** generated startup initializes a child Flow
+- **THEN** it binds the compiler-frozen input components and selected output contracts without partitioning or inspecting the child graph
+
 ### Requirement: Prepare typed tasks from input and output definitions
 
 Typed task preparation SHALL derive both port directions from owned structs and preserve derivations, context references, and resource requirements. Separate input or output declarations MUST fail with a typed construction error, including identical declarations. Preparation MUST NOT execute business logic, encode values, or require invocation arguments.
