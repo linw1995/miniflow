@@ -43,11 +43,11 @@ manifest-free save-only recovery share the same canonical result; no legacy-resu
 
 ## 4. Terminal presentation
 
-- [ ] Render multiple assistant messages, tool-call batches, and tool results with distinct message-scoped keys.
-- [ ] Match both variants for committed/unsaved display deltas only; never render replacement context as conversation history.
-- [ ] Preserve original audit presentation after context rewrites and distinguish pending, failed, and committed history update state.
-- [ ] Keep tool data inert and support pages that begin or end inside a tool exchange without mislabelling records.
-- [ ] Display usages/performance once per turn and verify no duplicate accounting across message pages or reloads.
+- [x] Render multiple assistant messages, tool-call batches, and tool results with distinct message-scoped keys.
+- [x] Match both variants for committed/unsaved display deltas only; never render replacement context as conversation history.
+- [x] Preserve original audit presentation after context rewrites and distinguish pending, failed, and committed history update state.
+- [x] Keep tool data inert and support pages that begin or end inside a tool exchange without mislabelling records.
+- [x] Display usages/performance once per turn and verify no duplicate accounting across message pages or reloads.
 
 ## 5. Acceptance and documentation
 

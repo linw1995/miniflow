@@ -261,7 +261,9 @@ fn interact(binary: &Path, database: &Path, restart: bool) -> String {
                             fail_save(database, true);
                             Some(b"retain this reply\x1b\r")
                         }
-                        6 if text.contains("Assistant [not saved]") => {
+                        6 if text.contains("[not saved]")
+                            && text.contains("Model context update pending") =>
+                        {
                             fail_save(database, false);
                             Some(b"\x10\x1b[B\x1b[B\r")
                         }
