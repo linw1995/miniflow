@@ -1616,6 +1616,10 @@ fn cover_pip_ancestors(
         if let Some(display) = layout.display_index_for_scoped_node(&path, entry.node_id()) {
             covered.insert(display);
         }
+        // Beyond a Flow jump, static definitions can also have independent callers.
+        if entry.is_flow() {
+            break;
+        }
         let Ok(next) = description.scope_definition_path_from(&path, std::slice::from_ref(entry))
         else {
             break;
@@ -1697,16 +1701,19 @@ fn execution_pips<'a>(
             .iteration_path
             .split_last()
             .expect("iteration has an owner");
-        if let Some(display) = layout.display_index_for_scoped_node(parent, owner) {
-            covered.insert(display);
+        let static_parent = !item.parent_path.iter().any(ScopePathEntry::is_flow);
+        if static_parent {
+            if let Some(display) = layout.display_index_for_scoped_node(parent, owner) {
+                covered.insert(display);
+            }
+            cover_pip_ancestors(
+                layout,
+                description,
+                &item.iteration_path,
+                runtime,
+                &mut covered,
+            );
         }
-        cover_pip_ancestors(
-            layout,
-            description,
-            &item.iteration_path,
-            runtime,
-            &mut covered,
-        );
         for (depth, entry) in item.parent_path.iter().enumerate() {
             call_ancestors.insert((
                 item.parent_stream_invocation,
@@ -1720,7 +1727,9 @@ fn execution_pips<'a>(
             ScopePathEntry::binding_owner(owner).unwrap_or_else(|| owner.clone()),
         ));
         if let Some(display) = visible_pip_node(layout, &observed.path, &observed.node.id) {
-            covered.insert(display);
+            if static_parent && !runtime.iter().any(ScopePathEntry::is_flow) {
+                covered.insert(display);
+            }
             if seen.insert((item.identity.clone(), runtime.clone(), display)) {
                 views.push(ExecutionPip {
                     display,
@@ -1797,7 +1806,6 @@ fn execution_pips<'a>(
             }
             if let Some(display) = visible_pip_node(layout, &path, &node.id) {
                 cover_pip_ancestors(layout, description, &[], &pass.path, &mut covered);
-                covered.insert(display);
                 let title = pass
                     .path
                     .iter()
@@ -6783,6 +6791,61 @@ mod tests {
         }
         let nodes = inline_observations(&view.pip_layout, &description, &compact, &BTreeMap::new());
         assert!(execution_pips(&view.pip_layout, &nodes, &description, &compact).is_empty());
+    }
+
+    #[test]
+    fn dynamic_pips_do_not_hide_independent_static_callers_of_the_same_definition() {
+        use mf_telemetry::event::FlowOrigin;
+
+        let description = edge_flow_fixture();
+        let mut snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
+            .unwrap()
+            .snapshot();
+        let mut leaf = NodeObservation::pending("leaf", "fixture.B");
+        leaf.status = NodeStatus::Running;
+        let mut invoker = NodeObservation::pending("invoke", "workflow.call");
+        invoker.status = NodeStatus::Running;
+        let parent = vec![ScopePathEntry::Call {
+            call_id: "A".into(),
+        }];
+        let mut dynamic = parent.clone();
+        dynamic.push(ScopePathEntry::Flow {
+            call_id: "invoke".into(),
+            definition: FlowOrigin {
+                workflow_id: description.workflow_id.clone(),
+                path: vec!["B".into()],
+            },
+        });
+        for (path, nodes) in [
+            (
+                vec![ScopePathEntry::Call {
+                    call_id: "B".into(),
+                }],
+                vec![leaf.clone()],
+            ),
+            (parent, vec![invoker]),
+            (dynamic, vec![leaf]),
+        ] {
+            snapshot.loop_passes.push(LoopPassObservation {
+                path,
+                nodes,
+                started: true,
+                outcome: None,
+                interrupted: false,
+                stream_invocation: None,
+                compact_statuses: vec![],
+            });
+        }
+        let view = ObservationView::new(&description).unwrap();
+        let nodes =
+            inline_observations(&view.pip_layout, &description, &snapshot, &BTreeMap::new());
+        let pips = execution_pips(&view.pip_layout, &nodes, &description, &snapshot);
+        assert_eq!(pips.len(), 2);
+        assert_eq!(pips[0].display, pips[1].display);
+        assert!(pips.iter().any(|pip| pip.title == "B / leaf"));
+        assert!(pips.iter().any(|pip| pip.title == "A / invoke → B / leaf"));
+        let chat = render_chat_execution(&view, &snapshot);
+        assert_eq!(chat.matches(" Running: ").count(), 2, "{chat}");
     }
 
     #[test]
