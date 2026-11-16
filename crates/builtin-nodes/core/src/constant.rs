@@ -219,7 +219,10 @@ mod tests {
                 OutputDerivation::literal("properties", properties),
             ]
         );
-        serde_json::to_value(&prepared.metadata).unwrap();
+        assert_eq!(
+            mf_runtime::NodeContract::from(&prepared.metadata).ports,
+            prepared.metadata.ports
+        );
         let task = prepared.execution.as_task_node().unwrap();
         let mut context = ExecutionContext::default();
         let first = task.execute(Inputs::new(), &mut context).unwrap();

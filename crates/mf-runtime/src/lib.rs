@@ -94,9 +94,9 @@ pub use mf_telemetry::observation::StreamObservation;
 pub use node::{
     ContextReference, ExecutionFailedSnafu as NodeExecutionFailedSnafu,
     FactoryFailedSnafu as NodeFactoryFailedSnafu, Inputs,
-    InvalidSubgraphSnafu as NodeInvalidSubgraphSnafu, NodeBuildError, NodeConfig, NodeExecution,
-    NodeExecutionError, NodeFactory, NodeMetadata, NodePortContract, NodePorts, NodeRegistration,
-    NodeValue, NodeValues, OutputDerivation, OutputDerivationError, Outputs,
+    InvalidSubgraphSnafu as NodeInvalidSubgraphSnafu, NodeBuildError, NodeConfig, NodeContract,
+    NodeExecution, NodeExecutionError, NodeFactory, NodeMetadata, NodePortContract, NodePorts,
+    NodeRegistration, NodeValue, NodeValues, OutputDerivation, OutputDerivationError, Outputs,
     PluginFailedSnafu as NodePluginFailedSnafu, PortSpec, PreparedNode, SubgraphScope, TaskNode,
     TypeCompatibility, TypeDepthError, TypeDescriptorError, TypeMismatch, TypeMismatchDetails,
     TypedTaskNode, ValueType, deserialize_config, encode_typed_result, execute_typed_task,

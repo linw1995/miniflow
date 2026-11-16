@@ -20,6 +20,8 @@ mod embedding;
 mod inputs;
 mod iteration;
 pub use iteration::ScopeStructureError;
+#[cfg(feature = "codegen")]
+mod literals;
 mod loops;
 mod lowering;
 #[cfg(feature = "codegen")]

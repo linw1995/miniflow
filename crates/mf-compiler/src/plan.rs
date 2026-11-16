@@ -727,7 +727,7 @@ enum ScopeBuild<'a> {
     PreparationOnly,
     Dynamic,
     Call,
-    Typed(&'a BTreeMap<DefinitionId, (TokenStream, LitStr)>),
+    Typed(&'a BTreeMap<DefinitionId, (TokenStream, TokenStream)>),
 }
 
 #[cfg(feature = "codegen")]
@@ -833,9 +833,7 @@ fn generate_scope(
                 #inference_ident.resolve_node(&mut #node_ident, &[#(#bindings),*])
                     .inspect_err(|error| { #preparation_report })
                     .boxed().context(mf_compiler::WorkflowMetadataSnafu { definition_id: #id_lit })?;
-                let expected = serde_json::from_str(#expected).context(mf_compiler::WorkflowInvalidEmbeddedConfigSnafu {
-                    definition_id: mf_runtime::DefinitionId::from(#id_lit),
-                })?;
+                let expected = #expected;
                 mf_runtime::verify_generated_metadata(&#node_ident.metadata, &expected)
                     .context(mf_compiler::WorkflowNodeConstructionSnafu { definition_id: mf_runtime::DefinitionId::from(#id_lit) })
                     .inspect_err(|error| { #preparation_report })?;
@@ -1266,7 +1264,10 @@ impl CompiledWorkflow {
             flow
         };
         let schema = flow.input_schema().clone();
-        let mut layouts = Vec::new();
+        let schema_tokens = crate::literals::input_schema(&schema);
+        let mut layouts = vec![quote! {
+            pub fn compiled_input_schema() -> mf_runtime::WorkflowInputSchema { #schema_tokens }
+        }];
         if !self.graph.children.is_empty() {
             let workflow_id = self
                 .graph
@@ -1315,14 +1316,9 @@ impl CompiledWorkflow {
                 .map_err(crate::WorkflowBuildError::from)?;
             let metadata_checks = prepared.plan().nodes().iter().enumerate().map(|(index, node)| {
                 let id = LitStr::new(node.definition_id.as_str(), Span::call_site());
-                let expected = LitStr::new(
-                    &serde_json::to_string(&node.metadata).context(SerializeSnafu)?,
-                    Span::call_site(),
-                );
+                let expected = crate::literals::node_contract(&mf_runtime::NodeContract::from(&node.metadata));
                 Ok(quote! {
-                    let expected = serde_json::from_str(#expected).context(mf_compiler::WorkflowInvalidEmbeddedConfigSnafu {
-                        definition_id: mf_runtime::DefinitionId::from(#id),
-                    })?;
+                    let expected = #expected;
                     mf_runtime::verify_generated_metadata(&_prepared.plan().nodes()[#index].metadata, &expected)
                         .context(mf_compiler::WorkflowNodeConstructionSnafu { definition_id: mf_runtime::DefinitionId::from(#id) })?;
                 })
@@ -1532,10 +1528,8 @@ fn typed_preparation_tokens(
             .iter()
             .map(|field| LitStr::new(&field.port.name, Span::call_site()))
             .collect();
-        let expected = LitStr::new(
-            &serde_json::to_string(&node.metadata).context(SerializeSnafu)?,
-            Span::call_site(),
-        );
+        let expected =
+            crate::literals::node_contract(&mf_runtime::NodeContract::from(&node.metadata));
         constructors.insert(node.definition_id.clone(), (quote! {
             (|| -> Result<_, mf_compiler::WorkflowBuildError> {
                 mf_compiler::validate_node_flow_parameters(registry, #id, #kind, #config, &[])?;

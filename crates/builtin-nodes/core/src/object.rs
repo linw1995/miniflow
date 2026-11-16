@@ -247,7 +247,10 @@ mod tests {
                 .ports
                 .validate_derivations("object", &prepared.metadata.output_derivations)
                 .unwrap();
-            serde_json::to_value(&prepared.metadata).unwrap();
+            assert_eq!(
+                mf_runtime::NodeContract::from(&prepared.metadata).ports,
+                prepared.metadata.ports
+            );
             assert!(prepared.metadata.input_bindings.is_empty());
             assert!(prepared.metadata.context_references.is_empty());
         }

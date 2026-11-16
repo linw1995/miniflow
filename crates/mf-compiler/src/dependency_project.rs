@@ -122,12 +122,11 @@ fn main() -> std::process::ExitCode {
 }
 
 fn run(#[cfg(unix)] signals: &mut mf_runtime::RunnerSignals) -> Result<(), Box<dyn std::error::Error>> {
-    let manifest = workflow_manifest()?;
     let targets: Vec<mf_runtime::NodeTarget> = serde_json::from_str(
         include_str!(concat!(env!("OUT_DIR"), "/node-targets.json")),
     )?;
     let invocation = mf_runtime::RunnerInvocation::parse(
-        std::env::args_os().skip(1), &manifest.input_schema, &targets,
+        std::env::args_os().skip(1), &workflow::compiled_input_schema(), &targets,
     )?;
     if let Some(id) = invocation.node.as_deref() {
         let target = mf_runtime::NodeTarget::find(&targets, id)?;

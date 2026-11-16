@@ -507,7 +507,7 @@ pub struct NodePorts {
     pub outputs: Vec<PortSpec>,
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum OutputDerivation {
     KnownType {
         output: String,
@@ -660,7 +660,7 @@ impl NodePorts {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContextReference {
     pub output: String,
     pub label: String,
@@ -681,8 +681,6 @@ pub fn output_id(node: &str, port: &str) -> String {
 
 #[derive(Debug, Snafu)]
 pub enum NodeBuildError {
-    #[snafu(display("could not serialize generated metadata: {source}"))]
-    GenerationMetadata { source: serde_json::Error },
     #[snafu(display("prepared metadata differs from the compiled typed generation contract"))]
     GenerationMetadataMismatch,
     #[snafu(transparent)]
@@ -878,13 +876,11 @@ impl<N: TypedTaskNode> TaskNode for TypedTaskAdapter<N> {
     }
 }
 
-#[derive(Clone, Debug, Default, serde::Serialize)]
+#[derive(Clone, Debug, Default)]
 pub struct NodeMetadata {
     pub ports: NodePorts,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub stream_outputs: Vec<PortSpec>,
     /// At most one listed output may produce a value per task invocation.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub exclusive_outputs: Vec<String>,
     pub input_bindings: std::collections::BTreeMap<String, crate::InputBinding>,
     pub output_derivations: Vec<OutputDerivation>,
@@ -913,7 +909,7 @@ impl From<NodePorts> for NodeMetadata {
 }
 
 /// Field metadata emitted by the unified derive for certified generation.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypedPort {
     pub port: PortSpec,
     pub rust_type: crate::RustValueType,
@@ -933,13 +929,13 @@ pub trait TypedNodeValue: NodeValue {
     fn validate_typed(&self) -> Result<Vec<&'static str>, crate::OutputEncodeError>;
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypedConstructor {
     pub package: &'static str,
     pub path: &'static [&'static str],
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypedGeneration {
     pub constructor: TypedConstructor,
     pub inputs: Vec<TypedPort>,
@@ -1122,12 +1118,40 @@ pub const fn port_names_match(actual: &[&str], expected: &[&str]) -> bool {
     true
 }
 
+/// Stable provider declarations, without type-propagation evidence or executable state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NodeContract {
+    pub typed_generation: Option<TypedGeneration>,
+    pub ports: NodePorts,
+    pub stream_outputs: Vec<PortSpec>,
+    pub exclusive_outputs: Vec<String>,
+    pub input_bindings: std::collections::BTreeMap<String, crate::InputBinding>,
+    pub context_references: Vec<ContextReference>,
+    pub stdin: Option<crate::StdinRequirement>,
+}
+
+impl From<&NodeMetadata> for NodeContract {
+    fn from(metadata: &NodeMetadata) -> Self {
+        Self {
+            typed_generation: metadata.typed_generation.clone(),
+            ports: metadata.ports.clone(),
+            stream_outputs: metadata.stream_outputs.clone(),
+            exclusive_outputs: metadata.exclusive_outputs.clone(),
+            input_bindings: metadata.input_bindings.clone(),
+            context_references: metadata.context_references.clone(),
+            stdin: metadata.stdin.clone(),
+        }
+    }
+}
+
 pub fn verify_generated_metadata(
     actual: &NodeMetadata,
-    expected: &serde_json::Value,
+    expected: &NodeContract,
 ) -> Result<(), NodeBuildError> {
-    let actual = serde_json::to_value(actual).context(GenerationMetadataSnafu)?;
-    ensure!(actual == *expected, GenerationMetadataMismatchSnafu);
+    ensure!(
+        NodeContract::from(actual) == *expected,
+        GenerationMetadataMismatchSnafu
+    );
     Ok(())
 }
 
