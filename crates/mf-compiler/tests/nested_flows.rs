@@ -396,24 +396,18 @@ fn frozen_plans_and_manifests_reject_missing_corrupt_or_cyclic_call_bodies() {
 
     let mut manifest = plan.manifest(&registry).unwrap();
     let description = manifest.description().unwrap();
-    manifest.graph.definition.nodes[0]
+    manifest.definition.nodes[0]
         .config
         .as_object_mut()
         .unwrap()
         .remove("body");
-    // Offline inspection trusts the compiled graph, not the authoring config.
+    // Offline inspection reads the frozen projection, not authoring configuration.
     assert_eq!(
         manifest.description().unwrap().loop_bodies,
         description.loop_bodies
     );
     manifest.validate().unwrap();
-    manifest
-        .graph
-        .children
-        .get_mut(&"invoke".into())
-        .unwrap()
-        .get_mut("body")
-        .unwrap()
+    manifest.descriptor.description.loop_bodies[0]
         .execution_order
         .clear();
     assert!(manifest.validate().is_err());
@@ -902,7 +896,7 @@ fn generated_calls_match_memory_without_flow_sources() {
             .contains("PreparedSubgraph::from_flow")
     );
     let frozen = mf_runtime::WorkflowManifest::from_bytes(&execution.manifest_bytes).unwrap();
-    assert_eq!(frozen.graph.definition, plan.graph.definition);
+    assert_eq!(frozen.definition, plan.graph.definition);
     let targets: Vec<mf_runtime::NodeTarget> =
         serde_json::from_str(&execution.node_targets_json).unwrap();
     assert_eq!(targets[0].id, "outer");

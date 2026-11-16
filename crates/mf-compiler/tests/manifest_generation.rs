@@ -90,7 +90,7 @@ fn generates_layouts_and_configured_interfaces_from_one_preparation() {
         assert_eq!(PREPARATIONS.load(Ordering::SeqCst), before + 1);
         let mut expected = plan.graph.definition.clone();
         expected.execution = stream.then(mf_runtime::StreamExecution::default);
-        assert_eq!(manifest.graph.definition, expected);
+        assert_eq!(manifest.definition, expected);
         assert_eq!(
             manifest.node_definition("source./~").unwrap().config,
             plan.graph.definition.nodes[0].config

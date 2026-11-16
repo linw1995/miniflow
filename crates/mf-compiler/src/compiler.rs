@@ -2111,11 +2111,7 @@ pub fn describe_interface(
     registry: &NodeRegistry,
 ) -> Result<mf_runtime::WorkflowInterface, WorkflowCompileError> {
     let (resolved, input_schema) = prepare_interface(plan, registry)?;
-    let manifest = mf_runtime::WorkflowManifest {
-        version: mf_runtime::WorkflowManifestVersion::V2026_11_06,
-        graph: resolved.graph,
-        input_schema,
-    };
+    let manifest = mf_runtime::WorkflowManifest::from_graph(&resolved.graph, input_schema)?;
     Ok(manifest.interface()?)
 }
 

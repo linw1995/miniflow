@@ -689,7 +689,10 @@ fn codegen_uses_the_actual_child_graph_instead_of_reparsing_duplicate_json() {
     let generated = plan.generate_artifacts().unwrap();
     syn::parse_file(&generated.rust_source).unwrap();
     let manifest = plan.manifest(&registry).unwrap();
-    assert_eq!(manifest.graph.children, plan.graph.children);
+    assert_eq!(
+        manifest.description().unwrap(),
+        mf_runtime::describe_graph(&plan.graph).unwrap()
+    );
     assert_eq!(
         instantiate_compiled(&plan, &registry)
             .unwrap()

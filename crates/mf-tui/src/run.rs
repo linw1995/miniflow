@@ -5546,19 +5546,19 @@ mod tests {
         if let Some(resource) = resource {
             stdin.insert("source/id".into(), serde_json::json!(resource));
         }
-        let manifest = mf_runtime::WorkflowManifest {
-            version: mf_runtime::WorkflowManifestVersion::V2026_11_06,
-            graph: mf_runtime::CompiledGraph {
+        let manifest = mf_runtime::WorkflowManifest::from_graph(
+            &(mf_runtime::CompiledGraph {
                 definition: serde_json::from_value(definition).unwrap(),
                 execution_order: vec!["source/id".into()],
                 relations: Default::default(),
                 children: Default::default(),
-            },
-            input_schema: serde_json::from_value(serde_json::json!({
+            }),
+            serde_json::from_value(serde_json::json!({
                 "inputs":{"source/id":{"path":{"type":"string", "required":true}}}, "stdin":stdin
             }))
             .unwrap(),
-        };
+        )
+        .unwrap();
         fs::write(
             &runner,
             crate::test_support::elf(Some(&manifest.to_bytes().unwrap()), 1),

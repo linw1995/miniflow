@@ -39,6 +39,8 @@ pub enum DependencyProjectError {
     },
     #[snafu(display("could not generate runner code: {source}"))]
     Plan { source: crate::PlanError },
+    #[snafu(display("could not encode definition resources: {source}"))]
+    Sources { source: serde_json::Error },
     #[snafu(display("could not write generated project at {path:?}: {source}"))]
     Write { path: PathBuf, source: io::Error },
 }
@@ -46,6 +48,7 @@ pub enum DependencyProjectError {
 const BUILD: &str = r#"
 fn main() {
     println!("cargo:rerun-if-changed=workflow-plan.json");
+    println!("cargo:rerun-if-changed=workflow-sources.json");
     println!("cargo:rustc-check-cfg=cfg(mf_streaming)");
     if let Err(error) = generate() {
         eprintln!("{error}");
@@ -57,10 +60,7 @@ fn generate() -> Result<(), Box<dyn std::error::Error>> {
     let registry = mf_runtime::NodeRegistry::from_inventory()?;
     let workflow = mf_compiler::CompiledWorkflow::from_json(include_str!("workflow-plan.json"))?;
     let artifacts = workflow.generate_runner_execution_plans(&registry)?;
-    let manifest = mf_runtime::WorkflowManifest::from_bytes(&artifacts.manifest_bytes)?;
-    // The manifest has resolved execution modes; its sources are already frozen.
-    // Retain the validated order without running source resolution a second time.
-    let workflow = mf_compiler::CompiledWorkflow { graph: manifest.graph };
+    let workflow = &artifacts.resolved_workflow;
     if workflow.graph.definition.execution.is_some() {
         println!("cargo:rustc-cfg=mf_streaming");
     }
@@ -68,7 +68,15 @@ fn generate() -> Result<(), Box<dyn std::error::Error>> {
     let output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo output directory"));
     std::fs::write(output.join("workflow.rs"), source.rust_source)?;
     std::fs::write(output.join("flow-plans.rs"), artifacts.rust_source)?;
-    std::fs::write(output.join("workflow-manifest.bin"), artifacts.manifest_bytes)?;
+    let mut manifest = mf_runtime::WorkflowManifest::from_bytes(&artifacts.manifest_bytes)?;
+    let (entry, sources): (String, std::collections::BTreeMap<String, String>) =
+        serde_json::from_str(include_str!("workflow-sources.json"))?;
+    manifest.definition = mf_runtime::WorkflowDefinition::from_json(
+        sources.get(&entry).ok_or("missing root definition resource")?,
+    )?;
+    manifest.entry = entry;
+    manifest.sources = sources;
+    std::fs::write(output.join("workflow-manifest.bin"), manifest.to_bytes()?)?;
     std::fs::write(output.join("typed-fast-paths.json"), artifacts.typed_plan_json)?;
     std::fs::write(output.join("node-targets.json"), artifacts.node_targets_json)?;
     Ok(())
@@ -401,7 +409,7 @@ fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: 
         #[cfg(unix)]
         {
             let manifest = workflow_manifest()?;
-            let definition = &manifest.graph.definition;
+            let definition = &manifest.definition;
             if definition.version.supports_startup_inputs() {
                 state.set_stdin(mf_runtime::TextInput::claim()?);
             }
@@ -451,6 +459,14 @@ pub fn write_dependency_project_with_options(
     options: &RunnerOptions,
 ) -> Result<(), DependencyProjectError> {
     let plan_json = plan.to_json().context(PlanSnafu)?;
+    let sources = serde_json::to_string(&(
+        "workflow.json",
+        std::collections::BTreeMap::from([(
+            "workflow.json",
+            serde_json::to_string(&plan.graph.definition).context(SourcesSnafu)?,
+        )]),
+    ))
+    .context(SourcesSnafu)?;
     let (manifest, imports) = project_manifest(&plan.graph.definition, support, options)?;
     let build = format!("{imports}{BUILD}");
     let main = format!("{imports}{MAIN}");
@@ -465,6 +481,7 @@ pub fn write_dependency_project_with_options(
                 "include!(concat!(env!(\"OUT_DIR\"), \"/workflow.rs\"));\n",
             ),
             ("workflow-plan.json", &plan_json),
+            ("workflow-sources.json", &sources),
         ],
     )
 }
@@ -482,7 +499,7 @@ fn project_manifest(
     let mut manifest = format!(
         "[package]\nname = \"mf-generated-workflow\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n\n[features]\ndefault = [{default_features}]\ntelemetry = [\"mf-telemetry/otlp\"]\n\n[dependencies]\nserde_json = \"1.0.151\"\nsnafu = \"0.9.2\"\n"
     );
-    let mut build_dependencies = String::from("\n[build-dependencies]\n");
+    let mut build_dependencies = String::from("\n[build-dependencies]\nserde_json = \"1.0.151\"\n");
     for package in ["mf-runtime", "mf-compiler", "mf-telemetry"] {
         let source = match support {
             SupportPackages::Registry => format!(

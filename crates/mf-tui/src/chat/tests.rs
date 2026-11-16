@@ -5,7 +5,7 @@ use std::{fs, time::Instant};
 
 fn chat_manifest() -> mf_runtime::WorkflowManifest {
     let mut manifest = crate::test_support::sample_manifest();
-    manifest.graph.definition = serde_json::from_value(json!({
+    manifest.definition = serde_json::from_value(json!({
         "version":"2026-10-03", "dependencies":{},
         "nodes":[{"id":"start","kind":"builtin.llm","config":{"model":"fixture-model"}}],
         "outputs":[
@@ -15,19 +15,29 @@ fn chat_manifest() -> mf_runtime::WorkflowManifest {
         ]
     }))
     .unwrap();
-    manifest.graph.execution_order = vec!["start".into()];
+    manifest.descriptor.description.execution_order = vec!["start".into()];
     manifest.input_schema = serde_json::from_value(json!({"inputs":{"start":{
         "prompt":{"type":"string","required":true},
         "system":{"type":"string","required":false},
         "history":{"type":mf_runtime::ValueType::List(Box::new(mf_runtime::ValueType::Object)),"required":false}
     }},"stdin":{}})).unwrap();
+    manifest.descriptor.description = mf_runtime::describe_graph(&mf_runtime::CompiledGraph {
+        definition: manifest.definition.clone(),
+        execution_order: vec!["start".into()],
+        relations: Default::default(),
+        children: Default::default(),
+    })
+    .unwrap();
     manifest
 }
 
 fn live_manifest() -> mf_runtime::WorkflowManifest {
     let mut manifest = chat_manifest();
-    manifest.graph.definition.execution = Some(serde_json::from_value(json!({})).unwrap());
-    manifest.graph.definition.outputs.push(
+    manifest.descriptor.description.execution =
+        Some(mf_telemetry::description::ExecutionDescription {
+            mode: mf_telemetry::description::ExecutionMode::Stream,
+        });
+    manifest.definition.outputs.push(
         serde_json::from_value(json!({"name":"answer","node":"start","port":"delta"})).unwrap(),
     );
     manifest
@@ -607,7 +617,7 @@ fn native_failures_keep_complete_replies_for_save_only_and_never_save_prefixes()
 #[test]
 fn answer_selection_requires_native_streaming_execution() {
     let mut manifest = live_manifest();
-    manifest.graph.definition.execution = None;
+    manifest.descriptor.description.execution = None;
     assert!(ChatContract::from_manifest(&manifest).is_err());
 }
 

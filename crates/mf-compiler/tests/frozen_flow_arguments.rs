@@ -265,7 +265,7 @@ fn old_root_preserves_new_child_features_in_every_observation_projection() {
             assert_eq!(body.clusters[0].nodes, ["before", "value"]);
         }
         let manifest = plan.manifest(&registry).unwrap();
-        assert_eq!(manifest.graph.definition.version, root.version);
+        assert_eq!(manifest.definition.version, root.version);
         assert_eq!(manifest.description().unwrap(), graph);
         let harness = capture::Harness::new(true);
         let observation = plan
@@ -290,7 +290,7 @@ fn old_root_preserves_new_child_features_in_every_observation_projection() {
             let generated = plan.generate_execution_plans(&registry).unwrap();
             let embedded =
                 mf_runtime::WorkflowManifest::from_bytes(&generated.manifest_bytes).unwrap();
-            assert_eq!(embedded.graph.definition.version, root.version);
+            assert_eq!(embedded.definition.version, root.version);
             assert_eq!(embedded.description().unwrap(), graph);
         }
     }

@@ -112,7 +112,7 @@ fn old_root_iteration_keeps_complete_typed_scope_orders_in_a_source_free_runner(
     );
     let generated = plan.generate_runner_execution_plans(&registry).unwrap();
     let manifest = WorkflowManifest::from_bytes(&generated.manifest_bytes).unwrap();
-    assert_eq!(manifest.graph, plan.graph);
+    assert_eq!(manifest.definition, plan.graph.definition);
     assert_eq!(manifest.description().unwrap(), description);
     let source = root.path().join("flow.json");
     fs::write(&source, serde_json::to_vec(&definition).unwrap()).unwrap();

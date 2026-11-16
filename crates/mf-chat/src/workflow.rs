@@ -1031,7 +1031,7 @@ fn register_runner(
         .registered_workflow()
         .expect("executable Flow interface");
     let contract = ChatContract::from_manifest(manifest)?;
-    let definition = manifest.graph.definition.clone();
+    let definition = manifest.definition.clone();
     let inputs = manifest.input_schema.clone();
     let outputs: Vec<_> = ConversationResult::ports()
         .into_iter()
@@ -1095,9 +1095,9 @@ fn compose_conversation(
 ) -> Result<ConversationPlan, ChatError> {
     let contract = ChatContract::from_manifest(manifest)?;
     let call = if registry.flow(RUNNER_FLOW).is_some() {
-        compile_call_wrapper(&manifest.graph.definition, RUNNER_FLOW, registry)?
+        compile_call_wrapper(&manifest.definition, RUNNER_FLOW, registry)?
     } else {
-        compile_call(&manifest.graph.definition, registry)?.context(InvalidSnafu {
+        compile_call(&manifest.definition, registry)?.context(InvalidSnafu {
             field: "embedded workflow",
             reason: "requires a finite Flow without internal stream dataflow",
         })?

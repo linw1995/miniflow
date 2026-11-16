@@ -171,10 +171,10 @@ those views never deserialize the redundant raw child body. Factories receive th
 configuration alongside authoritative prepared children. Node-owned errors retain their typed sources
 under generic compiler node or child-scope context.
 
-Manifest payload version `2026-11-06` contains `version`, `graph`, and prepared `input_schema`;
-saved plans contain a required `graph` wrapper. Neither format stores `parameter_types` or
-`loop_orders`. Framing remains version 1. Older payloads and saved-plan formats are rejected rather
-than inferred or adapted.
+Manifest payload version `2026-11-14` contains the root `definition`, resource `entry` and `sources`,
+and a public `descriptor` with observation `description` and prepared `input_schema`. It does not
+serialize compiler graphs or execution layouts. Saved plans currently use a separate `graph` wrapper.
+Framing remains version 1. Older payloads are rejected rather than inferred or adapted.
 
 `manifest(&registry) -> Result<WorkflowManifest, PlanError>` derives the current configured interface
 from the host registry. Inspection prepares separate nodes without executing them. There is no

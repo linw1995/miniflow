@@ -221,7 +221,7 @@ fn subgraph_capable_providers_without_selected_children_keep_plain_factory_seman
                     .contains("instantiate_subgraphs_with_metadata")
             );
             let manifest = manifest(&plan, &registry);
-            assert_eq!(manifest.graph.definition, plan.graph.definition);
+            assert_eq!(manifest.definition, plan.graph.definition);
         }
     }
 }
@@ -438,7 +438,10 @@ fn saved_loop_preparation_and_codegen_use_the_compiled_child_not_its_raw_copy() 
     {
         syn::parse_file(&saved.generate_artifacts().unwrap().rust_source).unwrap();
         syn::parse_file(&saved.generate_embedded_artifacts().unwrap().rust_source).unwrap();
-        assert_eq!(manifest(&saved, &registry).graph.children, children);
+        assert_eq!(
+            manifest(&saved, &registry).description().unwrap(),
+            mf_runtime::describe_graph(&saved.graph).unwrap()
+        );
         assert_eq!(
             saved
                 .generate_execution_plans(&registry)

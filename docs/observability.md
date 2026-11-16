@@ -127,14 +127,13 @@ Graph-relative event validation checks workflow/node identity, position, sequenc
 
 ## Embedded manifest format
 
-Manifest payload version `2026-11-06` stores an explicit compiled `graph` and prepared `input_schema`.
-Each graph contains its `definition`, canonical `execution_order`, and child graphs keyed by receiving node ID and
-field name. Parameter-type schemas and separate `loop_orders` are not persisted. Graph descriptions, interface wrappers,
-and workflow IDs are not duplicated in the payload. `description()`, `interface()`, and `workflow_id()` derive those views
-from the stored graph without scanning configuration for children, planning a DAG, or preparing providers.
-The original definition is accessible through `graph.definition` (or field dereferencing), and the input schema is a direct field;
-`node_definition(id)` borrows a root node by exact ID. Input contracts remain stored because provider-declared ports,
-bindings, and stdin requirements cannot be inferred from definition JSON alone.
+Manifest payload version `2026-11-14` separates original definition resources from a public inspection projection.
+`definition` retains the root declaration; `entry` and `sources` identify the captured UTF-8 definition resources.
+The `descriptor` contains the validated observation `description` and prepared `input_schema`, including workflow identity,
+actual execution mode, child observation scopes, provider-declared types, bindings, and conditional stdin ownership.
+Compiler IR, graph relationships, scheduling layouts, and typed optimization evidence are not persisted.
+`description()`, `interface()`, and `workflow_id()` read this projection without planning or preparing providers;
+`node_definition(id)` borrows a root declaration by exact ID. The same build preparation supplies execution and inspection.
 The definition contains full static configuration, including private literals, parameter defaults, and dependencies.
 Configuration expressions remain unresolved; invocation values and environment-derived values are not materialized.
 Execution descriptions store the mode; `event_schema_version()` derives the event protocol without a duplicate field.

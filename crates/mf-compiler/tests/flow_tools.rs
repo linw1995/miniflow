@@ -220,7 +220,7 @@ fn catalog_and_parallel_dispatch_use_actual_children_and_one_shared_chain() {
     assert_results(&execute(&definition, calls()));
     let bytes = plan.manifest(&registry).unwrap().to_bytes().unwrap();
     let restored = mf_runtime::WorkflowManifest::from_bytes(&bytes).unwrap();
-    assert_eq!(restored.graph, plan.graph);
+    assert_eq!(restored.definition, plan.graph.definition);
     assert_eq!(
         restored.description().unwrap(),
         mf_compiler::describe_compiled(&plan).unwrap()

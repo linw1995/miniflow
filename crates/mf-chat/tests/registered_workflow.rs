@@ -25,9 +25,8 @@ impl Runner {
                 "name":port.name,"node":"remote","port":port.name,"optional":!port.required
             })).chain([serde_json::json!({"name":"answer","node":"remote","port":"answer","optional":true})]).collect();
         Self {
-            manifest: WorkflowManifest {
-                version: mf_runtime::WorkflowManifestVersion::V2026_11_06,
-                graph: mf_runtime::CompiledGraph {
+            manifest: WorkflowManifest::from_graph(
+                &(mf_runtime::CompiledGraph {
                     definition: serde_json::from_value(serde_json::json!({
                         "version":"2026-10-28", "dependencies":{},
                         "execution":{},
@@ -38,8 +37,8 @@ impl Runner {
                     execution_order: vec!["remote".into()],
                     relations: Default::default(),
                     children: Default::default(),
-                },
-                input_schema: mf_runtime::WorkflowInputSchema {
+                }),
+                mf_runtime::WorkflowInputSchema {
                     inputs: [(
                         "remote".into(),
                         ConversationInputs::ports()
@@ -59,7 +58,8 @@ impl Runner {
                     .into(),
                     stdin: Default::default(),
                 },
-            },
+            )
+            .unwrap(),
             parameters: Default::default(),
             calls: AtomicUsize::new(0),
             fail_after_reply,

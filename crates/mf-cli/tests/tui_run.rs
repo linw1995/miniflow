@@ -347,9 +347,8 @@ fn tui_displays_parallel_running_nodes_in_pips_until_they_finish() {
 
     let directory = tempfile::tempdir().unwrap();
     let runner = directory.path().join("parallel-runner");
-    let manifest = mf_runtime::WorkflowManifest {
-        version: mf_runtime::WorkflowManifestVersion::V2026_11_06,
-        graph: mf_runtime::CompiledGraph {
+    let manifest = mf_runtime::WorkflowManifest::from_graph(
+        &(mf_runtime::CompiledGraph {
             definition: serde_json::from_value(serde_json::json!({
                 "version": "2026-09-26", "dependencies": {},
                 "nodes": [
@@ -361,9 +360,10 @@ fn tui_displays_parallel_running_nodes_in_pips_until_they_finish() {
             execution_order: vec!["parallel-0".into(), "parallel-1".into()],
             relations: Default::default(),
             children: Default::default(),
-        },
-        input_schema: mf_runtime::WorkflowInputSchema::default(),
-    };
+        }),
+        mf_runtime::WorkflowInputSchema::default(),
+    )
+    .unwrap();
     let description = manifest.description().unwrap();
     let placeholder = "00000000-0000-4000-8000-000000000000";
     let record = |sequence: i64,
@@ -987,9 +987,8 @@ fn failed_stdout_delivery_uses_cli_error_or_preserves_child_failure() {
 }
 
 fn manifest() -> mf_runtime::WorkflowManifest {
-    mf_runtime::WorkflowManifest {
-        version: mf_runtime::WorkflowManifestVersion::V2026_11_06,
-        graph: mf_runtime::CompiledGraph {
+    mf_runtime::WorkflowManifest::from_graph(
+        &(mf_runtime::CompiledGraph {
             definition: serde_json::from_value(serde_json::json!({
                 "version": "2026-09-26", "dependencies": {},
                 "nodes": [{"id": "step", "kind": "test.step"}]
@@ -998,9 +997,10 @@ fn manifest() -> mf_runtime::WorkflowManifest {
             execution_order: vec!["step".into()],
             relations: Default::default(),
             children: Default::default(),
-        },
-        input_schema: mf_runtime::WorkflowInputSchema::default(),
-    }
+        }),
+        mf_runtime::WorkflowInputSchema::default(),
+    )
+    .unwrap()
 }
 
 fn description() -> WorkflowDescription {

@@ -145,19 +145,19 @@ fn legacy_provider_config_remains_opaque() {
         "version": "2026-10-28", "dependencies": {}, "nodes": [node]
     }))
     .unwrap();
-    let manifest = mf_runtime::WorkflowManifest {
-        version: mf_runtime::WorkflowManifestVersion::V2026_11_06,
-        graph: mf_runtime::CompiledGraph {
+    let manifest = mf_runtime::WorkflowManifest::from_graph(
+        &(mf_runtime::CompiledGraph {
             definition,
             execution_order: vec!["custom".into()],
             relations: Default::default(),
             children: BTreeMap::new(),
-        },
-        input_schema: mf_runtime::WorkflowInputSchema {
+        }),
+        mf_runtime::WorkflowInputSchema {
             inputs: [("custom".into(), Default::default())].into(),
             ..Default::default()
         },
-    };
+    )
+    .unwrap();
     assert!(manifest.description().unwrap().loop_bodies.is_empty());
     assert!(manifest.to_bytes().is_ok());
 }

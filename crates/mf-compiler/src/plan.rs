@@ -25,12 +25,13 @@ pub struct GeneratedWorkflowArtifacts {
     pub plan_json: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct GeneratedExecutionArtifacts {
     pub rust_source: String,
     pub manifest_bytes: Vec<u8>,
     pub typed_plan_json: String,
     pub node_targets_json: String,
+    pub resolved_workflow: CompiledWorkflow,
 }
 
 #[derive(Debug, Snafu)]
@@ -153,13 +154,10 @@ impl CompiledWorkflow {
         &self,
         input_schema: mf_runtime::WorkflowInputSchema,
     ) -> Result<mf_runtime::WorkflowManifest, PlanError> {
-        let manifest = mf_runtime::WorkflowManifest {
-            version: mf_runtime::WorkflowManifestVersion::V2026_11_06,
-            graph: self.graph.clone(),
+        Ok(mf_runtime::WorkflowManifest::from_graph(
+            &self.graph,
             input_schema,
-        };
-        manifest.validate()?;
-        Ok(manifest)
+        )?)
     }
 
     /// Describe isolated targets using metadata already prepared in execution order.
@@ -1381,6 +1379,7 @@ impl CompiledWorkflow {
             manifest_bytes: manifest.to_bytes()?,
             typed_plan_json: serde_json::to_string_pretty(&typed_plan).context(SerializeSnafu)?,
             node_targets_json,
+            resolved_workflow: self.clone(),
         })
     }
 }
@@ -2105,7 +2104,7 @@ mod tests {
         let artifacts = plan.generate_runner_execution_plans(&registry).unwrap();
         let manifest = mf_runtime::WorkflowManifest::from_bytes(&artifacts.manifest_bytes).unwrap();
         let identity = manifest.workflow_id().unwrap();
-        assert!(manifest.graph.definition.execution.is_none());
+        assert!(manifest.definition.execution.is_none());
         assert_ne!(initial_identity, identity);
         assert!(artifacts.rust_source.contains(identity.as_str()));
         assert!(
@@ -2142,11 +2141,9 @@ mod tests {
         let plan = crate::plan_definition(&definition).unwrap();
         let artifacts = plan.generate_runner_execution_plans(&registry).unwrap();
         let manifest = mf_runtime::WorkflowManifest::from_bytes(&artifacts.manifest_bytes).unwrap();
-        assert!(manifest.graph.children.is_empty());
-        assert_eq!(
-            manifest.graph.relations,
-            mf_runtime::GraphRelations::default()
-        );
+        assert!(manifest.descriptor.description.loop_bodies.is_empty());
+        let payload = serde_json::to_value(&manifest).unwrap();
+        assert!(payload.get("graph").is_none());
         assert_eq!(
             manifest.input_schema.inputs["formal"]["callback"].value_type,
             mf_runtime::ValueType::Flow

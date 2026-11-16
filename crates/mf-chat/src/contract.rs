@@ -249,7 +249,6 @@ impl ChatContract {
         for name in ["status", "text", "usages"] {
             ensure!(
                 manifest
-                    .graph
                     .definition
                     .outputs
                     .iter()
@@ -262,7 +261,6 @@ impl ChatContract {
         }
         let streaming = manifest.description()?.is_streaming();
         let answer_stream = manifest
-            .graph
             .definition
             .outputs
             .iter()
@@ -280,7 +278,6 @@ impl ChatContract {
             streaming,
             inputs,
             owns_title: manifest
-                .graph
                 .definition
                 .outputs
                 .iter()
