@@ -657,10 +657,12 @@ fn skipped_body_nodes_report_their_item_and_dependency() {
     );
 }
 
-fn assert_generated_observation(project: &Path, scratch: &Path) {
+fn assert_generated_observation(project: &Path, scratch: &Path, definition: &Value) {
     common::link_compiler_for_custom_host(project);
-    let plan = mf_compiler::CompiledWorkflow::from_json(
-        &fs::read_to_string(project.join("workflow-plan.json")).unwrap(),
+    let definition = mf_runtime::WorkflowDefinition::from_json(&definition.to_string()).unwrap();
+    let plan = mf_compiler::compile_definition(
+        &definition,
+        &mf_runtime::NodeRegistry::from_inventory().unwrap(),
     )
     .unwrap();
     fs::write(
@@ -688,9 +690,10 @@ extern crate node_0 as _;
 extern crate node_1 as _;
 mod workflow;
 mod observation_capture;
+include!("../workflow-plan.rs");
 
 fn main() {
-    let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json")).unwrap();
+    let plan = compiled_workflow().unwrap();
     let harness = observation_capture::Harness::new(true);
     let observation = plan.start_observation(&harness.observer(), mf_telemetry::identity::RunId::new()).unwrap();
     let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
@@ -782,7 +785,7 @@ fn generated_parallel_runner_matches_in_memory_and_describes_one_iteration_node(
         serde_json::from_slice::<Value>(&actual.stdout).unwrap(),
         expected
     );
-    assert_generated_observation(&build, root.path());
+    assert_generated_observation(&build, root.path(), &value);
 
     value["nodes"][1]["config"]["on_error"] = json!("terminate");
     let expected = execute(value.clone()).unwrap_err();

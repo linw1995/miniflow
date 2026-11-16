@@ -172,7 +172,7 @@ pub fn scope(
 
 pub fn stream_artifacts(
     workflow: &crate::CompiledWorkflow,
-) -> Result<crate::GeneratedWorkflowArtifacts, PlanError> {
+) -> Result<crate::GeneratedRunnerArtifacts, PlanError> {
     let (preparation, nodes, _) = scope(
         &workflow.graph,
         "stream",
@@ -208,9 +208,8 @@ pub fn stream_artifacts(
         }
     };
     let syntax = syn::parse2(source).context(crate::plan::GeneratedSyntaxSnafu)?;
-    Ok(crate::GeneratedWorkflowArtifacts {
+    Ok(crate::GeneratedRunnerArtifacts {
         rust_source: prettyplease::unparse(&syntax),
-        plan_json: workflow.to_json()?,
     })
 }
 

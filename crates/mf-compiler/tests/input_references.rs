@@ -31,7 +31,7 @@ fn references_normalize_before_every_compiler_entry() {
     let result = mf_compiler::execute_compiled(&prepared, &registry, None).unwrap();
     assert_eq!(serde_json::to_value(result).unwrap(), json!({"result":42}));
     assert_eq!(definition, original);
-    let encoded = serde_json::to_value(&prepared).unwrap();
+    let encoded: serde_json::Value = serde_json::from_str(&prepared.to_json().unwrap()).unwrap();
     assert!(
         encoded["graph"]["definition"]
             .get("control_edges")
@@ -42,7 +42,7 @@ fn references_normalize_before_every_compiler_entry() {
             .get("inputs")
             .is_some()
     );
-    let decoded: mf_compiler::CompiledWorkflow = serde_json::from_value(encoded).unwrap();
+    let decoded = mf_compiler::CompiledWorkflow::from_json(&encoded.to_string()).unwrap();
     assert_eq!(decoded, prepared);
 }
 

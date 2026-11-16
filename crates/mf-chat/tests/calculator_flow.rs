@@ -103,7 +103,7 @@ fn calculator_profile_loads_real_tool_bodies_without_specialized_nodes() {
             .get("default")
             .is_none()
     );
-    let serialized = serde_json::to_string(&plan.graph).unwrap();
+    let serialized = plan.to_json().unwrap();
     for removed in [
         "llm.tool\"",
         "llm.tool_set",

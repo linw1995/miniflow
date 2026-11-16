@@ -106,22 +106,36 @@ pub fn compile_project_with_options(
         .iter()
         .all(|source| source.starts_with(resource_root))
     {
-        resource_root = resource_root
-            .parent()
-            .expect("source paths share a filesystem root");
+        resource_root = resource_root.parent().ok_or_else(|| {
+            failure(
+                "definition resource identity",
+                &inputs.definition,
+                "definition resources must share a filesystem root",
+            )
+        })?;
     }
     let resource_name = |path: &Path| {
-        path.strip_prefix(resource_root)
+        let components = path
+            .strip_prefix(resource_root)
             .expect("checked resource root")
             .components()
-            .map(|part| part.as_os_str().to_string_lossy())
-            .collect::<Vec<_>>()
-            .join("/")
+            .map(|part| part.as_os_str().to_str())
+            .collect::<Option<Vec<_>>>();
+        at(
+            "definition resource identity",
+            path,
+            components.map(|parts| parts.join("/")).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "definition resource paths must be UTF-8",
+                )
+            }),
+        )
     };
     let mut resources = BTreeMap::new();
     for path in &resolved.sources {
         resources.insert(
-            resource_name(path),
+            resource_name(path)?,
             at(
                 "definition resource capture",
                 path,
@@ -132,7 +146,7 @@ pub fn compile_project_with_options(
     let resources = at(
         "definition resource encoding",
         &inputs.definition,
-        serde_json::to_string(&(resource_name(&inputs.definition), resources)),
+        serde_json::to_string(&(resource_name(&inputs.definition)?, resources)),
     )?;
     at(
         "project generation",

@@ -211,6 +211,8 @@ fn contract_accepts_multiple_models_and_arbitrary_output_sources() {
         children: Default::default(),
     })
     .unwrap();
+    // This fixture varies the whole-flow contract, not isolated-node interfaces.
+    manifest.descriptor.node_targets.clear();
     ChatContract::from_manifest(&manifest).unwrap();
     manifest.definition.nodes[1].kind = "custom.generator".into();
     manifest.definition.nodes[1].config = json!({});

@@ -111,9 +111,11 @@ not infer roles from configuration keys or order paths. Saved-plan and generated
 validate provider availability and actual compiled-child binding keys at the receiving boundary;
 required/default and ordinary-field validation SHALL remain receiver-decoder responsibilities.
 Neither saved plans nor manifests SHALL persist parameter-type schemas or separate loop orders.
-Manifests SHALL contain `version`, `graph`, and prepared `input_schema`; saved plans SHALL require the
-`graph` wrapper. Older formats SHALL be rejected without inference or adaptation; framing SHALL
-remain version 1.
+Manifests SHALL contain original definition resources and a public inspection descriptor, including observation
+and startup interfaces and isolated-node contracts without execution indices. Native compiler IR SHALL NOT
+implement Serde; explicit saved-plan APIs SHALL use a compiler-owned DTO with a `graph` wrapper. Generated
+build handoffs and frozen embedded modules SHALL construct native Rust graph data. Older manifest formats
+SHALL be rejected without inference or adaptation; framing SHALL remain version 1.
 
 #### Scenario: Use current node metadata
 

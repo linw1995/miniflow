@@ -62,13 +62,9 @@ fn plan(value: Value, registry: &NodeRegistry) -> CompiledWorkflow {
     compile_definition(&definition, registry).unwrap()
 }
 fn targets(plan: &CompiledWorkflow, registry: &NodeRegistry) -> Vec<NodeTarget> {
-    serde_json::from_str(
-        &plan
-            .generate_execution_plans(registry)
-            .unwrap()
-            .node_targets_json,
-    )
-    .unwrap()
+    plan.generate_execution_plans(registry)
+        .unwrap()
+        .node_targets
 }
 fn args(value: Value) -> WorkflowArguments {
     WorkflowArguments::try_from(value).unwrap()
@@ -739,8 +735,10 @@ fn selected_metadata_excludes_values_and_snapshot_sink_failures_preserve_results
         &registry,
     );
     let artifacts = plan.generate_execution_plans(&registry).unwrap();
-    assert!(!artifacts.node_targets_json.contains("private-build-value"));
-    let records: Vec<NodeTarget> = serde_json::from_str(&artifacts.node_targets_json).unwrap();
+    let manifest = mf_runtime::WorkflowManifest::from_bytes(&artifacts.manifest_bytes).unwrap();
+    let metadata = serde_json::to_string(&manifest.descriptor.node_targets).unwrap();
+    assert!(!metadata.contains("private-build-value"));
+    let records: Vec<NodeTarget> = artifacts.node_targets.clone();
     let record = NodeTarget::find(&records, "copy").unwrap();
     let harness = capture::Harness::new(true);
     let observation = record

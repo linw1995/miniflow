@@ -123,16 +123,7 @@ fn child_scope_keys_use_explicit_override_or_generic_binding_for_every_kind() {
 }
 
 #[test]
-fn relations_are_required_and_empty_relationship_fields_are_optional() {
-    let graph = graph();
-    let mut encoded = serde_json::to_value(&graph).unwrap();
-    assert_eq!(encoded["relations"], json!({}));
-    assert_eq!(
-        serde_json::from_value::<CompiledGraph>(encoded.clone()).unwrap(),
-        graph
-    );
-    encoded.as_object_mut().unwrap().remove("relations");
-    assert!(serde_json::from_value::<CompiledGraph>(encoded).is_err());
+fn relationship_wire_contracts_reject_missing_and_unknown_fields() {
     assert_eq!(
         serde_json::from_value::<GraphRelations>(json!({})).unwrap(),
         GraphRelations::default()
@@ -150,7 +141,7 @@ fn relations_are_required_and_empty_relationship_fields_are_optional() {
 }
 
 #[test]
-fn all_concrete_relationships_round_trip() {
+fn identity_projection_preserves_concrete_relationships_without_serializing_the_ir() {
     let mut graph = graph();
     graph.relations.scope = Some(scope());
     graph.relations.host = Some("parent-host".into());
@@ -159,9 +150,12 @@ fn all_concrete_relationships_round_trip() {
         "events".into(),
         serde_json::from_value(json!({"node": "origin", "port": "counter"})).unwrap(),
     );
+    let identity = serde_json::to_value(graph.identity_record()).unwrap();
+    assert_eq!(identity["relations"]["host"], "parent-host");
+    assert_eq!(identity["relations"]["key"], "edge-key");
     assert_eq!(
-        serde_json::from_slice::<CompiledGraph>(&serde_json::to_vec(&graph).unwrap()).unwrap(),
-        graph
+        identity["relations"]["streams"]["events"]["port"],
+        "counter"
     );
 }
 
@@ -179,7 +173,7 @@ fn only_plain_child_free_graphs_retain_definition_order_identity() {
     assert_ne!(graph.workflow_id().unwrap(), historical);
     assert_eq!(
         graph.workflow_id().unwrap(),
-        WorkflowId::from_definition(&graph, &order).unwrap()
+        WorkflowId::from_definition(&graph.identity_record(), &order).unwrap()
     );
 }
 

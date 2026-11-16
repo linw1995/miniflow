@@ -1574,7 +1574,9 @@ mod tests {
         )
         .unwrap();
         assert!(
-            !serde_json::to_string(&composed.plan)
+            !composed
+                .plan
+                .to_json()
                 .unwrap()
                 .contains("private-credential")
         );

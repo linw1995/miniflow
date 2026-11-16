@@ -25,6 +25,11 @@ fn generates_one_target_with_safe_aliases_and_feature_selections() {
     assert!(main.starts_with("extern crate node_0 as _;"));
     assert!(directory.path().join("src/main.rs").is_file());
     assert!(!directory.path().join("src/bin").exists());
+    assert!(directory.path().join("workflow-plan.rs").is_file());
+    assert!(!directory.path().join("workflow-plan.json").exists());
+    let source = std::fs::read_to_string(directory.path().join("workflow-plan.rs")).unwrap();
+    syn::parse_file(&source).unwrap();
+    assert!(!source.contains("CompiledWorkflow::from_json"));
 }
 
 #[cfg(unix)]

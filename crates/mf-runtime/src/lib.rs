@@ -108,7 +108,8 @@ pub use node::{
     TypedTaskHandle,
 };
 pub use node_target::{
-    NodeTarget, NodeTargetError, NodeTargetKind, PreparedTaskTarget, target_ports,
+    NodeTarget, NodeTargetDescriptor, NodeTargetError, NodeTargetKind, PreparedTaskTarget,
+    UnknownSnafu as NodeTargetUnknownSnafu, target_ports,
 };
 pub use number::{compare_json_numbers, number_to_f64, number_to_i64, number_to_u64};
 pub use registry::{
@@ -116,6 +117,8 @@ pub use registry::{
     NodeRegistryError, RegisteredFlow,
 };
 pub use runner::{NodeExecutionSnafu, SuccessDependencySnafu, WorkflowRunError};
+#[doc(hidden)]
+pub use serde_json as __serde_json;
 pub use stream::{
     BatchInfo, EventContext, EventEffects, EventEmission, EventNode, FlushReason, NodeEvent,
     StreamExecution, StreamLimits, StreamNode, TimerUpdate, TypedEventNode, TypedStreamNode,

@@ -210,8 +210,7 @@ fn parameters_probe() {
     #[cfg(feature = "codegen")]
     {
         let generated = plan.generate_execution_plans(&registry).unwrap();
-        let targets: Vec<mf_runtime::NodeTarget> =
-            serde_json::from_str(&generated.node_targets_json).unwrap();
+        let targets = generated.node_targets.clone();
         let target = mf_runtime::NodeTarget::find(&targets, "params").unwrap();
         let bound = target.bind_flow(&flow).unwrap();
         let output = mf_runtime::FlowRuntime::default()

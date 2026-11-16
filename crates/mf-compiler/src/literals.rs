@@ -5,6 +5,37 @@ use mf_runtime::{
 };
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
+use snafu::ResultExt;
+
+pub fn graph(graph: &mf_runtime::CompiledGraph) -> Result<TokenStream, crate::PlanError> {
+    let definition =
+        serde_json::to_string(&graph.definition).context(crate::plan::SerializeSnafu)?;
+    let order = graph.execution_order.iter().map(|id| {
+        let id = id.as_str();
+        quote!(#id.into())
+    });
+    let relations = relations(&graph.relations);
+    let children = graph
+        .children
+        .iter()
+        .map(|(owner, bindings)| {
+            let owner = owner.as_str();
+            let bindings = bindings
+                .iter()
+                .map(|(name, child)| {
+                    let child = self::graph(child)?;
+                    Ok(quote!((#name.into(), #child)))
+                })
+                .collect::<Result<Vec<_>, crate::PlanError>>()?;
+            Ok(quote!((#owner.into(), std::collections::BTreeMap::from([#(#bindings),*]))))
+        })
+        .collect::<Result<Vec<_>, crate::PlanError>>()?;
+    Ok(quote!(mf_runtime::CompiledGraph {
+        definition: mf_runtime::WorkflowDefinition::from_json(#definition)?,
+        execution_order: vec![#(#order),*], relations: #relations,
+        children: std::collections::BTreeMap::from([#(#children),*]),
+    }))
+}
 
 pub fn value_type(value: &ValueType) -> TokenStream {
     use ValueType::*;
@@ -30,29 +61,31 @@ pub fn value_type(value: &ValueType) -> TokenStream {
 pub fn json(value: &serde_json::Value) -> TokenStream {
     use serde_json::Value;
     match value {
-        Value::Null => quote!(serde_json::Value::Null),
-        Value::Bool(value) => quote!(serde_json::Value::Bool(#value)),
+        Value::Null => quote!(mf_runtime::__serde_json::Value::Null),
+        Value::Bool(value) => quote!(mf_runtime::__serde_json::Value::Bool(#value)),
         Value::Number(value) => {
             if let Some(value) = value.as_u64() {
-                quote!(serde_json::Value::Number(serde_json::Number::from(#value)))
+                quote!(mf_runtime::__serde_json::Value::Number(mf_runtime::__serde_json::Number::from(#value)))
             } else if let Some(value) = value.as_i64() {
-                quote!(serde_json::Value::Number(serde_json::Number::from(#value)))
+                quote!(mf_runtime::__serde_json::Value::Number(mf_runtime::__serde_json::Number::from(#value)))
+            } else if let Some(value) = value.as_f64().filter(|value| value.is_finite()) {
+                quote!(mf_runtime::__serde_json::Value::Number(mf_runtime::__serde_json::Number::from_f64(#value).expect("compiled finite number")))
             } else {
-                let value = value.as_f64().expect("JSON numbers are finite");
-                quote!(serde_json::Value::Number(serde_json::Number::from_f64(#value).expect("compiled finite number")))
+                let value = value.to_string();
+                quote!(mf_runtime::__serde_json::Value::Number(#value.parse().expect("compiled JSON number")))
             }
         }
-        Value::String(value) => quote!(serde_json::Value::String(#value.into())),
+        Value::String(value) => quote!(mf_runtime::__serde_json::Value::String(#value.into())),
         Value::Array(values) => {
             let values = values.iter().map(json);
-            quote!(serde_json::Value::Array(vec![#(#values),*]))
+            quote!(mf_runtime::__serde_json::Value::Array(vec![#(#values),*]))
         }
         Value::Object(values) => {
             let entries = values.iter().map(|(name, value)| {
                 let value = json(value);
                 quote!((#name.into(), #value))
             });
-            quote!(serde_json::Value::Object(serde_json::Map::from_iter([#(#entries),*])))
+            quote!(mf_runtime::__serde_json::Value::Object(mf_runtime::__serde_json::Map::from_iter([#(#entries),*])))
         }
     }
 }

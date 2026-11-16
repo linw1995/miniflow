@@ -32,6 +32,7 @@ pub enum WorkflowManifestVersion {
 pub struct RunnerDescriptor {
     pub description: WorkflowDescription,
     pub input_schema: WorkflowInputSchema,
+    pub node_targets: Vec<crate::NodeTargetDescriptor>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -83,6 +84,8 @@ pub enum GraphDescriptionError {
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowManifestError {
+    #[snafu(display("invalid runner inspection projection: {message}"))]
+    Projection { message: &'static str },
     #[snafu(display("compiled workflow interface drift at `{path}`: {component} differs"))]
     InterfaceDrift {
         path: String,
@@ -119,6 +122,7 @@ impl WorkflowManifest {
             descriptor: RunnerDescriptor {
                 description: describe_graph(graph).context(GraphSnafu)?,
                 input_schema,
+                node_targets: Vec::new(),
             },
         };
         manifest.validate()?;
@@ -257,6 +261,55 @@ impl WorkflowManifest {
             .context(DefinitionSnafu)
             .context(GraphSnafu)?;
         let description = self.description()?;
+        let mut targets = BTreeSet::new();
+        for target in &self.descriptor.node_targets {
+            let node = description.nodes.iter().find(|node| node.id == target.id);
+            ensure!(
+                targets.insert(&target.id)
+                    && target.original_workflow_id == description.workflow_id
+                    && target.description.nodes.len() == 1
+                    && node == target.description.nodes.first(),
+                ProjectionSnafu {
+                    message: "node target identity differs from the workflow projection"
+                }
+            );
+            let identity = description
+                .workflow_id
+                .for_node_target(&target.id)
+                .context(ObservationSnafu)
+                .context(GraphSnafu)?;
+            ensure!(
+                target.description.workflow_id == identity,
+                ProjectionSnafu {
+                    message: "node target observation identity differs from its isolated identity"
+                }
+            );
+            target
+                .description
+                .validate()
+                .context(ObservationSnafu)
+                .context(GraphSnafu)?;
+            for (name, value_type) in target.context.iter().chain(
+                target
+                    .outputs
+                    .iter()
+                    .map(|(name, port)| (name, &port.value_type)),
+            ) {
+                value_type
+                    .check_depth()
+                    .context(crate::WorkflowInputTypeDepthSnafu {
+                        path: pointer(&pointer("/node_targets", &target.id), name),
+                    })
+                    .context(InterfaceSnafu)?;
+            }
+            WorkflowInterface {
+                version: crate::WorkflowInterfaceVersion::for_schema(&target.inputs),
+                workflow_id: identity,
+                schema: target.inputs.clone(),
+            }
+            .validate_for_description(&target.description)
+            .context(InterfaceSnafu)?;
+        }
         self.interface_for(&description)
             .validate_for_description(&description)
             .context(InterfaceSnafu)

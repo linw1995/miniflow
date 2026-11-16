@@ -173,8 +173,11 @@ under generic compiler node or child-scope context.
 
 Manifest payload version `2026-11-14` contains the root `definition`, resource `entry` and `sources`,
 and a public `descriptor` with observation `description` and prepared `input_schema`. It does not
-serialize compiler graphs or execution layouts. Saved plans currently use a separate `graph` wrapper.
-Framing remains version 1. Older payloads are rejected rather than inferred or adapted.
+serialize compiler graphs or execution layouts. Native `CompiledWorkflow` and `CompiledGraph` do not
+implement Serde. Explicit `to_json()` and `from_json()` APIs use a compiler-owned saved-plan DTO with
+a `graph` wrapper; they are not the standalone build handoff. Generated projects use `workflow-plan.rs`,
+and frozen embedded modules construct native Rust graph data rather than deserializing compiler IR.
+Framing remains version 1. Older manifest payloads are rejected rather than inferred or adapted.
 
 `manifest(&registry) -> Result<WorkflowManifest, PlanError>` derives the current configured interface
 from the host registry. Inspection prepares separate nodes without executing them. There is no

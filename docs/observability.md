@@ -6,7 +6,7 @@
 
 `mf-tui` contains the local OTLP receiver, state reducer, graph renderer, and CLI-only process supervisor used by `mf run <executable> --tui`.
 
-`mf-runtime` depends on the minimal telemetry package. `mf-cli` depends on the separate `mf-tui` package for bounded description preflight and local reception. Neither the compiler nor runtime depends on `mf-tui`. Generated runners enable OTLP export support by default, while `mf compile --no-telemetry` omits the SDK and HTTP client. Neither runner includes terminal dependencies or the compiler's code generation feature.
+`mf-runtime` depends on the minimal telemetry package. `mf-cli` depends on the separate `mf-tui` package for bounded description preflight and local reception. Neither the compiler nor runtime depends on `mf-tui`. Generated runners enable OTLP export support by default, while `mf compile --no-telemetry` omits the SDK and HTTP client. Neither runner includes terminal dependencies or `mf-compiler` in its normal dependency closure. The compiler remains a build dependency only.
 
 The `mf-telemetry/otlp` feature selects the OTel SDK and OTLP/HTTP protobuf exporters with an explicit blocking HTTP client and TLS support. Enabling the feature alone does not initialize an exporter. The generated runner owns provider initialization and bounded shutdown; libraries do not install global providers for callers.
 
@@ -32,6 +32,7 @@ is identified becomes a workflow preparation failure.
 
 Standalone projects use `CompiledWorkflow::generate_runner_artifacts()` to emit only the entry points their runner calls:
 `prepare_workflow` and `run_workflow_in_context` for task workflows, or `prepare_stream` for streaming workflows.
+Binding errors use `mf_runtime::generated::BindError`; runner startup never compiles a graph.
 Custom runners that need the convenience functions above can use `generate_artifacts()` instead.
 
 The runnable example uses in-memory SDK exporters and performs no network export:
@@ -131,6 +132,7 @@ Manifest payload version `2026-11-14` separates original definition resources fr
 `definition` retains the root declaration; `entry` and `sources` identify the captured UTF-8 definition resources.
 The `descriptor` contains the validated observation `description` and prepared `input_schema`, including workflow identity,
 actual execution mode, child observation scopes, provider-declared types, bindings, and conditional stdin ownership.
+`node_targets` exposes isolated task interfaces and observation identities without compiled node indices.
 Compiler IR, graph relationships, scheduling layouts, and typed optimization evidence are not persisted.
 `description()`, `interface()`, and `workflow_id()` read this projection without planning or preparing providers;
 `node_definition(id)` borrows a root declaration by exact ID. The same build preparation supplies execution and inspection.

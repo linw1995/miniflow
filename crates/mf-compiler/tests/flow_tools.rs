@@ -225,8 +225,7 @@ fn catalog_and_parallel_dispatch_use_actual_children_and_one_shared_chain() {
         restored.description().unwrap(),
         mf_compiler::describe_compiled(&plan).unwrap()
     );
-    let roundtrip =
-        mf_compiler::CompiledWorkflow::from_json(&serde_json::to_string(&plan).unwrap()).unwrap();
+    let roundtrip = mf_compiler::CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
     assert_eq!(roundtrip, plan);
 }
 

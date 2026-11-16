@@ -678,8 +678,9 @@ opentelemetry_sdk = {{ version = "0.33.0", default-features = false, features = 
 extern crate node_0 as _;
 mod workflow;
 mod observation_capture;
+include!("../workflow-plan.rs");
 fn main() {
-    let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json")).unwrap();
+    let plan = compiled_workflow().unwrap();
     let harness = observation_capture::Harness::new(true);
     let observation = plan.start_observation(&harness.observer(), mf_telemetry::identity::RunId::new()).unwrap();
     let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();

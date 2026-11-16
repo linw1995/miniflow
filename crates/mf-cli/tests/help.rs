@@ -23,7 +23,12 @@ fn manifest() -> WorkflowManifest {
         }}}, "stdin": {}}
     });
     WorkflowManifest::from_graph(
-        &serde_json::from_value(fixture["graph"].clone()).unwrap(),
+        &mf_runtime::CompiledGraph {
+            definition: serde_json::from_value(fixture["graph"]["definition"].clone()).unwrap(),
+            execution_order: vec!["source".into(), "transform".into()],
+            relations: Default::default(),
+            children: Default::default(),
+        },
         serde_json::from_value(fixture["input_schema"].clone()).unwrap(),
     )
     .unwrap()

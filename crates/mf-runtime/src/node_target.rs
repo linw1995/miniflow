@@ -14,10 +14,16 @@ pub enum NodeTargetKind {
     Stream,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NodeTarget {
-    pub id: String,
     pub index: usize,
+    pub descriptor: NodeTargetDescriptor,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeTargetDescriptor {
+    pub id: String,
     pub kind: NodeTargetKind,
     #[serde(default)]
     pub worker_limit: Option<std::num::NonZeroUsize>,
@@ -44,7 +50,7 @@ pub enum NodeTargetError {
         key: String,
         source: crate::TypeMismatch,
     },
-    #[snafu(display("unknown top-level node target `{id}`"))]
+    #[snafu(display("unknown top-level node target `{id}`"), visibility(pub))]
     Unknown { id: String },
     #[snafu(display(
         "node target `{id}` is {kind:?}; isolated execution supports only top-level Tasks"
@@ -138,7 +144,27 @@ pub fn target_ports(ports: &[crate::PortSpec]) -> BTreeMap<String, WorkflowInput
         .collect()
 }
 
-impl NodeTarget {
+impl std::ops::Deref for NodeTarget {
+    type Target = NodeTargetDescriptor;
+    fn deref(&self) -> &Self::Target {
+        &self.descriptor
+    }
+}
+
+impl std::ops::DerefMut for NodeTarget {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.descriptor
+    }
+}
+
+impl NodeTargetDescriptor {
+    pub fn bind_to(self, index: usize) -> NodeTarget {
+        NodeTarget {
+            index,
+            descriptor: self,
+        }
+    }
+
     pub fn start_observation(
         &self,
         observer: &mf_telemetry::observation::Observer,
@@ -189,15 +215,6 @@ impl NodeTarget {
         Ok(())
     }
 
-    pub fn find<'a>(targets: &'a [Self], id: &str) -> Result<&'a Self, NodeTargetError> {
-        let target = targets
-            .iter()
-            .find(|target| target.id == id)
-            .context(UnknownSnafu { id })?;
-        target.require_task()?;
-        Ok(target)
-    }
-
     fn require_task(&self) -> Result<(), NodeTargetError> {
         ensure!(
             self.kind == NodeTargetKind::Task,
@@ -207,6 +224,17 @@ impl NodeTarget {
             }
         );
         Ok(())
+    }
+}
+
+impl NodeTarget {
+    pub fn find<'a>(targets: &'a [Self], id: &str) -> Result<&'a Self, NodeTargetError> {
+        let target = targets
+            .iter()
+            .find(|target| target.id == id)
+            .context(UnknownSnafu { id })?;
+        target.require_task()?;
+        Ok(target)
     }
 
     fn validate_metadata(&self, id: &str, metadata: &NodeMetadata) -> Result<(), NodeTargetError> {

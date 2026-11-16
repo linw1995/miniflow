@@ -152,7 +152,7 @@ fn prepares_typed_input_and_new_message_domains_without_execution() {
         ("2026-09-29", 4, "requires workflow schema 2026-10-03"),
         ("2026-10-03", 0, "stream limits must be positive"),
     ] {
-        let mut value = serde_json::to_value(&plan).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&plan.to_json().unwrap()).unwrap();
         value["graph"]["definition"]["version"] = json!(version);
         value["graph"]["definition"]["execution"]["limits"]["workers"] = json!(workers);
         let definition = serde_json::from_value(value["graph"]["definition"].clone()).unwrap();

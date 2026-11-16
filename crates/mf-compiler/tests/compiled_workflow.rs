@@ -242,7 +242,7 @@ fn plain_configuration_stays_opaque_in_saved_graphs_and_offline_descriptions() {
 fn saved_plans_require_explicit_graph_and_reject_parameter_metadata() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition(), &registry).unwrap();
-    let encoded = serde_json::to_value(&plan).unwrap();
+    let encoded: Value = serde_json::from_str(&plan.to_json().unwrap()).unwrap();
     assert!(CompiledWorkflow::from_json(&encoded["graph"].to_string()).is_err());
     let mut missing_relations = encoded.clone();
     missing_relations["graph"]

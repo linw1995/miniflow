@@ -58,7 +58,7 @@ fn target_records_reuse_preparation_and_bind_original_contracts() {
     let artifacts = plan.generate_execution_plans(&registry).unwrap();
     assert_eq!(CONSTRUCTIONS.load(Ordering::SeqCst), 1);
     assert_eq!(EXECUTIONS.load(Ordering::SeqCst), 0);
-    let targets: Vec<NodeTarget> = serde_json::from_str(&artifacts.node_targets_json).unwrap();
+    let targets: Vec<NodeTarget> = artifacts.node_targets.clone();
     assert_eq!(
         targets
             .iter()

@@ -46,8 +46,10 @@ pub enum DependencyProjectError {
 }
 
 const BUILD: &str = r#"
+include!("workflow-plan.rs");
+
 fn main() {
-    println!("cargo:rerun-if-changed=workflow-plan.json");
+    println!("cargo:rerun-if-changed=workflow-plan.rs");
     println!("cargo:rerun-if-changed=workflow-sources.json");
     println!("cargo:rustc-check-cfg=cfg(mf_streaming)");
     if let Err(error) = generate() {
@@ -58,7 +60,7 @@ fn main() {
 
 fn generate() -> Result<(), Box<dyn std::error::Error>> {
     let registry = mf_runtime::NodeRegistry::from_inventory()?;
-    let workflow = mf_compiler::CompiledWorkflow::from_json(include_str!("workflow-plan.json"))?;
+    let workflow = compiled_workflow()?;
     let artifacts = workflow.generate_runner_execution_plans(&registry)?;
     let workflow = &artifacts.resolved_workflow;
     if workflow.graph.definition.execution.is_some() {
@@ -78,7 +80,6 @@ fn generate() -> Result<(), Box<dyn std::error::Error>> {
     manifest.sources = sources;
     std::fs::write(output.join("workflow-manifest.bin"), manifest.to_bytes()?)?;
     std::fs::write(output.join("typed-fast-paths.json"), artifacts.typed_plan_json)?;
-    std::fs::write(output.join("node-targets.json"), artifacts.node_targets_json)?;
     Ok(())
 }
 "#;
@@ -122,9 +123,10 @@ fn main() -> std::process::ExitCode {
 }
 
 fn run(#[cfg(unix)] signals: &mut mf_runtime::RunnerSignals) -> Result<(), Box<dyn std::error::Error>> {
-    let targets: Vec<mf_runtime::NodeTarget> = serde_json::from_str(
-        include_str!(concat!(env!("OUT_DIR"), "/node-targets.json")),
-    )?;
+    let targets = workflow_manifest()?.descriptor.node_targets.into_iter().map(|descriptor| {
+        let index = workflow::compiled_node_index(&descriptor.id)?;
+        Ok(descriptor.bind_to(index))
+    }).collect::<Result<Vec<_>, mf_runtime::NodeTargetError>>()?;
     let invocation = mf_runtime::RunnerInvocation::parse(
         std::env::args_os().skip(1), &workflow::compiled_input_schema(), &targets,
     )?;
@@ -475,7 +477,7 @@ pub fn write_dependency_project_with_resources(
     options: &RunnerOptions,
     sources: &str,
 ) -> Result<(), DependencyProjectError> {
-    let plan_json = plan.to_json().context(PlanSnafu)?;
+    let plan_source = plan.generate_plan_source().context(PlanSnafu)?;
     let (manifest, imports) = project_manifest(&plan.graph.definition, support, options, false)?;
     let build = format!("{imports}{BUILD}");
     let main = format!("{imports}{MAIN}");
@@ -489,7 +491,7 @@ pub fn write_dependency_project_with_resources(
                 "src/workflow.rs",
                 "include!(concat!(env!(\"OUT_DIR\"), \"/workflow.rs\"));\n",
             ),
-            ("workflow-plan.json", &plan_json),
+            ("workflow-plan.rs", &plan_source),
             ("workflow-sources.json", sources),
         ],
     )

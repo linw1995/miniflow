@@ -29,6 +29,7 @@ mod lowering;
 #[cfg(feature = "codegen")]
 mod pipeline;
 mod plan;
+mod plan_document;
 mod routers;
 #[cfg(feature = "codegen")]
 mod state;
@@ -101,7 +102,8 @@ pub use pipeline::{
     resolve_project,
 };
 pub use plan::{
-    CompiledWorkflow, GeneratedExecutionArtifacts, GeneratedWorkflowArtifacts, PlanError,
+    CompiledWorkflow, GeneratedExecutionArtifacts, GeneratedRunnerArtifacts,
+    GeneratedWorkflowArtifacts, PlanError,
 };
 #[cfg(feature = "codegen")]
 pub use state::{BuildGuard, StateError, atomic_copy, atomic_write, write_if_changed};

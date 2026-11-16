@@ -463,6 +463,10 @@ impl FlowBuilder {
         &self.input_schema
     }
 
+    pub fn nodes(&self) -> &[crate::FlowNode] {
+        &self.nodes
+    }
+
     /// Validates graph structure while retaining ownership of each prepared execution kind.
     pub fn prepare(
         nodes: Vec<FlowNode>,

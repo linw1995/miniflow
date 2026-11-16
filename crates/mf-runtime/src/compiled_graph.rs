@@ -113,17 +113,52 @@ impl ScopeRelations {
 ///
 /// Child bindings are authoritative; provider configuration remains opaque and is
 /// never inspected to discover additional scopes when reading a compiled graph.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CompiledGraph {
     pub definition: WorkflowDefinition,
     pub execution_order: Vec<DefinitionId>,
     pub relations: GraphRelations,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub children: BTreeMap<DefinitionId, BTreeMap<String, CompiledGraph>>,
 }
 
+#[derive(Serialize)]
+struct GraphIdentity<'a> {
+    definition: &'a WorkflowDefinition,
+    execution_order: &'a [DefinitionId],
+    relations: &'a GraphRelations,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    children: BTreeMap<&'a DefinitionId, BTreeMap<&'a str, GraphIdentity<'a>>>,
+}
+
+impl<'a> GraphIdentity<'a> {
+    fn new(graph: &'a CompiledGraph) -> Self {
+        Self {
+            definition: &graph.definition,
+            execution_order: &graph.execution_order,
+            relations: &graph.relations,
+            children: graph
+                .children
+                .iter()
+                .map(|(owner, bindings)| {
+                    (
+                        owner,
+                        bindings
+                            .iter()
+                            .map(|(name, child)| (name.as_str(), Self::new(child)))
+                            .collect(),
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
 impl CompiledGraph {
+    /// A one-way identity projection, not a saved graph or an executable plan.
+    pub fn identity_record(&self) -> impl Serialize + '_ {
+        GraphIdentity::new(self)
+    }
+
     /// Observation identity for this child binding, independent of provider kind.
     pub fn child_scope_key(&self, owner: &NodeDefinition, binding: &str) -> String {
         self.relations
@@ -144,6 +179,6 @@ impl CompiledGraph {
             return WorkflowId::from_definition(&self.definition, &order)
                 .context(GraphObservationSnafu);
         }
-        WorkflowId::from_definition(self, &order).context(GraphObservationSnafu)
+        WorkflowId::from_definition(&self.identity_record(), &order).context(GraphObservationSnafu)
     }
 }

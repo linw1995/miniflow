@@ -101,6 +101,54 @@ fn inspection_persists_a_projection_without_compiler_relationships() {
 }
 
 #[test]
+fn node_inspection_has_no_execution_indices_and_validates_isolated_identity() {
+    let mut manifest = sample();
+    let original = manifest.workflow_id().unwrap();
+    let mut description = manifest.description().unwrap();
+    description.workflow_id = original.for_node_target("root.a/~").unwrap();
+    manifest
+        .descriptor
+        .node_targets
+        .push(mf_runtime::NodeTargetDescriptor {
+            id: "root.a/~".into(),
+            kind: mf_runtime::NodeTargetKind::Task,
+            worker_limit: None,
+            inputs: manifest.input_schema.clone(),
+            outputs: Default::default(),
+            context: Default::default(),
+            original_workflow_id: original.clone(),
+            description,
+        });
+    let payload = serde_json::to_value(&manifest).unwrap();
+    assert!(
+        payload["descriptor"]["node_targets"][0]
+            .get("index")
+            .is_none()
+    );
+    assert_eq!(
+        WorkflowManifest::from_bytes(&manifest.to_bytes().unwrap()).unwrap(),
+        manifest
+    );
+    let mut unknown = payload;
+    unknown["descriptor"]["node_targets"][0]["index"] = json!(0);
+    assert!(WorkflowManifest::from_bytes(&frame(&serde_json::to_vec(&unknown).unwrap())).is_err());
+    let mut duplicate = manifest.clone();
+    duplicate
+        .descriptor
+        .node_targets
+        .push(manifest.descriptor.node_targets[0].clone());
+    assert!(matches!(
+        duplicate.validate(),
+        Err(WorkflowManifestError::Projection { .. })
+    ));
+    manifest.descriptor.node_targets[0].description.workflow_id = original;
+    assert!(matches!(
+        manifest.validate(),
+        Err(WorkflowManifestError::Projection { .. })
+    ));
+}
+
+#[test]
 fn preserves_protocols_names_and_conditional_resources() {
     let manifest = sample();
     let mut bytes = manifest.to_bytes().unwrap();

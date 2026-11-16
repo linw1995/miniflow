@@ -79,7 +79,7 @@ the actual observation graph, workflow identity, execution mode, and prepared in
 Both artifacts use the same validated preparation,
 including configured input types and conditional stdin requirements. The manifest is generated before linking during
 the existing runner build; it does not require a second compilation. Its wire format is documented in
-[observability](observability.md#embedded-manifest-format). The generated-project layout version is `2026-10-16`;
+[observability](observability.md#embedded-manifest-format). The generated-project layout version is `2026-11-14`;
 explicit build directories owned by an older layout must be recreated at a compatible location.
 The runner links the manifest into a dedicated ELF or Mach-O section and needs no manifest sidecar after installation.
 Runtime helpers read graph and interface views from the descriptor; generated runners use them for observation and inspection.
@@ -159,7 +159,7 @@ See [DeepSeek web search and fetch](workflows.md#deepseek-web-search-and-fetch).
 
 ## Build failures
 
-Diagnostics identify the failed stage: input parsing, graph validation, dependency resolution, runtime compatibility, compilation, lock persistence, or installation. Cargo diagnostics remain visible. Failures after project creation report its retained location for inspection, including `Cargo.toml`, `workflow-plan.json`, generated source, and build artifacts.
+Diagnostics identify the failed stage: input parsing, graph validation, dependency resolution, runtime compatibility, compilation, lock persistence, or installation. Cargo diagnostics remain visible. Failures after project creation report its retained location for inspection, including `Cargo.toml`, the build-only `workflow-plan.rs`, captured definition resources, generated source, and build artifacts.
 
 A failed build never replaces an existing executable. If editing a constant introduces a known type
 conflict, build validation reports the source and target ports, their types, and a nested JSON
@@ -313,11 +313,11 @@ the normal schema and graph rules.
 
 ## Execute an isolated task
 
-The generated build emits `node-targets.json` alongside execution layouts, using the same validated
-provider preparation. Each target retains its compiled index, resolved port types, external context
-references, stdin conditions, and a finite operation description. `NodeTarget::bind_flow` and
-`NodeTarget::bind_stream` bind a top-level task to that frozen contract and reject contract drift before
-business execution. Inference still follows the original graph, including forwarding output types.
+The embedded inspection descriptor includes `node_targets` from the same validated provider preparation.
+Each public target describes resolved port types, external context references, stdin conditions, and a finite operation.
+Generated Rust maps target IDs to fixed node indices; those indices are not serialized or exposed by inspection.
+`NodeTarget::bind_flow` and `NodeTarget::bind_stream` bind a top-level task to that frozen contract and reject
+contract drift before business execution. Type inference follows the original graph at build time, including forwarding output types.
 
 Isolated task support reuses whole-plan preparation. An unrelated provider factory can still fail during
 initialization and prevent selection from running; preparation does not call business methods or consume

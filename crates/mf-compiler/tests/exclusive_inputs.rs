@@ -204,8 +204,7 @@ fn typed_plans_fall_back_at_groups_and_isolated_nodes_accept_resolved_inputs() {
             .iter()
             .any(|edge| edge.target == "unrelated_b" && edge.fallback.is_none())
     );
-    let targets: Vec<mf_runtime::NodeTarget> =
-        serde_json::from_str(&artifacts.node_targets_json).unwrap();
+    let targets = artifacts.node_targets.clone();
     let target = mf_runtime::NodeTarget::find(&targets, "consume").unwrap();
     let flow = instantiate_compiled(&plan, &registry).unwrap();
     let result = mf_runtime::FlowRuntime::default()

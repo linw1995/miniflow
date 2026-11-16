@@ -1167,7 +1167,7 @@ fn compiled_scope_relationships_execute_independently_of_instruction_labels() {
                 .rust_source
                 .contains("mf_prepare_generated_workflow!")
         );
-        assert_eq!(runner.plan_json, generated.plan_json);
+        assert!(!runner.rust_source.contains("CompiledWorkflow::from_json"));
     }
 
     // The identical label outside a relationship endpoint remains a provider node.
@@ -2046,7 +2046,7 @@ fn descriptions_reject_damaged_loop_relationships_with_typed_owners() {
         mf_runtime::FlowParameterError::Json { parameter, .. } if parameter == "body"
     ));
     assert!(find_source::<serde_json::Error>(&error).unwrap().is_data());
-    let mut malformed = serde_json::to_value(&valid).unwrap();
+    let mut malformed: serde_json::Value = serde_json::from_str(&valid.to_json().unwrap()).unwrap();
     malformed["graph"]["children"]["repeat"]["body"]["definition"] = json!("not a workflow");
     let error = mf_compiler::CompiledWorkflow::from_json(&malformed.to_string()).unwrap_err();
     assert!(

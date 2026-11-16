@@ -893,12 +893,16 @@ fn generated_calls_match_memory_without_flow_sources() {
     assert!(
         execution
             .rust_source
+            .contains("PreparedSubgraph::from_plan")
+    );
+    assert!(
+        !execution
+            .rust_source
             .contains("PreparedSubgraph::from_flow")
     );
     let frozen = mf_runtime::WorkflowManifest::from_bytes(&execution.manifest_bytes).unwrap();
     assert_eq!(frozen.definition, plan.graph.definition);
-    let targets: Vec<mf_runtime::NodeTarget> =
-        serde_json::from_str(&execution.node_targets_json).unwrap();
+    let targets = execution.node_targets.clone();
     assert_eq!(targets[0].id, "outer");
     let artifacts = plan.generate_artifacts().unwrap();
     assert!(

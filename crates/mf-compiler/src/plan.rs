@@ -5,7 +5,6 @@ use crate::WorkflowDefinition;
 use proc_macro2::{Span, TokenStream};
 #[cfg(feature = "codegen")]
 use quote::{format_ident, quote};
-use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::collections::BTreeMap;
 #[cfg(feature = "codegen")]
@@ -13,8 +12,7 @@ use std::collections::BTreeSet;
 #[cfg(feature = "codegen")]
 use syn::LitStr;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CompiledWorkflow {
     pub graph: mf_runtime::CompiledGraph,
 }
@@ -25,17 +23,26 @@ pub struct GeneratedWorkflowArtifacts {
     pub plan_json: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GeneratedRunnerArtifacts {
+    pub rust_source: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct GeneratedExecutionArtifacts {
     pub rust_source: String,
     pub manifest_bytes: Vec<u8>,
     pub typed_plan_json: String,
-    pub node_targets_json: String,
+    pub node_targets: Vec<mf_runtime::NodeTarget>,
     pub resolved_workflow: CompiledWorkflow,
 }
 
 #[derive(Debug, Snafu)]
 pub enum PlanError {
+    #[snafu(transparent)]
+    Definition {
+        source: mf_runtime::DefinitionParseError,
+    },
     #[snafu(display("node target `{definition_id}` references unknown context output `{output}`"))]
     UnknownTargetReference {
         definition_id: DefinitionId,
@@ -70,7 +77,10 @@ pub enum PlanError {
         #[snafu(source(from(crate::WorkflowCompileError, Box::new)))]
         source: Box<crate::WorkflowCompileError>,
     },
-    #[snafu(display("could not serialize compiled workflow: {source}"))]
+    #[snafu(
+        display("could not serialize compiled workflow: {source}"),
+        visibility(pub)
+    )]
     Serialize { source: serde_json::Error },
     #[snafu(display("could not parse compiled workflow: {source}"))]
     Parse { source: serde_json::Error },
@@ -146,8 +156,29 @@ impl CompiledWorkflow {
         &self,
         registry: &mf_runtime::NodeRegistry,
     ) -> Result<mf_runtime::WorkflowManifest, PlanError> {
-        let (resolved, schema) = crate::compiler::prepare_interface(self, registry)?;
-        resolved.manifest_with_schema(schema)
+        let (resolved, builder) = crate::compiler::prepare_compiled_plan(self, registry)?;
+        let targets = resolved.node_targets(builder.nodes())?;
+        let schema = if let Some(execution) = &resolved.graph.definition.execution {
+            builder
+                .into_stream(execution.clone())
+                .map_err(crate::WorkflowBuildError::from)?
+                .plan()
+                .input_schema()
+                .clone()
+        } else {
+            builder
+                .into_tasks()
+                .map_err(crate::WorkflowBuildError::from)?
+                .input_schema()
+                .clone()
+        };
+        let mut manifest = resolved.manifest_with_schema(schema)?;
+        manifest.descriptor.node_targets = targets
+            .into_iter()
+            .map(|target| target.descriptor)
+            .collect();
+        manifest.validate()?;
+        Ok(manifest)
     }
 
     fn manifest_with_schema(
@@ -187,7 +218,7 @@ impl CompiledWorkflow {
         let output_types: BTreeMap<_, _> = nodes
             .iter()
             .flat_map(|node| {
-                node.metadata.ports.outputs.iter().map(move |port| {
+                node.metadata.output_ports().map(move |port| {
                     (
                         mf_runtime::output_id(node.definition_id.as_str(), &port.name),
                         port.value_type.clone(),
@@ -288,9 +319,8 @@ impl CompiledWorkflow {
                         Ok((reference.output.clone(), value_type.clone()))
                     })
                     .collect::<Result<_, PlanError>>()?;
-                Ok(mf_runtime::NodeTarget {
+                Ok(mf_runtime::NodeTargetDescriptor {
                     id,
-                    index,
                     kind,
                     inputs,
                     outputs: mf_runtime::target_ports(&node.metadata.ports.outputs),
@@ -305,7 +335,8 @@ impl CompiledWorkflow {
                     context,
                     original_workflow_id: original.workflow_id.clone(),
                     description,
-                })
+                }
+                .bind_to(index))
             })
             .collect()
     }
@@ -394,15 +425,32 @@ impl CompiledWorkflow {
     }
 
     pub fn to_json(&self) -> Result<String, PlanError> {
-        serde_json::to_string(self).context(SerializeSnafu)
+        serde_json::to_string(&crate::plan_document::PlanDocument::from(self))
+            .context(SerializeSnafu)
     }
 
     pub fn from_json(input: &str) -> Result<Self, PlanError> {
-        let plan: Self = serde_json::from_str(input).context(ParseSnafu)?;
+        let document: crate::plan_document::PlanDocument =
+            serde_json::from_str(input).context(ParseSnafu)?;
+        let plan = Self::from(document);
         crate::validate_execution(&plan.graph.definition)
             .map_err(crate::WorkflowBuildError::from)?;
         crate::describe_compiled(&plan)?;
         Ok(plan)
+    }
+
+    /// Emit the build-only graph handoff as native Rust, never as a serialized compiler IR.
+    #[cfg(feature = "codegen")]
+    pub fn generate_plan_source(&self) -> Result<String, PlanError> {
+        crate::describe_compiled(self)?;
+        let graph = crate::literals::graph(&self.graph)?;
+        let source = quote! {
+            pub fn compiled_workflow() -> Result<mf_compiler::CompiledWorkflow, mf_runtime::DefinitionParseError> {
+                Ok(mf_compiler::CompiledWorkflow { graph: #graph })
+            }
+        };
+        let syntax = syn::parse2(source).context(GeneratedSyntaxSnafu)?;
+        Ok(prettyplease::unparse(&syntax))
     }
 
     /// Generate a self-contained module that prepares nodes from the host registry.
@@ -415,7 +463,7 @@ impl CompiledWorkflow {
         );
         crate::describe_compiled(self)?;
         let plan_json = self.to_json()?;
-        let source = LitStr::new(&plan_json, Span::call_site());
+        let graph = crate::literals::graph(&self.graph)?;
         let preparation = quote! {
             pub fn prepare_stream(
                 registry: &mf_runtime::NodeRegistry,
@@ -434,7 +482,7 @@ impl CompiledWorkflow {
         };
         let generated = quote! {
             pub fn plan() -> Result<mf_compiler::CompiledWorkflow, mf_compiler::PlanError> {
-                mf_compiler::CompiledWorkflow::from_json(#source)
+                Ok(mf_compiler::CompiledWorkflow { graph: #graph })
             }
 
             pub fn manifest(
@@ -455,12 +503,12 @@ impl CompiledWorkflow {
     /// Generate preparation and execution entry points for custom runners.
     #[cfg(feature = "codegen")]
     pub fn generate_artifacts(&self) -> Result<GeneratedWorkflowArtifacts, PlanError> {
-        self.generate_artifacts_with_helpers(true)
+        self.generate_custom_artifacts()
     }
 
     /// Generate only the entry points used by the standalone runner.
     #[cfg(feature = "codegen")]
-    pub fn generate_runner_artifacts(&self) -> Result<GeneratedWorkflowArtifacts, PlanError> {
+    pub fn generate_runner_artifacts(&self) -> Result<GeneratedRunnerArtifacts, PlanError> {
         crate::describe_compiled(self)?;
         if self.graph.definition.execution.is_some() {
             return crate::fixed::stream_artifacts(self);
@@ -480,17 +528,13 @@ impl CompiledWorkflow {
             }
         };
         let syntax = syn::parse2(generated).context(GeneratedSyntaxSnafu)?;
-        Ok(GeneratedWorkflowArtifacts {
+        Ok(GeneratedRunnerArtifacts {
             rust_source: prettyplease::unparse(&syntax),
-            plan_json: self.to_json()?,
         })
     }
 
     #[cfg(feature = "codegen")]
-    fn generate_artifacts_with_helpers(
-        &self,
-        include_helpers: bool,
-    ) -> Result<GeneratedWorkflowArtifacts, PlanError> {
+    fn generate_custom_artifacts(&self) -> Result<GeneratedWorkflowArtifacts, PlanError> {
         if self.graph.definition.execution.is_some() {
             return generate_stream_artifacts(self);
         }
@@ -574,8 +618,7 @@ impl CompiledWorkflow {
                 .fail();
             }
         }
-        let helpers = if include_helpers {
-            quote! {
+        let helpers = quote! {
                 pub fn run_workflow_with_inputs(flow: &mf_runtime::Flow, arguments: mf_runtime::WorkflowArguments) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
                     run_workflow_with_inputs_and_options(flow, arguments, mf_runtime::RuntimeOptions::default())
                 }
@@ -620,15 +663,8 @@ impl CompiledWorkflow {
                 ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
                     mf_runtime::FlowRuntime::new(options).execute_in_context(flow, state)
                 }
-            }
-        } else {
-            TokenStream::new()
         };
-        let preparation_body = if include_helpers {
-            quote! { use snafu::ResultExt as _; let mut observation = observation; #(#preparations)* Ok(#root_flow) }
-        } else {
-            quote! { mf_prepare_generated_workflow!(registry, observation) }
-        };
+        let preparation_body = quote! { use snafu::ResultExt as _; let mut observation = observation; #(#preparations)* Ok(#root_flow) };
         let generated = quote! {
             include!(concat!(env!("OUT_DIR"), "/flow-plans.rs"));
 
@@ -753,15 +789,10 @@ enum ScopeBuild {
 
 #[cfg(feature = "codegen")]
 fn graph_preflight_tokens(graph: &mf_runtime::CompiledGraph) -> Result<TokenStream, PlanError> {
-    let graph = LitStr::new(
-        &serde_json::to_string(graph).context(SerializeSnafu)?,
-        Span::call_site(),
-    );
+    let graph = crate::literals::graph(graph)?;
     Ok(quote! {
-        let compiled_graph: mf_runtime::CompiledGraph = serde_json::from_str(#graph)
-            .context(mf_compiler::WorkflowInvalidEmbeddedConfigSnafu {
-                definition_id: mf_runtime::DefinitionId::from("<workflow>"),
-            })?;
+        let compiled_graph = (|| -> Result<mf_runtime::CompiledGraph, mf_runtime::DefinitionParseError> { Ok(#graph) })()
+            .boxed().context(mf_compiler::WorkflowMetadataSnafu { definition_id: "<workflow>" })?;
         mf_compiler::validate_compiled_graph(registry, &compiled_graph)
             .inspect_err(|error| {
                 if let Some(observation) = observation.as_deref_mut() {
@@ -1247,8 +1278,7 @@ impl CompiledWorkflow {
         mut body_layouts: crate::compiler::ScopeLayouts,
         standard: bool,
     ) -> Result<GeneratedExecutionArtifacts, PlanError> {
-        let node_targets_json =
-            serde_json::to_string(&self.node_targets(&nodes)?).context(SerializeSnafu)?;
+        let node_targets = self.node_targets(&nodes)?;
         let flow = crate::FlowBuilder::prepare(
             nodes,
             self.graph.definition.edges.clone(),
@@ -1287,6 +1317,22 @@ impl CompiledWorkflow {
                 pub fn compiled_input_schema() -> mf_runtime::WorkflowInputSchema { #schema_tokens }
             }]
         };
+        if standard {
+            let indices = self
+                .graph
+                .execution_order
+                .iter()
+                .enumerate()
+                .map(|(index, node)| {
+                    let id = node.as_str();
+                    quote!(#id => Ok(#index),)
+                });
+            layouts.push(quote! {
+                pub fn compiled_node_index(id: &str) -> Result<usize, mf_runtime::NodeTargetError> {
+                    match id { #(#indices)* _ => mf_runtime::NodeTargetUnknownSnafu { id }.fail() }
+                }
+            });
+        }
         if !self.graph.children.is_empty() {
             let workflow_id = self
                 .graph
@@ -1385,12 +1431,17 @@ impl CompiledWorkflow {
         }
         let syntax: syn::File =
             syn::parse2(quote! { #(#layouts)* }).context(GeneratedSyntaxSnafu)?;
-        let manifest = self.manifest_with_schema(schema)?;
+        let mut manifest = self.manifest_with_schema(schema)?;
+        manifest.descriptor.node_targets = node_targets
+            .iter()
+            .map(|target| target.descriptor.clone())
+            .collect();
+        manifest.validate()?;
         Ok(GeneratedExecutionArtifacts {
             rust_source: prettyplease::unparse(&syntax),
             manifest_bytes: manifest.to_bytes()?,
             typed_plan_json: serde_json::to_string_pretty(&typed_plan).context(SerializeSnafu)?,
-            node_targets_json,
+            node_targets,
             resolved_workflow: self.clone(),
         })
     }
