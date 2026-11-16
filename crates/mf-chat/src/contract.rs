@@ -1,5 +1,7 @@
 //! Application context and results shared by embedded and executable conversation workflows.
 
+pub mod transcript;
+
 use crate::{ChatError, Invocation, error::*, turn};
 use mf_runtime::{NodeValue, NodeValues, WorkflowArguments, WorkflowInputSchema, WorkflowManifest};
 use serde::{Deserialize, Serialize};

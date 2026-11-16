@@ -92,6 +92,11 @@ pub enum ChatError {
         operation: &'static str,
         source: std::num::TryFromIntError,
     },
+    #[snafu(display("invalid {view} transcript: {source}"))]
+    Transcript {
+        view: &'static str,
+        source: mfn_llm::TranscriptError,
+    },
     #[snafu(display("invalid chat {field}: {reason}"))]
     Invalid {
         field: &'static str,

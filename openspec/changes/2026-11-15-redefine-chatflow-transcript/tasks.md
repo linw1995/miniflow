@@ -1,9 +1,13 @@
 ## 1. Shared messages and chatflow contract
 
+The shared message foundation and standalone branch-result codec are implemented. The latter includes
+strict native/JSON encoding, independent view validation, and invocation-wide candidate invalidation.
+Public admission and execution switch together with durable storage; no legacy-result fallback is added.
+
 - [x] Extract provider-independent complete/pending-prefix transcript validation in `mfn-llm` with typed indexed errors.
 - [x] Add strict JSON persistence support for the existing `ChatMessage` and `ToolCall` codecs; test runtime/JSON parity.
 - [ ] Bind admitted model context plus current user through `messages`; expose context revision through optional application context.
-- [ ] Normalize self-contained append/replace_context result objects into internal facts and MessageUpdate variants, without a Flow update/kind wrapper.
+- [x] Normalize self-contained append/replace_context result objects into internal facts and MessageUpdate variants, without a Flow update/kind wrapper.
 - [ ] Keep status/usages/error/title inside each result; support append-only, replace-only, or two optional branch outputs with at least one advertised.
 - [ ] Reject zero/both/repeated/undeclared alternatives, null/nonobject payloads, missing facts/lists, and unknown payload fields; preserve empty lists.
 - [ ] Use the branch-output codec for canonical JSON, nested application results, typed custom backends, and runner output projection.
