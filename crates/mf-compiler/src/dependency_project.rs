@@ -458,7 +458,6 @@ pub fn write_dependency_project_with_options(
     support: &SupportPackages,
     options: &RunnerOptions,
 ) -> Result<(), DependencyProjectError> {
-    let plan_json = plan.to_json().context(PlanSnafu)?;
     let sources = serde_json::to_string(&(
         "workflow.json",
         std::collections::BTreeMap::from([(
@@ -467,6 +466,17 @@ pub fn write_dependency_project_with_options(
         )]),
     ))
     .context(SourcesSnafu)?;
+    write_dependency_project_with_resources(project, plan, support, options, &sources)
+}
+
+pub fn write_dependency_project_with_resources(
+    project: &Path,
+    plan: &CompiledWorkflow,
+    support: &SupportPackages,
+    options: &RunnerOptions,
+    sources: &str,
+) -> Result<(), DependencyProjectError> {
+    let plan_json = plan.to_json().context(PlanSnafu)?;
     let (manifest, imports) = project_manifest(&plan.graph.definition, support, options)?;
     let build = format!("{imports}{BUILD}");
     let main = format!("{imports}{MAIN}");
@@ -481,7 +491,7 @@ pub fn write_dependency_project_with_options(
                 "include!(concat!(env!(\"OUT_DIR\"), \"/workflow.rs\"));\n",
             ),
             ("workflow-plan.json", &plan_json),
-            ("workflow-sources.json", &sources),
+            ("workflow-sources.json", sources),
         ],
     )
 }

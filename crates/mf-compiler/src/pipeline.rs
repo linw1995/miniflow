@@ -1,6 +1,5 @@
 use crate::{
-    BuildGuard, BuildInputs, RunnerOptions, SupportPackages, atomic_copy,
-    validate_runtime_identity, write_dependency_project_with_options,
+    BuildGuard, BuildInputs, RunnerOptions, SupportPackages, atomic_copy, validate_runtime_identity,
 };
 use snafu::{IntoError, ResultExt, Snafu};
 use std::{
@@ -98,11 +97,6 @@ pub fn compile_project_with_options(
             "created"
         }
     );
-    at(
-        "project generation",
-        &project,
-        write_dependency_project_with_options(&project, &plan, request.support, options),
-    )?;
     let mut resource_root = inputs
         .definition
         .parent()
@@ -138,12 +132,18 @@ pub fn compile_project_with_options(
     let resources = at(
         "definition resource encoding",
         &inputs.definition,
-        serde_json::to_vec(&(resource_name(&inputs.definition), resources)),
+        serde_json::to_string(&(resource_name(&inputs.definition), resources)),
     )?;
     at(
-        "definition resource snapshot",
+        "project generation",
         &project,
-        crate::write_if_changed(&project.join("workflow-sources.json"), &resources),
+        crate::dependency_project::write_dependency_project_with_resources(
+            &project,
+            &plan,
+            request.support,
+            options,
+            &resources,
+        ),
     )?;
     let metadata = resolve_project(&project, &inputs.lock, request.locked)?;
     at(
