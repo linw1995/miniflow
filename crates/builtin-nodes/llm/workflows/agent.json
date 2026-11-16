@@ -22,24 +22,16 @@
       "kind": "builtin.parameters",
       "config": {
         "parameters": {
-          "prompt": {
-            "type": "string"
+          "messages": {
+            "type": {
+              "list": "object"
+            }
           },
           "tools": {
             "type": {
               "map": "flow"
             },
             "secret": false
-          },
-          "system": {
-            "type": "string",
-            "default": ""
-          },
-          "history": {
-            "type": {
-              "list": "object"
-            },
-            "default": []
           },
           "model": {
             "type": "string",
@@ -80,43 +72,6 @@
       }
     },
     {
-      "id": "initial_messages",
-      "kind": "builtin.code",
-      "config": {
-        "language": "cel",
-        "inputs": {
-          "prompt": "string",
-          "system": "string",
-          "history": {
-            "list": "object"
-          }
-        },
-        "code": {
-          "messages": "(system == '' ? [] : [dyn({'role':'system','content':system})]) + history + [dyn({'role':'user','content':prompt})]"
-        }
-      },
-      "inputs": {
-        "prompt": {
-          "from": {
-            "node": "params",
-            "port": "prompt"
-          }
-        },
-        "system": {
-          "from": {
-            "node": "params",
-            "port": "system"
-          }
-        },
-        "history": {
-          "from": {
-            "node": "params",
-            "port": "history"
-          }
-        }
-      }
-    },
-    {
       "id": "repeat",
       "kind": "loop.run",
       "config": {
@@ -141,6 +96,13 @@
             "type": {
               "list": "object"
             }
+          },
+          {
+            "name": "generated",
+            "type": {
+              "list": "object"
+            },
+            "initial": []
           },
           {
             "name": "usages",
@@ -281,10 +243,16 @@
                   "messages": {
                     "list": "object"
                   },
-                  "message": "object"
+                  "generated": {
+                    "list": "object"
+                  },
+                  "additions": {
+                    "list": "object"
+                  }
                 },
                 "code": {
-                  "messages": "messages + [dyn(message)]"
+                  "messages": "messages + additions",
+                  "generated": "generated + additions"
                 }
               },
               "inputs": {
@@ -294,10 +262,16 @@
                     "port": "messages"
                   }
                 },
-                "message": {
+                "generated": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "generated"
+                  }
+                },
+                "additions": {
                   "from": {
                     "node": "turn",
-                    "port": "message"
+                    "port": "messages"
                   }
                 }
               }
@@ -338,12 +312,16 @@
                   "assistant": {
                     "list": "object"
                   },
+                  "generated": {
+                    "list": "object"
+                  },
                   "results": {
                     "list": "object"
                   }
                 },
                 "code": {
-                  "messages": "assistant + results.map(result, dyn({'role':'tool','tool_call_id':result.tool_call_id,'content':result.content}))"
+                  "messages": "assistant + results.map(result, dyn({'role':'tool','tool_call_id':result.tool_call_id,'content':result.content}))",
+                  "generated": "generated + results.map(result, dyn({'role':'tool','tool_call_id':result.tool_call_id,'content':result.content}))"
                 }
               },
               "inputs": {
@@ -353,11 +331,47 @@
                     "port": "messages"
                   }
                 },
+                "generated": {
+                  "from": {
+                    "node": "append_assistant",
+                    "port": "generated"
+                  }
+                },
                 "results": {
                   "from": {
                     "node": "dispatch",
                     "port": "results"
                   }
+                }
+              }
+            },
+            {
+              "id": "finished_generated",
+              "kind": "builtin.identity",
+              "inputs": {
+                "input": {
+                  "from": {
+                    "node": "append_assistant",
+                    "port": "generated"
+                  }
+                }
+              }
+            },
+            {
+              "id": "generated",
+              "kind": "builtin.identity",
+              "inputs": {
+                "input": {
+                  "exclusive": [
+                    {
+                      "node": "append_tool_results",
+                      "port": "generated"
+                    },
+                    {
+                      "node": "finished_generated",
+                      "port": "value"
+                    }
+                  ]
                 }
               }
             }
@@ -370,7 +384,12 @@
             {
               "from_node": "route",
               "from_output": "tool_calls",
-              "to_node": "append_assistant"
+              "to_node": "dispatch"
+            },
+            {
+              "from_node": "route",
+              "from_output": "else",
+              "to_node": "finished_generated"
             },
             {
               "from_node": "append_assistant",
@@ -383,6 +402,11 @@
               "node": "append_tool_results",
               "port": "messages",
               "optional": true
+            },
+            {
+              "name": "generated",
+              "node": "generated",
+              "port": "value"
             },
             {
               "name": "usages",
@@ -417,7 +441,7 @@
       "inputs": {
         "messages": {
           "from": {
-            "node": "initial_messages",
+            "node": "params",
             "port": "messages"
           }
         },
@@ -524,6 +548,11 @@
       "name": "text",
       "node": "result",
       "port": "text"
+    },
+    {
+      "name": "messages",
+      "node": "repeat",
+      "port": "generated"
     },
     {
       "name": "usages",

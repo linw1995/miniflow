@@ -33,6 +33,7 @@ fn nested_title_usage() -> Value {
 const CALCULATOR_DESCRIPTION: &str = "Perform add, subtract, multiply, or divide on two numeric operands. Division by zero returns an error message.";
 const CALCULATOR_PROMPT: &str = "Calculate 2 + 3 and 3 * 4.";
 const CALCULATOR_ANSWER: &str = "The results are 5 and 12.";
+const CALCULATOR_SUMMARY: &str = "Calculator findings: 2 + 3 = 5; 3 * 4 = 12.";
 
 fn agent_usage(iteration: usize) -> Value {
     let mut usage = chat_usage(json!([
@@ -42,6 +43,15 @@ fn agent_usage(iteration: usize) -> Value {
     ]));
     usage["node"]["id"] = "model".into();
     usage["attribution"] = json!({"purpose":"conversation"});
+    usage
+}
+
+fn context_agent_usage(iteration: usize) -> Value {
+    let mut usage = agent_usage(iteration);
+    usage["node"]["path"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, json!({"node":"conversation","index":0}));
     usage
 }
 
@@ -64,6 +74,32 @@ fn streamed_calculator_calls() -> llm_support::Reply {
     streamed
 }
 
+fn append_result(messages: Value, usages: Value) -> Value {
+    json!({"append":{"status":"succeeded","messages":messages,"usages":usages,"error":""}})
+}
+
+fn assistant(text: &str) -> Value {
+    json!({"role":"assistant","content":text})
+}
+
+fn calculator_messages() -> Value {
+    json!([
+        {"role":"assistant","content":"","tool_calls":[
+            {"id":"call_add","name":"calculator","arguments":{"operation":"add","left":2.0,"right":3.0}},
+            {"id":"call_multiply","name":"calculator","arguments":{"operation":"multiply","left":3.0,"right":4.0}}
+        ]},
+        {"role":"tool","tool_call_id":"call_add","content":"5.0"},
+        {"role":"tool","tool_call_id":"call_multiply","content":"12.0"},
+        assistant(CALCULATOR_ANSWER)
+    ])
+}
+
+fn title_result(usages: Value) -> Value {
+    let mut result = append_result(json!([assistant("reply")]), usages);
+    result["append"]["title"] = "reply".into();
+    result
+}
+
 fn search_result() -> Value {
     json!({
         "rerank_score":2.4,"title":"DeepSeek release","url":"https://example.com/release",
@@ -72,7 +108,7 @@ fn search_result() -> Value {
     })
 }
 
-fn examples() -> [(&'static str, Option<&'static str>, Value); 23] {
+fn examples() -> [(&'static str, Option<&'static str>, Value); 24] {
     [
         (
             "deepseek-fetch.json",
@@ -90,29 +126,56 @@ fn examples() -> [(&'static str, Option<&'static str>, Value); 23] {
         (
             "chat-calculator-flow.json",
             None,
-            json!({"status":"succeeded", "text":CALCULATOR_ANSWER, "error":"", "usages":[agent_usage(0), agent_usage(1)]}),
+            append_result(
+                calculator_messages(),
+                json!([agent_usage(0), agent_usage(1)]),
+            ),
+        ),
+        (
+            "chat-context-flow.json",
+            None,
+            json!({"replace_context":{
+                "status":"succeeded",
+                "context_messages":[{"role":"system","content":CALCULATOR_SUMMARY}],
+                "display_messages":calculator_messages(),
+                "usages":[context_agent_usage(0), context_agent_usage(1), title_usage("summary", "compaction")],
+                "error":""
+            }}),
         ),
         (
             "chat-flow.json",
             None,
-            json!({"status":"succeeded", "text":"reply", "usages":[chat_usage(json!([]))], "finish_reason":"stop"}),
+            append_result(json!([assistant("reply")]), json!([chat_usage(json!([]))])),
         ),
         (
             "chat-loop-flow.json",
             None,
-            json!({"status":"succeeded", "text":"reply", "error":"", "metadata":{"strategy":"iterative"}, "usages":[chat_usage(json!([{"node":"repeat","index":0}])), chat_usage(json!([{"node":"repeat","index":1}]))]}),
+            append_result(
+                json!([
+                    {"role":"assistant","content":"reply","metadata":{"strategy":"iterative"}},
+                    {"role":"assistant","content":"reply","metadata":{"strategy":"iterative"}}
+                ]),
+                json!([
+                    chat_usage(json!([{"node":"repeat","index":0}])),
+                    chat_usage(json!([{"node":"repeat","index":1}]))
+                ]),
+            ),
         ),
         (
             "chat-title-flow.json",
             None,
-            json!({"status":"succeeded","text":"reply","title":"reply","finish_reason":"stop",
-                "usages":[title_usage("model", "conversation"), title_usage("title_model", "title")]}),
+            title_result(json!([
+                title_usage("model", "conversation"),
+                title_usage("title_model", "title")
+            ])),
         ),
         (
             "chat-nested-title-flow.json",
             None,
-            json!({"status":"succeeded","text":"reply","title":"reply","finish_reason":"stop",
-                "usages":[title_usage("model", "conversation"), nested_title_usage()]}),
+            title_result(json!([
+                title_usage("model", "conversation"),
+                nested_title_usage()
+            ])),
         ),
         ("else-if.json", None, json!({"medium": {"amount": 500}})),
         (
@@ -200,11 +263,29 @@ fn documented_examples_compile_and_produce_expected_outputs() {
 
     for (name, input, expected) in examples() {
         let definition = definitions.join(name);
+        if name == "chat-context-flow.json" {
+            fs::copy(
+                workspace().join("examples/chat-calculator-flow.json"),
+                definitions.join("chat-calculator-flow.json"),
+            )
+            .unwrap();
+            fs::create_dir_all(&auxiliary).unwrap();
+            for entry in fs::read_dir(workspace().join("examples/agent-calculator")).unwrap() {
+                let source = entry.unwrap().path();
+                fs::copy(&source, auxiliary.join(source.file_name().unwrap())).unwrap();
+            }
+        }
         let server = (name.starts_with("llm-") || name.starts_with("chat-")).then(|| {
             llm_support::Server::start(if name == "chat-calculator-flow.json" {
                 vec![
                     streamed_calculator_calls(),
                     llm_support::Reply::stream_text(CALCULATOR_ANSWER),
+                ]
+            } else if name == "chat-context-flow.json" {
+                vec![
+                    streamed_calculator_calls(),
+                    llm_support::Reply::stream_text(CALCULATOR_ANSWER),
+                    llm_support::Reply::text(CALCULATOR_SUMMARY),
                 ]
             } else if matches!(name, "chat-title-flow.json" | "chat-nested-title-flow.json") {
                 vec![
@@ -277,17 +358,17 @@ fn documented_examples_compile_and_produce_expected_outputs() {
             "{name}: compilation emitted warnings:\n{stderr}",
         );
 
-        if name == "chat-calculator-flow.json" {
+        if matches!(name, "chat-calculator-flow.json" | "chat-context-flow.json") {
             // The complete Agent, its tool and provider Flows must be frozen into
             // the runner, not reopened during either model turn or tool dispatch.
             fs::remove_file(&definition).unwrap();
             fs::remove_dir_all(&auxiliary).unwrap();
             fs::remove_dir_all(&build).unwrap();
+            if name == "chat-context-flow.json" {
+                fs::remove_file(definitions.join("chat-calculator-flow.json")).unwrap();
+            }
         }
         let mut command = Command::new(&executable);
-        if name == "chat-calculator-flow.json" {
-            command.env("PATH", "");
-        }
         command
             .current_dir(&runtime)
             .env("PATH", "")
@@ -297,20 +378,24 @@ fn documented_examples_compile_and_produce_expected_outputs() {
         if let Some(server) = &server {
             let inputs = if name == "llm-loop.json" {
                 json!({"repeat.prompt":"Hello", "repeat.history":[], "repeat.text":""})
-            } else if name == "chat-calculator-flow.json" {
-                json!({
-                    "params.prompt":CALCULATOR_PROMPT,
-                    "params.system":"Use the calculator.",
-                    "params.history":[
+            } else if matches!(name, "chat-calculator-flow.json" | "chat-context-flow.json") {
+                let mut inputs = json!({
+                    "params.messages":[
+                        {"role":"system","content":"Use the calculator."},
                         {"role":"user","content":"Earlier question"},
-                        {"role":"assistant","content":"Earlier answer"}
+                        {"role":"assistant","content":"Earlier answer"},
+                        {"role":"user","content":CALCULATOR_PROMPT}
                     ],
                     "params.model":"example-model",
                     "params.base_url":server.base_url,
                     "params.api_key":"synthetic-calculator-key"
-                })
+                });
+                if name == "chat-context-flow.json" {
+                    inputs["params.compact"] = true.into();
+                }
+                inputs
             } else if name.starts_with("chat-") {
-                json!({"params.prompt":"Hello", "params.model":"example-model", "params.base_url":server.base_url})
+                json!({"params.messages":[{"role":"user","content":"Hello"}], "params.model":"example-model", "params.base_url":server.base_url})
             } else if name == "llm-tools.json" {
                 json!({"model.messages":[{"role":"user","content":"Hello"}]})
             } else if name == "llm-parameters.json" {
@@ -359,6 +444,7 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                 | "chat-nested-title-flow.json"
                 | "chat-loop-flow.json"
                 | "chat-calculator-flow.json"
+                | "chat-context-flow.json"
         ) {
             let records: Vec<Value> = serde_json::Deserializer::from_slice(&output.stdout)
                 .into_iter()
@@ -373,7 +459,7 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                 answer,
                 if name == "chat-loop-flow.json" {
                     "replyreply"
-                } else if name == "chat-calculator-flow.json" {
+                } else if matches!(name, "chat-calculator-flow.json" | "chat-context-flow.json") {
                     CALCULATOR_ANSWER
                 } else {
                     "reply"
@@ -382,7 +468,9 @@ fn documented_examples_compile_and_produce_expected_outputs() {
             assert_eq!(server.as_ref().unwrap().requests()[0].body["stream"], true);
             records
                 .into_iter()
-                .find(|record| record.get("status").is_some())
+                .find(|record| {
+                    record.get("append").is_some() || record.get("replace_context").is_some()
+                })
                 .unwrap()
         } else {
             serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
@@ -394,7 +482,14 @@ fn documented_examples_compile_and_produce_expected_outputs() {
         };
         if name.starts_with("chat-") || name == "llm-tools.json" {
             let mut identities = std::collections::BTreeSet::new();
-            for usage in actual["usages"].as_array_mut().unwrap() {
+            let usages = if name == "chat-context-flow.json" {
+                &mut actual["replace_context"]["usages"]
+            } else if name.starts_with("chat-") {
+                &mut actual["append"]["usages"]
+            } else {
+                &mut actual["usages"]
+            };
+            for usage in usages.as_array_mut().unwrap() {
                 let id = usage["call_id"].as_str().unwrap().to_owned();
                 assert!(!id.is_empty() && identities.insert(id));
                 usage["call_id"] = "generated".into();
@@ -449,6 +544,25 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                         }
                     }
                 }])
+            );
+        }
+        if name == "chat-context-flow.json" {
+            let requests = server.as_ref().unwrap().requests();
+            assert_eq!(requests.len(), 3);
+            assert_ne!(requests[2].body["stream"], true);
+            let summary = requests[2].body["messages"].as_array().unwrap();
+            assert!(summary.iter().any(
+                |message| message["tool_call_id"] == "call_add" && message["content"] == "5.0"
+            ));
+            assert!(
+                summary
+                    .iter()
+                    .any(|message| message["tool_call_id"] == "call_multiply"
+                        && message["content"] == "12.0")
+            );
+            assert!(
+                summary.iter().any(|message| message["content"]
+                    == json!([{"type":"text","text":CALCULATOR_ANSWER}]))
             );
         }
         if name == "exclusive-inputs.json" {

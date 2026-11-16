@@ -325,7 +325,7 @@ fn fixed_agent_source_keeps_caller_wiring_while_compilation_binds_tool_children(
         .unwrap();
     assert_eq!(agent.kind, "workflow.call");
     assert_eq!(agent.config, json!({"flow":"agent"}));
-    assert_eq!(definition.outputs.len(), 5);
+    assert_eq!(definition.outputs.len(), 6);
 }
 
 #[test]

@@ -39,9 +39,11 @@ macro_rules! register_operation {
 }
 
 pub use crate::session::{
-    CreateSessionInputs, HistoryInputs, HistoryOutputs, ListSessionsInputs, MessagePageOutputs,
-    MessagesInputs, RenameSessionInputs, SessionInputs, SessionOutputs, SessionPageOutputs,
+    CreateSessionInputs, ListSessionsInputs, MessagePageOutputs, MessagesInputs,
+    RenameSessionInputs, SessionInputs, SessionOutputs, SessionPageOutputs,
 };
+
+pub use crate::context::{ModelContextInputs, ModelContextOutputs};
 
 pub use crate::turn::{
     BeginTurnInputs, CallOutputs, Changed, CompleteTurnInputs, CompletionOutputs, FailCallInputs,

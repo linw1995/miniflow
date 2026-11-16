@@ -499,28 +499,39 @@ workflow's directory. There is no runtime JSON catalog override or lexical `flow
 dispatch remains terminal-only; native dynamic Calls and existing observed-item nested-scope limits are
 unchanged.
 
-The Agent calls `mfn-llm.tool-catalog` once, outside its eight-pass native Loop, then invokes
-`mfn-llm.agent-turn` and `mfn-llm.tool-uses`. The latter uses native parallel Iteration for ordered tool
-results. Assistant tool-call messages precede the tool messages; usage facts accumulate across turns.
-Completion returns final `status`, `text`, `usages` and optional `error`, while `answer` streams every
-assistant turn, including tool-call preambles. Provider failures and exhaustion remain explicit failures.
+The Agent accepts complete `params.messages`, calls `mfn-llm.tool-catalog` once outside its eight-pass
+native Loop, then invokes `mfn-llm.agent-turn` and `mfn-llm.tool-uses`. The latter uses native parallel
+Iteration for ordered tool results. Generated assistant call batches precede their tool results, and
+the terminal assistant is included in the exported `messages` additions. Request history is not echoed.
+Completion also returns `status`, final `text`, `usages`, and `error`, while `answer` streams assistant
+text, including tool-call preambles. Captured provider failures and exhaustion retain completed rounds
+and their usages with failed status; an unresolved batch is permitted only at the end of a failed prefix.
 The same Agent handles empty, single-tool, and multi-tool collections. For no tools, supply empty
 `tools` and `tool_properties` objects with `builtin.object` and `fields: {}`; there is no separate
 empty-Agent definition.
 
 The [calculator chat Flow](../examples/chat-calculator-flow.json) is a small caller: `params`,
-`calculator`, `calculator_properties`, `tools`, `tool_properties`, and `agent`. A Flow constant loads
+`calculator`, `calculator_properties`, `tools`, `tool_properties`, `agent`, and a terminal result object. A Flow constant loads
 [the calculator](../examples/agent-calculator/calculator.json) and publishes its own interface. The
 inner `calculator_properties` object joins that interface with the `calculator_description` and
 `calculator_parameters` defaults; the outer `tools` object builds `Map(Flow)` and `tool_properties`
 builds the matching `Map(Object)`. A normal Call passes both maps into the unchanged `mfn-llm.agent`
-source; the compiler binds its router children without requiring caller-generated Agent JSON. The calculator supports
-add/subtract/multiply/divide and plain-text numeric results. Compile and run it with `--chat`:
+source; the compiler binds its router children without requiring caller-generated Agent JSON. The final
+ordinary object exports a self-contained `append` result with status, generated messages, usages, and error.
+The calculator supports add/subtract/multiply/divide and plain-text numeric results. Compile and run it with `--chat`:
 
 ```sh
 nix develop --command cargo run -p mf-cli --features development-support -- compile examples/chat-calculator-flow.json --output target/chat-calculator
 nix develop --command cargo run -p mf-cli --features development-support -- run target/chat-calculator --chat --params.model your-model
 ```
+
+The [context-replacement example](../examples/chat-context-flow.json) calls the same calculator Flow,
+then selects either its unchanged `append` result or a separate `replace_context` branch. With
+`params.compact = true`, an explicit summary-model call reports its own `compaction` usage and returns
+summary-only continuation plus all original display additions, including this turn's tool results.
+Both root selections are optional; one produced result is required, without a convergence node or
+new Flow syntax. A failed/incomplete summary is a failed audit result, not an implicit fallback or retry.
+See [the chat protocol](chat.md#shared-conversation-contract) for publication and independent-view rules.
 
 Run the concrete addition/unknown-tool example, or emit its definition for standalone compilation:
 

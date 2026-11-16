@@ -95,10 +95,7 @@ impl ConversationBackend for Runner {
                 model_call_id: "model".into(),
             },
         )?;
-        let reply = ConversationResult {
-            text: request.prompt,
-            ..Default::default()
-        };
+        let reply = ConversationResult::assistant(request.prompt()?);
         if self.fail_after_reply {
             return mf_chat::CaptureSnafu {
                 message: "child exited after its final reply",
@@ -132,18 +129,25 @@ fn registered_runner_streams_inside_a_call_without_linked_child_nodes() {
     let (job, receiver) = host.submit_stream(&session, "first").unwrap();
     assert_eq!(receiver.recv().unwrap().delta.text, "preview");
     assert!(receiver.recv().is_err());
-    assert_eq!(job.join().unwrap().result.text, "first");
+    assert_eq!(job.join().unwrap().result.final_text(), Some("first"));
     assert_eq!(
         host.submit(&session, "second")
             .unwrap()
             .join()
             .unwrap()
             .result
-            .text,
-        "second"
+            .final_text(),
+        Some("second")
     );
     assert_eq!(runner.calls.load(Ordering::SeqCst), 2);
-    assert_eq!(host.database().history(&session).unwrap().history.len(), 4);
+    assert_eq!(
+        host.database()
+            .model_context(&session)
+            .unwrap()
+            .messages
+            .len(),
+        4
+    );
 }
 
 #[test]
@@ -157,8 +161,15 @@ fn registered_runner_retains_final_reply_on_process_failure_without_reinvocation
     let ChatError::Uncommitted { pending, .. } = error else {
         panic!("expected retained reply, got {error:?}");
     };
-    assert_eq!(pending.completion.result.text, "retained");
+    assert_eq!(pending.completion.result.final_text(), Some("retained"));
     host.database().save_recovered(*pending).unwrap();
     assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(host.database().history(&session).unwrap().history.len(), 2);
+    assert_eq!(
+        host.database()
+            .model_context(&session)
+            .unwrap()
+            .messages
+            .len(),
+        2
+    );
 }

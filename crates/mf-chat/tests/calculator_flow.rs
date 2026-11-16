@@ -57,6 +57,7 @@ fn calculator_profile_loads_real_tool_bodies_without_specialized_nodes() {
             "tool_properties",
             "tools",
             "agent",
+            "result",
         ])
     );
     assert!(plan.graph.definition.edges.iter().any(|edge| {

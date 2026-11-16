@@ -30,7 +30,7 @@ const LOADING_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '�
 /// when the turn settles and the spinner disappears.
 fn role_label(text: &str, color: Color, indicator: Option<char>) -> Line<'static> {
     let mut spans = vec![Span::styled(
-        text.to_owned(),
+        safe(text).replace('\n', "\\n"),
         Style::default().fg(color).add_modifier(Modifier::BOLD),
     )];
     if let Some(frame) = indicator {
@@ -40,6 +40,55 @@ fn role_label(text: &str, color: Color, indicator: Option<char>) -> Line<'static
         ));
     }
     Line::from(spans)
+}
+
+fn message(
+    transcript: &mut super::transcript::Transcript,
+    key: &str,
+    message: &mf_chat::ChatMessage,
+) {
+    use mf_chat::ChatMessage;
+    let label = match message {
+        ChatMessage::User { .. } => "You".into(),
+        ChatMessage::System { .. } => "System".into(),
+        ChatMessage::Assistant { .. } => "Assistant".into(),
+        ChatMessage::ToolResult { tool_call_id, .. } => format!("Tool result [{tool_call_id}]"),
+    };
+    transcript.plain(
+        format!("{key}:label"),
+        vec![role_label(&label, Color::Cyan, None)],
+    );
+    match message {
+        ChatMessage::Assistant {
+            content,
+            tool_calls,
+            ..
+        } => {
+            transcript.markdown(format!("{key}:body"), content);
+            for (index, call) in tool_calls.iter().flatten().enumerate() {
+                transcript.plain(
+                    format!("{key}:call:{index}:label"),
+                    vec![role_label(
+                        &format!("Tool call {} [{}]", call.name, call.id),
+                        Color::Yellow,
+                        None,
+                    )],
+                );
+                let arguments = serde_json::to_string_pretty(&call.arguments)
+                    .unwrap_or_else(|error| format!("[Arguments unavailable: {error}]"));
+                transcript.literal(
+                    format!("{key}:call:{index}:arguments"),
+                    &arguments,
+                    Style::default(),
+                );
+            }
+        }
+        ChatMessage::User { content, .. }
+        | ChatMessage::System { content, .. }
+        | ChatMessage::ToolResult { content, .. } => {
+            transcript.literal(format!("{key}:body"), content, Style::default());
+        }
+    }
 }
 
 fn execution_areas(body: Rect) -> (Rect, Rect) {
@@ -271,6 +320,36 @@ enum Action {
     Quit,
 }
 
+struct PresentedResult {
+    result: mf_chat::ConversationResult,
+    saved: bool,
+}
+
+impl PresentedResult {
+    fn status(&self) -> Option<&'static str> {
+        if self.result.status == "failed" {
+            Some(if self.saved {
+                "[failed] Model context unchanged"
+            } else {
+                "[failed] [not saved] Model context unchanged"
+            })
+        } else if matches!(
+            self.result.update,
+            mf_chat::MessageUpdate::ReplaceContext { .. }
+        ) {
+            Some(if self.saved {
+                "[model context replaced]"
+            } else {
+                "[not saved] Model context replacement pending"
+            })
+        } else if !self.saved {
+            Some("[not saved] Model context update pending")
+        } else {
+            None
+        }
+    }
+}
+
 struct ChatView {
     session: Option<Session>,
     page: Option<MessagePage>,
@@ -287,9 +366,7 @@ struct ChatView {
     /// Whether that turn is still executing, separate from what is presented.
     running: bool,
     retained: bool,
-    unsaved: Option<String>,
-    final_reply: Option<String>,
-    reply_usages: Vec<mf_chat::CallUsage>,
+    reply: Option<PresentedResult>,
     preview: LivePreview,
     latest_invocation: Option<Invocation>,
     observation: Option<LocalObservation>,
@@ -319,9 +396,7 @@ impl ChatView {
             active: None,
             running: false,
             retained: false,
-            unsaved: None,
-            final_reply: None,
-            reply_usages: vec![],
+            reply: None,
             preview: LivePreview::default(),
             latest_invocation: None,
             observation: None,
@@ -369,8 +444,8 @@ impl ChatView {
         self.active = None;
         self.running = false;
         self.preview = LivePreview::default();
-        self.final_reply = None;
-        self.reply_usages.clear();
+        self.reply = None;
+        self.retained = false;
         self.latest_invocation = None;
         self.earlier = false;
         self.observation = None;
@@ -392,16 +467,22 @@ impl ChatView {
                 if self.session.as_ref().is_some_and(|s| s.id == session.id) {
                     // Keep presenting the in-flight turn until the page that carries it
                     // arrives, so previews and authoritative messages swap in one frame.
-                    let settled = self.active.as_ref().is_some_and(|(invocation, _)| {
-                        page.messages
-                            .iter()
-                            .any(|record| record.message.turn_id == invocation.turn_id)
-                    });
+                    let settled = !self.running
+                        && self.active.as_ref().is_some_and(|(invocation, _)| {
+                            page.messages
+                                .iter()
+                                .any(|record| record.message.turn_id == invocation.turn_id)
+                        });
                     self.session = Some(session);
                     self.page = Some(page);
-                    self.final_reply = None;
                     if settled {
                         self.active = None;
+                    }
+                    if !self.running
+                        && self.active.is_none()
+                        && self.reply.as_ref().is_some_and(|reply| reply.saved)
+                    {
+                        self.reply = None;
                     }
                     self.scroll.set(0);
                 }
@@ -418,12 +499,11 @@ impl ChatView {
                 self.session = Some(session);
                 self.latest_invocation = Some(invocation.clone());
                 self.preview = LivePreview::default();
-                self.final_reply = None;
-                self.reply_usages.clear();
+                self.reply = None;
                 self.active = Some((invocation, prompt));
                 self.running = true;
                 self.observation = None;
-                self.unsaved = None;
+                self.retained = false;
                 self.outcome.clear();
                 self.notice.clear();
                 self.scroll.set(0);
@@ -461,7 +541,8 @@ impl ChatView {
                 self.running = false;
                 self.pending = None;
                 self.retained = false;
-                self.unsaved = None;
+                self.reply = None;
+                self.latest_invocation = Some(invocation);
                 match resolution {
                     Ok(resolution) => {
                         let mut details: Vec<_> = resolution
@@ -472,17 +553,37 @@ impl ChatView {
                         match resolution.state {
                             CompletionState::Committed(completion) => {
                                 self.preview = LivePreview::default();
-                                self.reply_usages = completion.result.usages;
-                                self.final_reply = Some(completion.result.text);
-                                self.notice = "Saved".into();
+                                self.notice = if completion.result.status == "failed" {
+                                    "Failed result saved; model context unchanged"
+                                } else if matches!(
+                                    completion.result.update,
+                                    mf_chat::MessageUpdate::ReplaceContext { .. }
+                                ) {
+                                    "Saved; model context replaced"
+                                } else {
+                                    "Saved"
+                                }
+                                .into();
+                                if let Some(error) = &completion.result.error {
+                                    details.push(error.clone());
+                                }
+                                self.reply = Some(PresentedResult {
+                                    result: completion.result,
+                                    saved: true,
+                                });
                             }
                             CompletionState::Uncommitted(pending) => {
                                 self.preview = LivePreview::default();
                                 self.retained = true;
-                                self.reply_usages = pending.completion.result.usages;
-                                self.unsaved = Some(pending.completion.result.text);
                                 self.notice =
-                                    "Reply not saved. Ctrl+P to save or discard it".into();
+                                    "Result not saved. Ctrl+P to save or discard it".into();
+                                if let Some(error) = &pending.completion.result.error {
+                                    details.push(error.clone());
+                                }
+                                self.reply = Some(PresentedResult {
+                                    result: pending.completion.result,
+                                    saved: false,
+                                });
                             }
                             CompletionState::Finished(turn) => {
                                 self.notice = format!("Turn {}. Ctrl+P for recovery", turn.state);
@@ -853,50 +954,41 @@ impl ChatView {
         let mut transcript = self.transcript.borrow_mut();
         transcript.begin(body.width);
         if let Some(page) = &self.page {
-            for record in &page.messages {
-                let assistant = record.message.role == "assistant";
-                // Messages and their live preview share one turn-scoped key so the
-                // authoritative text reuses the parsed preview document.
-                let key = format!(
-                    "turn:{}:{}",
-                    record.message.turn_id,
-                    if assistant { "assistant" } else { "you" }
-                );
-                transcript.plain(
-                    format!("{key}:label"),
-                    vec![role_label(
-                        if assistant { "Assistant" } else { "You" },
-                        Color::Cyan,
-                        None,
-                    )],
-                );
-                if assistant {
-                    transcript.markdown(format!("{key}:body"), &record.message.content);
-                } else {
-                    transcript.literal(
-                        format!("{key}:body"),
-                        &record.message.content,
-                        Style::default(),
-                    );
-                }
+            let usages: BTreeMap<_, _> = page
+                .messages
+                .iter()
+                .filter_map(|record| {
+                    record
+                        .usages
+                        .as_deref()
+                        .map(|usages| (record.message.turn_id.as_str(), usages))
+                })
+                .collect();
+            for (index, record) in page.messages.iter().enumerate() {
+                let key = format!("message:{}", record.message.id);
+                message(&mut transcript, &key, &record.message.payload);
                 let mut metadata = vec![];
-                if assistant {
-                    let calls = crate::performance::conversation_calls(
-                        record.usages.as_deref().unwrap_or_default(),
-                    );
-                    metadata.push(Line::styled(
-                        crate::performance::footer(&calls, body.width),
-                        Style::default().fg(Color::DarkGray),
-                    ));
-                }
-                if matches!(
-                    record.turn_state.as_str(),
-                    "failed" | "cancelled" | "interrupted"
-                ) {
-                    metadata.push(Line::styled(
-                        format!("[{}]", record.turn_state),
-                        Style::default().fg(Color::Yellow),
-                    ));
+                let last_in_turn = page
+                    .messages
+                    .get(index + 1)
+                    .is_none_or(|next| next.message.turn_id != record.message.turn_id);
+                if last_in_turn {
+                    if let Some(usages) = usages.get(record.message.turn_id.as_str()) {
+                        let calls = crate::performance::conversation_calls(usages);
+                        metadata.push(Line::styled(
+                            crate::performance::footer(&calls, body.width),
+                            Style::default().fg(Color::DarkGray),
+                        ));
+                    }
+                    if matches!(
+                        record.turn_state.as_str(),
+                        "failed" | "cancelled" | "interrupted"
+                    ) {
+                        metadata.push(Line::styled(
+                            format!("[{}; model context unchanged]", record.turn_state),
+                            Style::default().fg(Color::Yellow),
+                        ));
+                    }
                 }
                 metadata.push(Line::default());
                 transcript.plain(format!("{key}:metadata"), metadata);
@@ -906,7 +998,13 @@ impl ChatView {
             .latest_invocation
             .as_ref()
             .map_or("", |invocation| invocation.turn_id.as_str());
-        if let Some((_, prompt)) = &self.active {
+        if let Some((invocation, prompt)) = &self.active
+            && !self.page.as_ref().is_some_and(|page| {
+                page.messages
+                    .iter()
+                    .any(|record| record.message.turn_id == invocation.turn_id)
+            })
+        {
             transcript.plain(
                 format!("turn:{turn}:you:label"),
                 vec![role_label("You", Color::Cyan, None)],
@@ -914,83 +1012,74 @@ impl ChatView {
             transcript.literal(format!("turn:{turn}:you:body"), prompt, Style::default());
             transcript.plain(format!("turn:{turn}:you:metadata"), vec![Line::default()]);
         }
-        let loading = self.pending.is_some() || self.running;
-        let has_preview = self
-            .preview
-            .segments
-            .iter()
-            .any(|segment| !segment.text.is_empty());
-        let final_reply = self.final_reply.as_deref();
-        let unsaved = self.unsaved.as_deref();
-        if loading || has_preview || final_reply.is_some() || unsaved.is_some() {
-            let indicator = loading.then(|| {
-                let frame = (self.animation_started.elapsed().as_millis() / 100
-                    % LOADING_FRAMES.len() as u128) as usize;
-                LOADING_FRAMES[frame]
-            });
-            let (label, color) = if unsaved.is_some() {
-                ("Assistant [not saved]", Color::Yellow)
-            } else {
-                ("Assistant", Color::Cyan)
-            };
-            transcript.plain(
-                format!("turn:{turn}:assistant:label"),
-                vec![role_label(label, color, indicator)],
-            );
-        }
-        let segments: Vec<_> = self
-            .preview
-            .segments
-            .iter()
-            .filter(|segment| !segment.text.is_empty())
-            .collect();
-        if !segments.is_empty() {
-            // A single streamed segment keeps the canonical body key. Distinct model
-            // calls stay separate documents, so each keeps its own call-scoped key.
-            let last = segments.len() - 1;
-            for (index, segment) in segments.iter().enumerate() {
-                let body = if last == 0 {
-                    format!("turn:{turn}:assistant:body")
-                } else {
-                    format!("turn:{turn}:assistant:body:{}", segment.model_call_id)
-                };
-                transcript.markdown(body, &segment.text);
-                if index != last {
+        if let Some(reply) = &self.reply {
+            for (index, record) in reply.result.display_messages().iter().enumerate() {
+                let key = format!("turn:{turn}:display:{index}");
+                message(&mut transcript, &key, record);
+                if index + 1 < reply.result.display_messages().len() {
+                    transcript.plain(format!("{key}:gap"), vec![Line::default()]);
+                }
+            }
+            let calls = crate::performance::conversation_calls(&reply.result.usages);
+            let mut metadata = vec![Line::styled(
+                crate::performance::footer(&calls, body.width),
+                Style::default().fg(Color::DarkGray),
+            )];
+            if let Some(status) = reply.status() {
+                metadata.push(Line::styled(status, Style::default().fg(Color::Yellow)));
+            }
+            metadata.push(Line::default());
+            transcript.plain(format!("turn:{turn}:metadata"), metadata);
+        } else {
+            let loading = self.pending.is_some() || self.running;
+            let has_preview = self
+                .preview
+                .segments
+                .iter()
+                .any(|segment| !segment.text.is_empty());
+            if loading || has_preview {
+                let indicator = loading.then(|| {
+                    let frame = (self.animation_started.elapsed().as_millis() / 100
+                        % LOADING_FRAMES.len() as u128) as usize;
+                    LOADING_FRAMES[frame]
+                });
+                transcript.plain(
+                    format!("turn:{turn}:assistant:label"),
+                    vec![role_label("Assistant", Color::Cyan, indicator)],
+                );
+            }
+            for (index, segment) in self
+                .preview
+                .segments
+                .iter()
+                .filter(|segment| !segment.text.is_empty())
+                .enumerate()
+            {
+                if index > 0 {
                     transcript.plain(
-                        format!("turn:{turn}:assistant:gap:{index}"),
+                        format!("turn:{turn}:preview:{index}:gap"),
                         vec![Line::default()],
                     );
                 }
+                transcript.markdown(
+                    format!("turn:{turn}:preview:{}", segment.model_call_id),
+                    &segment.text,
+                );
             }
-        } else if let Some(reply) = final_reply.or(unsaved) {
-            transcript.markdown(format!("turn:{turn}:assistant:body"), reply);
-        }
-        let mut status = vec![];
-        if !loading && has_preview && self.preview.incomplete {
-            status.push(Line::styled(
-                "Response unfinished",
-                Style::default().fg(Color::Yellow),
-            ));
-        }
-        if self.preview.omitted {
-            status.push(Line::styled(
-                "[Preview limit reached; remaining output is still being received]",
-                Style::default().fg(Color::Yellow),
-            ));
-        }
-        transcript.plain(format!("turn:{turn}:status"), status);
-        if final_reply.is_some() || unsaved.is_some() {
-            let calls = crate::performance::conversation_calls(&self.reply_usages);
-            transcript.plain(
-                format!("turn:{turn}:assistant:metadata"),
-                vec![
-                    Line::styled(
-                        crate::performance::footer(&calls, body.width),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Line::default(),
-                ],
-            );
+            let mut status = vec![];
+            if !loading && has_preview && self.preview.incomplete {
+                status.push(Line::styled(
+                    "Response unfinished",
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
+            if self.preview.omitted {
+                status.push(Line::styled(
+                    "[Preview limit reached; remaining output is still being received]",
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
+            transcript.plain(format!("turn:{turn}:status"), status);
         }
         if !self.outcome.is_empty() {
             transcript.literal(
@@ -1128,6 +1217,553 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n")
     }
+    fn tool_result(replace: bool, failed: bool) -> mf_chat::ConversationResult {
+        let mut display = serde_json::from_value::<Vec<mf_chat::ChatMessage>>(serde_json::json!([
+            {"role":"assistant","content":"","tool_calls":[
+                {"id":"first","name":"lookup","arguments":{"text":"**argument**","image":"![inert](tool.png)"}},
+                {"id":"second","name":"calculate","arguments":[1,true,null]}
+            ]},
+            {"role":"tool","tool_call_id":"second","content":"**literal tool**\n![inert](tool.png)\n\u{1b}[31m"},
+            {"role":"tool","tool_call_id":"first","content":""},
+            {"role":"assistant","content":"**Final answer**"}
+        ])).unwrap();
+        if failed {
+            display.truncate(2);
+        }
+        let mut result = mf_chat::ConversationResult::append(display.clone());
+        if replace {
+            result.update = mf_chat::MessageUpdate::ReplaceContext {
+                context_messages: vec![mf_chat::ChatMessage::User {
+                    content: "PRIVATE_CONTEXT_ONLY".into(),
+                    metadata: None,
+                }],
+                display_messages: display,
+            };
+        }
+        if failed {
+            result.status = "failed".into();
+            result.error = Some("Provider failed".into());
+        }
+        result.usages = serde_json::from_value(serde_json::json!([
+            {"call_id":"model-one","model":"fixture","timing":{"elapsed_us":1000000,"first_token_us":100000},"usage":{"output_tokens":10}},
+            {"call_id":"model-two","model":"fixture","timing":{"elapsed_us":1000000,"first_token_us":100000},"usage":{"output_tokens":10}}
+        ])).unwrap();
+        result.validate().unwrap();
+        result
+    }
+
+    fn finish(invocation: Invocation, state: CompletionState) -> ChatEvent {
+        ChatEvent::Finished {
+            invocation,
+            resolution: Ok(ReconciledCompletion {
+                state,
+                diagnostics: vec![],
+            }),
+            status: None,
+            stderr: String::new(),
+            capture_error: None,
+        }
+    }
+
+    #[test]
+    fn full_display_replaces_previews_and_survives_pending_reload_then_save() {
+        for replace in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let launch = super::super::tests::launch(root.path());
+            let mut view = ChatView::new(launch.runner.description()).unwrap();
+            view.show_execution = false;
+            let controller = ChatController::open(launch).unwrap();
+            let session = controller
+                ._database
+                .create_session("default", None, None)
+                .unwrap();
+            let begun = controller
+                ._database
+                .begin_turn(
+                    &session.id,
+                    "Original question",
+                    mf_chat::ModelIdentity {
+                        profile: "default".into(),
+                        model: None,
+                    },
+                    None,
+                )
+                .unwrap();
+            view.event(
+                ChatEvent::Submitted {
+                    session: session.clone(),
+                    invocation: begun.invocation.clone(),
+                    prompt: "Original question".into(),
+                },
+                &controller,
+            );
+            view.preview.begin(begun.invocation.clone());
+            view.preview
+                .apply(mf_chat::PreviewEvent {
+                    invocation: begun.invocation.clone(),
+                    delta: mf_chat::TextDelta {
+                        text: "provisional only".into(),
+                        model_call_id: "preview".into(),
+                    },
+                })
+                .unwrap();
+            let result = tool_result(replace, false);
+            view.event(
+                finish(
+                    begun.invocation.clone(),
+                    CompletionState::Uncommitted(UncommittedCompletion {
+                        database_path: controller._database.path().to_owned(),
+                        completion: mf_chat::Completion {
+                            invocation: begun.invocation.clone(),
+                            result: result.clone(),
+                        },
+                    }),
+                ),
+                &controller,
+            );
+            for reload in [false, true] {
+                if reload {
+                    let page = controller
+                        ._database
+                        .messages(&session.id, 50, None)
+                        .unwrap();
+                    view.event(
+                        ChatEvent::Loaded {
+                            session: session.clone(),
+                            page,
+                        },
+                        &controller,
+                    );
+                }
+                let screen = render(&view, 140, 70);
+                assert_eq!(screen.matches("Original question").count(), 1, "{screen}");
+                assert_eq!(screen.matches("Assistant").count(), 2, "{screen}");
+                assert!(screen.contains("Tool call lookup [first]"), "{screen}");
+                assert!(screen.contains("Tool call calculate [second]"));
+                assert!(screen.contains("Tool result [second]"));
+                assert!(screen.contains("Tool result [first]"));
+                assert!(screen.contains("**argument**") && screen.contains("**literal tool**"));
+                assert!(screen.contains("![inert](tool.png)"));
+                assert!(screen.contains("\\u{1b}[31m"));
+                assert!(screen.contains("Final answer") && !screen.contains("**Final answer**"));
+                assert!(
+                    !screen.contains("provisional only")
+                        && !screen.contains("PRIVATE_CONTEXT_ONLY")
+                );
+                assert_eq!(screen.matches("FTT").count(), 1);
+                assert!(screen.contains("[not saved]"));
+                assert_eq!(screen.contains("replacement pending"), replace);
+                assert!(
+                    view.retained
+                        && view
+                            .actions()
+                            .iter()
+                            .any(|(action, _)| *action == Action::Save)
+                );
+                assert_eq!(
+                    controller
+                        ._database
+                        .model_context(&session.id)
+                        .unwrap()
+                        .revision,
+                    0
+                );
+            }
+            let completion = controller
+                ._database
+                .complete_turn(begun.invocation.clone(), result)
+                .unwrap();
+            view.event(
+                finish(
+                    begun.invocation.clone(),
+                    CompletionState::Committed(completion),
+                ),
+                &controller,
+            );
+            let saved = render(&view, 140, 70);
+            assert!(!saved.contains("[not saved]"));
+            assert!(!saved.contains("PRIVATE_CONTEXT_ONLY"));
+            let page = controller
+                ._database
+                .messages(&session.id, 50, None)
+                .unwrap();
+            view.event(
+                ChatEvent::Loaded {
+                    session: controller._database.session(&session.id).unwrap(),
+                    page,
+                },
+                &controller,
+            );
+            let loaded = render(&view, 140, 70);
+            assert_eq!(loaded.matches("Assistant").count(), 2);
+            assert_eq!(loaded.matches("FTT").count(), 1);
+            assert!(!loaded.contains("PRIVATE_CONTEXT_ONLY"));
+            assert!(view.reply.is_none());
+            assert_eq!(
+                controller
+                    ._database
+                    .usage(Default::default())
+                    .unwrap()
+                    .overall
+                    .attempted_calls,
+                2
+            );
+            controller.close().unwrap();
+        }
+    }
+
+    #[test]
+    fn failed_partial_display_is_visible_before_and_after_audit_save() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
+        view.show_execution = false;
+        let controller = ChatController::open(launch).unwrap();
+        let session = controller
+            ._database
+            .create_session("default", None, None)
+            .unwrap();
+        let begun = controller
+            ._database
+            .begin_turn(
+                &session.id,
+                "Question",
+                mf_chat::ModelIdentity {
+                    profile: "default".into(),
+                    model: None,
+                },
+                None,
+            )
+            .unwrap();
+        view.event(
+            ChatEvent::Submitted {
+                session: session.clone(),
+                invocation: begun.invocation.clone(),
+                prompt: "Question".into(),
+            },
+            &controller,
+        );
+        let result = tool_result(true, true);
+        view.event(
+            finish(
+                begun.invocation.clone(),
+                CompletionState::Uncommitted(UncommittedCompletion {
+                    database_path: controller._database.path().to_owned(),
+                    completion: mf_chat::Completion {
+                        invocation: begun.invocation.clone(),
+                        result: result.clone(),
+                    },
+                }),
+            ),
+            &controller,
+        );
+        let screen = render(&view, 120, 55);
+        assert!(screen.contains("Tool result [second]"));
+        assert!(screen.contains("[failed]") && screen.contains("[not saved]"));
+        assert!(screen.contains("Model context unchanged"));
+        assert!(!screen.contains("replacement pending"));
+        assert!(!screen.contains("PRIVATE_CONTEXT_ONLY"));
+        let completion = controller
+            ._database
+            .complete_turn(begun.invocation.clone(), result)
+            .unwrap();
+        view.event(
+            finish(begun.invocation, CompletionState::Committed(completion)),
+            &controller,
+        );
+        assert!(view.notice.contains("Failed result saved"));
+        let page = controller
+            ._database
+            .messages(&session.id, 50, None)
+            .unwrap();
+        view.event(ChatEvent::Loaded { session, page }, &controller);
+        let screen = render(&view, 120, 55);
+        assert!(screen.contains("Tool result [second]"));
+        assert!(screen.contains("[failed"));
+        assert!(screen.contains("Provider failed"));
+        assert!(!screen.contains("not saved"));
+        assert_eq!(
+            controller
+                ._database
+                .model_context(&view.session.as_ref().unwrap().id)
+                .unwrap()
+                .revision,
+            0
+        );
+        controller.close().unwrap();
+    }
+
+    #[test]
+    fn pages_inside_a_tool_exchange_keep_ids_and_one_turn_summary() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
+        view.show_execution = false;
+        let controller = ChatController::open(launch).unwrap();
+        let session = controller
+            ._database
+            .create_session("default", None, None)
+            .unwrap();
+        let begun = controller
+            ._database
+            .begin_turn(
+                &session.id,
+                "Question",
+                mf_chat::ModelIdentity {
+                    profile: "default".into(),
+                    model: None,
+                },
+                None,
+            )
+            .unwrap();
+        controller
+            ._database
+            .complete_turn(begun.invocation, tool_result(true, false))
+            .unwrap();
+        view.switch(Some(session.clone()));
+        let page = controller
+            ._database
+            .messages(&session.id, 2, Some(1))
+            .unwrap();
+        assert_eq!(page.messages.len(), 2);
+        assert!(
+            page.messages
+                .iter()
+                .all(|record| record.message.role() == "tool")
+        );
+        view.event(
+            ChatEvent::Loaded {
+                session: session.clone(),
+                page,
+            },
+            &controller,
+        );
+        let screen = render(&view, 120, 35);
+        assert_eq!(screen.matches("Tool result").count(), 2);
+        assert!(screen.contains("[second]") && screen.contains("[first]"));
+        assert!(!screen.contains("lookup") && !screen.contains("calculate"));
+        assert!(!screen.contains("Assistant") && !screen.lines().any(|line| line.trim() == "You"));
+        assert!(screen.contains("**literal tool**") && screen.contains("![inert](tool.png)"));
+        assert_eq!(screen.matches("FTT").count(), 1);
+        let page = controller
+            ._database
+            .messages(&session.id, 50, None)
+            .unwrap();
+        view.event(ChatEvent::Loaded { session, page }, &controller);
+        let screen = render(&view, 120, 70);
+        assert_eq!(screen.matches("Tool result").count(), 2);
+        assert_eq!(screen.matches("FTT").count(), 1);
+        assert!(!screen.contains("PRIVATE_CONTEXT_ONLY"));
+        assert_eq!(
+            controller
+                ._database
+                .usage(Default::default())
+                .unwrap()
+                .overall
+                .attempted_calls,
+            2
+        );
+        controller.close().unwrap();
+    }
+
+    #[test]
+    fn loading_an_admitted_user_keeps_subsequent_previews_without_duplicate_submission() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
+        view.show_execution = false;
+        let controller = ChatController::open(launch).unwrap();
+        let session = controller
+            ._database
+            .create_session("default", None, None)
+            .unwrap();
+        let begun = controller
+            ._database
+            .begin_turn(
+                &session.id,
+                "Original question",
+                mf_chat::ModelIdentity {
+                    profile: "default".into(),
+                    model: None,
+                },
+                None,
+            )
+            .unwrap();
+        view.event(
+            ChatEvent::Submitted {
+                session: session.clone(),
+                invocation: begun.invocation.clone(),
+                prompt: "Original question".into(),
+            },
+            &controller,
+        );
+        let page = controller
+            ._database
+            .messages(&session.id, 50, None)
+            .unwrap();
+        view.event(ChatEvent::Loaded { session, page }, &controller);
+        let mut preview = LivePreview::default();
+        preview.begin(begun.invocation.clone());
+        preview
+            .apply(mf_chat::PreviewEvent {
+                invocation: begun.invocation.clone(),
+                delta: mf_chat::TextDelta {
+                    text: "Later preview".into(),
+                    model_call_id: "preview".into(),
+                },
+            })
+            .unwrap();
+        view.event(
+            ChatEvent::Preview {
+                invocation: begun.invocation,
+                preview,
+            },
+            &controller,
+        );
+        let screen = render(&view, 100, 25);
+        assert_eq!(screen.matches("Original question").count(), 1);
+        assert!(screen.contains("Later preview"));
+        assert!(view.running && view.active.is_some());
+        controller.close().unwrap();
+    }
+
+    #[test]
+    fn failed_empty_display_has_no_invented_assistant_or_published_context() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
+        view.show_execution = false;
+        let controller = ChatController::open(launch).unwrap();
+        let result = mf_chat::ConversationResult {
+            status: "failed".into(),
+            error: Some("No messages produced".into()),
+            ..Default::default()
+        };
+        let invocation = Invocation::new("session");
+        result.validate().unwrap();
+        view.event(
+            finish(
+                invocation.clone(),
+                CompletionState::Uncommitted(UncommittedCompletion {
+                    database_path: controller._database.path().to_owned(),
+                    completion: mf_chat::Completion { invocation, result },
+                }),
+            ),
+            &controller,
+        );
+        let screen = render(&view, 100, 25);
+        assert!(!screen.contains("Assistant"));
+        assert!(screen.contains("[failed]") && screen.contains("No messages produced"));
+        assert!(!screen.contains("pending"));
+        assert!(view.retained);
+        controller.close().unwrap();
+    }
+
+    #[test]
+    fn replacing_context_keeps_prior_display_and_accounting_on_reload() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
+        view.show_execution = false;
+        let controller = ChatController::open(launch).unwrap();
+        let session = controller
+            ._database
+            .create_session("default", None, None)
+            .unwrap();
+        let identity = || mf_chat::ModelIdentity {
+            profile: "default".into(),
+            model: None,
+        };
+        let first = controller
+            ._database
+            .begin_turn(&session.id, "Previous question", identity(), None)
+            .unwrap();
+        controller
+            ._database
+            .complete_turn(
+                first.invocation,
+                mf_chat::ConversationResult::assistant("Previous answer"),
+            )
+            .unwrap();
+        view.switch(Some(session.clone()));
+        let page = controller
+            ._database
+            .messages(&session.id, 50, None)
+            .unwrap();
+        view.event(
+            ChatEvent::Loaded {
+                session: session.clone(),
+                page,
+            },
+            &controller,
+        );
+        let next = controller
+            ._database
+            .begin_turn(&session.id, "Current question", identity(), None)
+            .unwrap();
+        view.event(
+            ChatEvent::Submitted {
+                session: session.clone(),
+                invocation: next.invocation.clone(),
+                prompt: "Current question".into(),
+            },
+            &controller,
+        );
+        let completion = controller
+            ._database
+            .complete_turn(next.invocation.clone(), tool_result(true, false))
+            .unwrap();
+        view.event(
+            finish(next.invocation, CompletionState::Committed(completion)),
+            &controller,
+        );
+        for reload in [false, true] {
+            if reload {
+                let page = controller
+                    ._database
+                    .messages(&session.id, 50, None)
+                    .unwrap();
+                view.event(
+                    ChatEvent::Loaded {
+                        session: controller._database.session(&session.id).unwrap(),
+                        page,
+                    },
+                    &controller,
+                );
+            }
+            let screen = render(&view, 140, 80);
+            for text in [
+                "Previous question",
+                "Previous answer",
+                "Current question",
+                "Final answer",
+            ] {
+                assert_eq!(screen.matches(text).count(), 1, "{screen}");
+            }
+            assert_eq!(screen.matches("FTT").count(), 2);
+            assert!(!screen.contains("PRIVATE_CONTEXT_ONLY"));
+        }
+        assert_eq!(
+            controller
+                ._database
+                .model_context(&session.id)
+                .unwrap()
+                .messages
+                .len(),
+            1
+        );
+        assert_eq!(
+            controller
+                ._database
+                .usage(Default::default())
+                .unwrap()
+                .overall
+                .attempted_calls,
+            2
+        );
+        controller.close().unwrap();
+    }
+
     #[test]
     fn metrics_follow_saved_unsaved_and_reloaded_replies() {
         let root = tempfile::tempdir().unwrap();
@@ -1156,7 +1792,7 @@ mod tests {
             {"call_id":"title", "model":"fixture", "timing":{"elapsed_us":10000,"first_token_us":1000},"usage":{"output_tokens":100},"attribution":{"purpose":"title"}}
         ])).unwrap();
         let response = mf_chat::ConversationResult {
-            text: "canonical answer".into(),
+            update: mf_chat::ConversationResult::assistant("canonical answer").update,
             usages: calls,
             ..Default::default()
         };
@@ -1207,7 +1843,7 @@ mod tests {
             .messages(&session.id, 50, None)
             .unwrap();
         view.event(ChatEvent::Loaded { session, page }, &controller);
-        assert!(view.final_reply.is_none());
+        assert!(view.reply.is_none());
         let text = render(&view, 100, 30);
         assert_eq!(text.matches("FTT 500ms").count(), 1);
         assert!(text.contains("E2E 50.0 tok/s"));
@@ -1455,11 +2091,14 @@ mod tests {
                 None,
             )
             .unwrap();
-        database.complete_turn(started.invocation, mf_chat::ConversationResult {
-            text: "Keep one execution lane and move infrequent actions into the command palette.".into(),
-            metadata: None, usages: vec![], finish_reason: None,
-        ..Default::default()
-}).unwrap();
+        database
+            .complete_turn(
+                started.invocation,
+                mf_chat::ConversationResult::assistant(
+                    "Keep one execution lane and move infrequent actions into the command palette.",
+                ),
+            )
+            .unwrap();
         view.page = Some(database.messages(&session.id, 50, None).unwrap());
         view.session = Some(session);
         view.notice.clear();
@@ -1589,13 +2228,7 @@ mod tests {
                 database
                     .complete_turn(
                         started.invocation,
-                        mf_chat::ConversationResult {
-                            text: format!("reply-{index}"),
-                            metadata: None,
-                            usages: vec![],
-                            finish_reason: None,
-                            ..Default::default()
-                        },
+                        mf_chat::ConversationResult::assistant(format!("reply-{index}")),
                     )
                     .unwrap();
             }
@@ -1638,7 +2271,7 @@ mod tests {
                 .last()
                 .unwrap()
                 .message
-                .content,
+                .content(),
             "reply-27"
         );
         assert!(view.retry_turn().is_none());
@@ -1656,7 +2289,7 @@ mod tests {
                 .last()
                 .unwrap()
                 .message
-                .content
+                .content()
                 == "reply-27"
         });
         view.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &controller);
@@ -1760,7 +2393,7 @@ mod tests {
         let offline = root.path().join("offline");
         launch.options.database_path = state.join("chat.sqlite");
         let path = launch.options.database_path.clone();
-        std::fs::write(launch.runner.executable().with_extension("script"), "#!/bin/sh\nsleep 0.3\nprintf '%s' '{\"status\":\"succeeded\",\"text\":\"paid reply\",\"usages\":[]}'\necho 'runner diagnostic' >&2\nkill -TERM $$\n").unwrap();
+        std::fs::write(launch.runner.executable().with_extension("script"), "#!/bin/sh\nsleep 0.3\nprintf '%s' '{\"append\":{\"status\":\"succeeded\",\"messages\":[{\"role\":\"assistant\",\"content\":\"paid reply\"}],\"usages\":[]}}'\necho 'runner diagnostic' >&2\nkill -TERM $$\n").unwrap();
         let mut view = ChatView::new(launch.runner.description()).unwrap();
         let controller = ChatController::open(launch).unwrap();
         view.editor.insert("question");
@@ -1849,10 +2482,7 @@ mod tests {
             resolution: Ok(ReconciledCompletion {
                 state: CompletionState::Committed(mf_chat::Completion {
                     invocation,
-                    result: mf_chat::ConversationResult {
-                        text: text.into(),
-                        ..Default::default()
-                    },
+                    result: mf_chat::ConversationResult::assistant(text),
                 }),
                 diagnostics: vec![],
             }),
@@ -1867,7 +2497,10 @@ mod tests {
         let screen = render(&view, 100, 30);
         assert!(screen.contains("canonical reply"));
         assert!(!screen.contains("**"));
-        assert_eq!(view.final_reply.as_deref(), Some("**canonical reply**"));
+        assert_eq!(
+            view.reply.as_ref().unwrap().result.final_text(),
+            Some("**canonical reply**")
+        );
         assert!(!screen.contains("draft prefix"));
         assert!(!screen.contains(LOADING_FRAMES));
         let next = Invocation::new(&session.id);
@@ -1960,10 +2593,7 @@ mod tests {
             ._database
             .complete_turn(
                 invocation.clone(),
-                mf_chat::ConversationResult {
-                    text: "streamed answer".into(),
-                    ..Default::default()
-                },
+                mf_chat::ConversationResult::assistant("streamed answer"),
             )
             .unwrap();
         view.event(
@@ -2049,10 +2679,9 @@ mod tests {
                         database_path: controller._database.path().to_owned(),
                         completion: mf_chat::Completion {
                             invocation,
-                            result: mf_chat::ConversationResult {
-                                text: "complete unsaved reply".into(),
-                                ..Default::default()
-                            },
+                            result: mf_chat::ConversationResult::assistant(
+                                "complete unsaved reply",
+                            ),
                         },
                     }),
                     diagnostics: vec![],

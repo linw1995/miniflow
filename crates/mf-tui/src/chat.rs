@@ -468,6 +468,7 @@ impl Controller {
                 model: None,
             },
             retry_of,
+            result_alternatives: Some(self.launch.contract.alternatives),
         };
         let preview_consumer = self.launch.contract.answer_stream.then(|| {
             let outer_cancellation = cancellation.clone();
@@ -631,7 +632,7 @@ impl mf_chat::ConversationBackend for ExternalBackend {
             ChatEvent::Submitted {
                 session: self.session.clone(),
                 invocation: invocation.clone(),
-                prompt: request.prompt.clone(),
+                prompt: request.prompt()?.to_owned(),
             },
         );
         let execution = self.execute(request, context, preview);
@@ -746,9 +747,11 @@ impl ExternalBackend {
         let mut outcome = completion.outcome;
         let mut protocol_failure = completion.protocol_failure;
         if self.launch.contract.streaming {
-            if let Some(result) = decoder.result() {
-                outcome.stdout = serde_json::to_vec(result)?;
-            }
+            outcome.stdout = decoder
+                .result()
+                .map(serde_json::to_vec)
+                .transpose()?
+                .unwrap_or_default();
             if protocol_failure.is_none()
                 && outcome.capture_error.is_none()
                 && let Err(error) = decoder.finish()

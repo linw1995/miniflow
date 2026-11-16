@@ -56,7 +56,7 @@ fn performance_uses_paired_weighted_facts_and_survives_reopen_and_replay() {
         .collect::<Vec<_>>();
     let in_memory = UsageSummary::from_calls(&usages).unwrap();
     let reply = ConversationResult {
-        text: "answer".into(),
+        update: ConversationResult::assistant("answer").update,
         usages: usages.clone(),
         ..Default::default()
     };
@@ -87,7 +87,7 @@ fn performance_uses_paired_weighted_facts_and_survives_reopen_and_replay() {
     assert_eq!(before, after);
     assert_eq!(in_memory, after.overall);
     let first_page = database.messages(&session.id, 1, None).unwrap();
-    assert!(first_page.messages[0].usages.is_none());
+    assert_eq!(first_page.messages[0].usages, Some(usages.clone()));
     let assistant_page = database
         .messages(&session.id, 1, first_page.next_after)
         .unwrap();
@@ -161,7 +161,7 @@ fn invalid_timing_is_rejected_before_persistence_and_overflow_is_explicit() {
             first_token_us,
         });
         let reply = ConversationResult {
-            text: "answer".into(),
+            update: ConversationResult::assistant("answer").update,
             usages: vec![usage.clone()],
             ..Default::default()
         };
@@ -192,7 +192,7 @@ fn invalid_timing_is_rejected_before_persistence_and_overflow_is_explicit() {
         .complete_turn(
             begun.invocation,
             ConversationResult {
-                text: "answer".into(),
+                update: ConversationResult::assistant("answer").update,
                 usages: vec![usage, failed],
                 ..Default::default()
             },
@@ -225,10 +225,7 @@ fn complete(
                     usage,
                     error: None,
                 }],
-                metadata: None,
-                text: "answer".into(),
-                finish_reason: None,
-                ..Default::default()
+                ..ConversationResult::assistant("answer")
             },
         )
         .unwrap();
@@ -273,13 +270,14 @@ fn sparse_usage_and_failed_attempts_preserve_unknown_counters_and_group_totals()
             ..Default::default()
         })
         .unwrap();
-    assert_eq!(first.overall.attempted_calls, 4);
+    assert_eq!(first.overall.attempted_calls, 3);
+    assert_eq!(first.unreported_invocations, 1);
     assert_eq!(
         first.overall.input_tokens,
         TokenCounter {
             known_subtotal: Some(2),
             reported_calls: 1,
-            missing_calls: 3
+            missing_calls: 2
         }
     );
     assert_eq!(
@@ -287,10 +285,10 @@ fn sparse_usage_and_failed_attempts_preserve_unknown_counters_and_group_totals()
         TokenCounter {
             known_subtotal: Some(4),
             reported_calls: 2,
-            missing_calls: 2
+            missing_calls: 1
         }
     );
-    assert_eq!(first.overall.statuses["cancelled"], 1);
+    assert_eq!(first.overall.statuses["cancelled"], 0);
     assert_eq!(first.groups.len(), 1);
     let second = database
         .usage(UsageQuery {
@@ -310,7 +308,7 @@ fn sparse_usage_and_failed_attempts_preserve_unknown_counters_and_group_totals()
             ..Default::default()
         })
         .unwrap();
-    assert_eq!(scoped.overall.attempted_calls, 3);
+    assert_eq!(scoped.overall.attempted_calls, 2);
 }
 
 #[test]
@@ -434,10 +432,7 @@ fn model_profile_and_purpose_groups_preserve_attribution_and_validate_cursors() 
                         usage: Some(BTreeMap::from([("output_tokens".into(), tokens)])),
                         error: None,
                     }],
-                    metadata: None,
-                    text: "answer".into(),
-                    finish_reason: None,
-                    ..Default::default()
+                    ..ConversationResult::assistant("answer")
                 },
             )
             .unwrap();

@@ -158,17 +158,13 @@ pub fn configured_agent(tools: BTreeMap<String, FlowTool>) -> WorkflowDefinition
     let mut value = caller(tools);
     value["flows"] = json!({"agent":{"builtin":"mfn-llm.agent"}});
     let parameters = json!({
-        "prompt":{"type":"string"},
-        "system":{"type":"string","default":""},
-        "history":{"type":{"list":"object"},"default":[]},
+        "messages":{"type":{"list":"object"}},
         "model":{"type":"string","default":"your-model","secret":false},
         "base_url":{"type":"string","default":"https://api.openai.com/v1","secret":false},
         "api_key":{"type":"string","env":"OPENAI_API_KEY"}
     });
     let mut inputs = serde_json::Map::new();
-    for name in [
-        "prompt", "system", "history", "model", "base_url", "api_key",
-    ] {
+    for name in ["messages", "model", "base_url", "api_key"] {
         inputs.insert(format!("params.{name}"), edge("params", name));
     }
     inputs.insert("params.tools".into(), edge("tools", "value"));
@@ -184,6 +180,7 @@ pub fn configured_agent(tools: BTreeMap<String, FlowTool>) -> WorkflowDefinition
         {"name":"answer","node":"agent","port":"answer","optional":true},
         {"name":"status","node":"agent","port":"status"},
         {"name":"text","node":"agent","port":"text"},
+        {"name":"messages","node":"agent","port":"messages"},
         {"name":"usages","node":"agent","port":"usages"},
         {"name":"error","node":"agent","port":"error","optional":true}
     ]);
