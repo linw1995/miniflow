@@ -703,6 +703,11 @@ Running members of folded clusters and bodies remain visible in separate PiPs th
 expanded PiP layout; folding the main graph does not hide them. PiP titles include the body path to
 distinguish nodes with the same ID in different scopes. The compact chat Flow execution panel uses the
 same PiP grid alongside its folded root overview and keeps a single running nested Call node visible.
+PiPs follow the deepest active runtime scope, including named Router branches and dynamic calls through
+Flow-valued edges. Dynamic PiPs use the target's existing definition layout with invocation-local node
+states; they do not move the main graph's selection or mark the producer's static body as executing.
+Parallel items and invocations of the same definition retain separate PiPs, and active descendants
+replace their waiting invokers rather than adding duplicate parent panels.
 Declared node clusters show a labeled boundary and a wrapped annotation inside the graph and in Details.
 Cluster boundaries, member node borders, and labels share a stable color from a six-color palette.
 Node titles and status markers retain their execution-state colors. Annotations wrap at word boundaries;
