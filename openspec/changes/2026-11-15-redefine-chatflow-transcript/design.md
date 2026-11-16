@@ -2,15 +2,19 @@
 
 ## Status and scope
 
-Implementation is in progress. Shared message codecs and transcript validation are the first
-foundation; chatflow admission, durable context, Agent exports, and UI integration remain pending.
+Implementation and repository validation are complete. The message protocol, durable context,
+Agent exports, execution adapters, and UI share one canonical contract. Acceptance covers embedded
+and source-free compiled continuation, independent branch outputs, explicit summary-model accounting,
+invocation-wide result invalidation, and save-only recovery.
 
 A chatflow owns its Agent loop, tools, failure policy, and explicit accounting. `mf-chat` owns
 admission, durable state, recovery, and presentation. Separate the append-only conversation
 transcript used by the UI from the model context used for the next invocation. Updating model
 context must never overwrite displayed history, original ToolCalls, or accounting.
 
-## Current constraints
+## Pre-change constraints
+
+These constraints describe the implementation before this change, not the new public contract.
 
 - `crates/mf-chat/src/contract.rs` binds `prompt` plus optional `system`, `history`, and `context`.
   `ConversationResult` accepts one successful `text` and cannot return generated messages.

@@ -34,7 +34,7 @@ manifest-free save-only recovery share the same canonical result; no legacy-resu
 - [x] Make `mfn-llm.agent` consume messages, append terminal assistants, and export only generated assistant/tool additions.
 - [x] Retain completed rounds and usages on captured failures and iteration limits, preserving ordered parallel tool results.
 - [x] Export a single incremental result as append; assemble Agent status/messages/usages with an ordinary object only when needed, not a branch merge.
-- [ ] Add a replacement example returning full continuation context and original display additions, including compaction of this turn's tool output.
+- [x] Add a replacement example returning full continuation context and original display additions, including compaction of this turn's tool output.
 - [x] Update application completion and registered runners to handle produced/skipped alternative ports without skipping settlement on an inactive branch.
 - [x] Keep one complete terminal record and validate the whole invocation before settlement; later conflicting results must invalidate retained candidates.
 - [x] Keep titles optional and separate; use host policy/resolved inputs, suppress returned title attempts, derive from display data, and remove root-title ownership assumptions.
@@ -51,16 +51,16 @@ manifest-free save-only recovery share the same canonical result; no legacy-resu
 
 ## 5. Acceptance and documentation
 
-- [ ] Cover invalid roles/fields, empty-content assistant calls, parallel result matching, duplicate/orphan IDs, and unresolved suffix rules.
-- [ ] Cover append-only, replace-only, and direct two-branch output selection with no convergence node or new Flow syntax.
-- [ ] Verify append and replace-context paths reach subsequent provider requests in embedded and compiled backends after reopening.
-- [ ] Cover absent/both/undeclared alternatives, null versus empty payloads, skipped optional ports, duplicate terminal records, and recovery invalidation.
-- [ ] Cover malformed replacement objects, empty snapshots, snapshots omitting current user/final answer, and no automatic snapshot append.
-- [ ] Validate display and snapshot tool exchanges independently; cover repeated calls across both views without false duplicate-ID errors.
-- [ ] Cover content/metadata edits, summaries, reordering, coherent call-ID changes, per-view collisions, and orphan rejection.
-- [ ] Cover stale revisions, atomic rollback, failed/cancelled rewrite isolation, title-only renames, and old-result replay after later revisions.
-- [ ] Cover transactional rollback, exact success/failure replay, save-only retries with no tool execution, reopen, and legacy migration.
-- [ ] Cover cancellation, no terminal result, optional text previews, receiver failure, pagination, and retained full-transcript rendering.
-- [ ] Document alternative outputs, internal enum normalization, no required author-side merge, UI/context separation, incompatible updates, and tool retry risks.
-- [ ] Validate OpenSpec deltas; run `nix develop --command prek install` and `nix develop --command prek -a`.
-- [ ] Compile the shared affected-test Flow, plan with worktree/test precision, and execute the selected tests without widening an empty selection.
+- [x] Cover invalid roles/fields, empty-content assistant calls, parallel result matching, duplicate/orphan IDs, and unresolved suffix rules.
+- [x] Cover append-only, replace-only, and direct two-branch output selection with no convergence node or new Flow syntax.
+- [x] Verify append and replace-context paths reach subsequent provider requests in embedded and compiled backends after reopening.
+- [x] Cover absent/both/undeclared alternatives, null versus empty payloads, skipped optional ports, duplicate terminal records, and recovery invalidation.
+- [x] Cover malformed replacement objects, empty snapshots, snapshots omitting current user/final answer, and no automatic snapshot append.
+- [x] Validate display and snapshot tool exchanges independently; cover repeated calls across both views without false duplicate-ID errors.
+- [x] Cover content/metadata edits, summaries, reordering, coherent call-ID changes, per-view collisions, and orphan rejection.
+- [x] Cover stale revisions, atomic rollback, failed/cancelled rewrite isolation, title-only renames, and old-result replay after later revisions.
+- [x] Cover transactional rollback, exact success/failure replay, save-only retries with no tool execution, reopen, and legacy migration.
+- [x] Cover cancellation, no terminal result, optional text previews, receiver failure, pagination, and retained full-transcript rendering.
+- [x] Document alternative outputs, internal enum normalization, no required author-side merge, UI/context separation, incompatible updates, and tool retry risks.
+- [x] Validate OpenSpec deltas; run `nix develop --command prek install` and `nix develop --command prek -a`.
+- [x] Compile the shared affected-test Flow, plan with worktree/test precision, and execute the selected tests without widening an empty selection.

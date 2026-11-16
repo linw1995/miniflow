@@ -115,6 +115,21 @@ fn builtin_titles_skip_missing_ambiguous_wrongly_typed_or_empty_provider_inputs(
 }
 
 #[test]
+fn builtin_titles_accept_an_explicit_empty_key_without_losing_its_secret_marker() {
+    let contract = ChatContract::from_manifest(&manifest()).unwrap();
+    let parameters = mf_runtime::resolve_workflow_inputs(
+        &contract.parameters,
+        &WorkflowArguments::try_from(json!({"params.model":"keyless-model","params.api_key":""}))
+            .unwrap(),
+        |_| None,
+    )
+    .unwrap();
+    let title = contract.builtin_title_parameters(&parameters).unwrap();
+    assert_eq!(title.0["params.api_key"].as_str(), Some(""));
+    assert!(title.0["params.api_key"].is_secret());
+}
+
+#[test]
 fn a_separate_title_output_is_not_an_ownership_hint() {
     let mut manifest = manifest();
     manifest.graph.definition.outputs.push(

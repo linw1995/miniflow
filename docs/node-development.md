@@ -22,6 +22,9 @@ tool calls in its current assistant message and its `tool_calls` output. The req
 output is the generated zero-or-one-message addition: it is empty for captured failures without a
 message, never an input echo or placeholder. Agent composition accumulates these additions and
 ordered tool results, including the terminal assistant, without conflating them with request history.
+The reusable `mfn-llm.agent` consumes complete `params.messages` and exports only its generated
+assistant/tool additions. `mf-chat` uses these shared values for independent display and model-context
+views; it does not define another message schema or infer records from internal model nodes.
 Explicit results follow `messages`
 in the provider request and must match pending assistant call IDs. Flows own history and persistence.
 `ToolDefinition`, `ToolCall`, `ToolResult`, and `ToolCallEvent` are exported by `mfn_llm`;

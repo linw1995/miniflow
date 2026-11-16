@@ -340,6 +340,49 @@ fn stale_success_rolls_back_and_cannot_be_rebased_by_save_retry() {
 }
 
 #[test]
+fn sequence_and_context_revision_overflow_roll_back_the_entire_settlement() {
+    for sequence in [false, true] {
+        let (_root, database, id) = database();
+        if sequence {
+            connection(&database)
+                .batch_execute(&format!(
+                    "UPDATE sessions SET next_sequence={} WHERE id='{id}';",
+                    i64::MAX - 1
+                ))
+                .unwrap();
+        } else {
+            connection(&database).batch_execute(&format!("BEGIN IMMEDIATE; INSERT INTO context_revisions (session_id,revision,parent_revision,operation,snapshot) VALUES ('{id}',{maximum},0,'checkpoint','[]'); UPDATE sessions SET context_revision={maximum} WHERE id='{id}'; COMMIT;", maximum=i64::MAX)).unwrap();
+        }
+        let begun = database
+            .begin_turn(&id, "Question", identity(), None)
+            .unwrap();
+        let before = database.session(&id).unwrap();
+        assert!(matches!(
+            database.complete_turn(
+                begun.invocation.clone(),
+                ConversationResult::assistant("Answer")
+            ),
+            Err(ChatError::Arithmetic { .. })
+        ));
+        let after = database.session(&id).unwrap();
+        assert_eq!(after.context_revision, before.context_revision);
+        assert_eq!(after.next_sequence, before.next_sequence);
+        assert_eq!(database.messages(&id, 50, None).unwrap().messages.len(), 1);
+        assert_eq!(
+            database.turn(&begun.invocation.turn_id).unwrap().state,
+            "running"
+        );
+        assert!(
+            database
+                .call(&begun.invocation.call_id)
+                .unwrap()
+                .terminal_result
+                .is_none()
+        );
+    }
+}
+
+#[test]
 fn failed_audit_can_settle_after_context_changes_without_publication() {
     let (_root, database, id) = database();
     let begun = database

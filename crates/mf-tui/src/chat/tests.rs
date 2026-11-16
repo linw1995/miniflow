@@ -474,6 +474,13 @@ if mode == 'flood':
     records = [records[0].copy() for _ in range({flood_records})] + records[-1:]
 if mode == 'empty':
     records = records[-1:]
+replacement = {{'replace_context': {{'status': 'succeeded', 'context_messages': [], 'display_messages': [{{'role': 'assistant', 'content': 'Other answer'}}], 'usages': []}}}}
+if mode == 'duplicate': records += records[-1:]
+if mode == 'malformed_delta': records.append({{'answer': None, **records[-1]}})
+if mode == 'undeclared': records.append(replacement)
+if mode == 'both': records[-1].update(replacement)
+if mode == 'null': records.append({{'append': None}})
+if mode == 'malformed': records.append({{'append': {{'status': 'succeeded', 'messages': None, 'usages': []}}}})
 split = 0 if mode == 'empty' else 1
 for record in records[:split]:
     print(json.dumps(record), flush=True)
@@ -605,6 +612,79 @@ fn native_failures_keep_complete_replies_for_save_only_and_never_save_prefixes()
                 break;
             }
         }
+        controller.close().unwrap();
+    }
+}
+
+#[test]
+fn invalid_terminal_records_invalidate_native_recovery_instead_of_saving_first() {
+    for mode in [
+        "duplicate",
+        "undeclared",
+        "both",
+        "null",
+        "malformed",
+        "malformed_delta",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let (launch, _) = live_launch(root.path(), mode);
+        let controller = ChatController::open(launch).unwrap();
+        controller
+            .send(ChatCommand::Submit {
+                session_id: None,
+                prompt: "Question".into(),
+            })
+            .unwrap();
+        let mut invocation = None;
+        loop {
+            match next(&controller) {
+                ChatEvent::Submitted {
+                    invocation: started,
+                    ..
+                } => invocation = Some(started),
+                ChatEvent::Finished { resolution, .. } => {
+                    let resolution = resolution.unwrap();
+                    assert!(
+                        matches!(resolution.state, CompletionState::Finished(ref turn) if turn.state == "failed"),
+                        "{mode}: {:?}",
+                        resolution.state
+                    );
+                    assert!(!resolution.diagnostics.is_empty());
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let invocation = invocation.unwrap();
+        assert!(
+            !controller.busy(),
+            "{mode}: ambiguous results cannot be retained"
+        );
+        assert_eq!(
+            controller
+                ._database
+                .messages(&invocation.session_id, 50, None)
+                .unwrap()
+                .messages
+                .len(),
+            1
+        );
+        assert_eq!(
+            controller
+                ._database
+                .model_context(&invocation.session_id)
+                .unwrap()
+                .revision,
+            0
+        );
+        assert!(
+            controller
+                ._database
+                .call(&invocation.call_id)
+                .unwrap()
+                .terminal_result
+                .is_none()
+        );
         controller.close().unwrap();
     }
 }

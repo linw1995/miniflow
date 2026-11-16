@@ -108,6 +108,45 @@ fn replacement_views_can_overlap_or_have_no_common_suffix() {
 }
 
 #[test]
+fn replacement_can_edit_metadata_reorder_results_and_rewrite_coherent_call_ids() {
+    let mut context = exchange();
+    context[0]["content"] = "Edited preamble".into();
+    context[0]["metadata"] = json!({"edited":true,"note":null});
+    context[0]["tool_calls"][0]["id"] = "revised-one".into();
+    context[0]["tool_calls"][1]["id"] = "revised-two".into();
+    context[1]["tool_call_id"] = "revised-two".into();
+    context[1]["content"] = "Compact result".into();
+    context[2]["tool_call_id"] = "revised-one".into();
+    context.as_array_mut().unwrap().swap(1, 2);
+    context[3]["content"] = "Edited continuation".into();
+    let result = ConversationResult::decode(values(json!({"replace_context":{
+        "status":"succeeded","context_messages":context,"display_messages":exchange(),"usages":[]
+    }})))
+    .unwrap();
+    result.validate_against(&messages(exchange())).unwrap();
+    assert_eq!(result.display_messages(), messages(exchange()));
+    assert_eq!(
+        result.update.candidate_context(&[]),
+        messages(context.clone())
+    );
+    for invalid in ["duplicate", "orphan", "unresolved", "interleaved"] {
+        let mut broken = context.clone();
+        match invalid {
+            "duplicate" => broken[0]["tool_calls"][1]["id"] = "revised-one".into(),
+            "orphan" => broken[1]["tool_call_id"] = "missing".into(),
+            "unresolved" => {
+                broken.as_array_mut().unwrap().remove(2);
+            }
+            "interleaved" => broken.as_array_mut().unwrap().swap(2, 3),
+            _ => unreachable!(),
+        }
+        assert!(ConversationResult::decode(values(json!({"replace_context":{
+            "status":"succeeded","context_messages":broken,"display_messages":exchange(),"usages":[]
+        }}))).is_err(), "{invalid}");
+    }
+}
+
+#[test]
 fn append_checks_collisions_against_the_admitted_request() {
     let result = ConversationResult::decode(values(append())).unwrap();
     let error = result.validate_against(&messages(exchange())).unwrap_err();

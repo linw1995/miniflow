@@ -255,7 +255,8 @@ impl ChatContract {
                 return None;
             }
             let value = parameters.0.get(&mf_runtime::output_id(node, name))?;
-            if value.as_str()?.trim().is_empty() {
+            let text = value.as_str()?;
+            if text.trim().is_empty() && !(name == "api_key" && text.is_empty()) {
                 return None;
             }
             arguments
@@ -411,8 +412,10 @@ impl ConversationOutputDecoder {
         &mut self,
         mut values: NodeValues,
     ) -> Result<Option<mfn_llm::TextDelta>, ChatError> {
-        let delta = values
-            .remove("answer")
+        let answer = values.remove("answer");
+        // Count terminal alternatives even when a mixed record carries an invalid preview.
+        self.terminal.accept(values)?;
+        let delta = answer
             .map(|value| -> Result<_, ChatError> {
                 ensure!(
                     self.answer,
@@ -432,7 +435,6 @@ impl ConversationOutputDecoder {
                 Ok(delta)
             })
             .transpose()?;
-        self.terminal.accept(values)?;
         Ok(delta)
     }
 
@@ -509,6 +511,24 @@ mod output_tests {
                 decoder(true).accept(values(json!({"answer":delta}))),
                 Err(ChatError::Invalid { .. })
             ));
+        }
+    }
+
+    #[test]
+    fn invalid_previews_cannot_hide_a_conflicting_terminal_result() {
+        let first = json!({"append":{"status":"succeeded","messages":[{"role":"assistant","content":"canonical"}],"usages":[]}});
+        for preview in [
+            json!(null),
+            json!("invalid"),
+            json!({"text":"","model_call_id":"model"}),
+        ] {
+            let mut decoder = decoder(true);
+            decoder.accept(values(first.clone())).unwrap();
+            let mut second = first.clone();
+            second["answer"] = preview;
+            assert!(decoder.accept(values(second)).is_err());
+            assert!(decoder.result().is_none());
+            assert!(decoder.finish().is_err());
         }
     }
 
