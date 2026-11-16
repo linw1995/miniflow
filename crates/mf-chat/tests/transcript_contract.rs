@@ -72,6 +72,61 @@ fn named_outputs_are_the_only_wire_tags_and_own_all_their_facts() {
 }
 
 #[test]
+fn native_contract_traits_preserve_both_branches_and_their_metadata() {
+    use mf_runtime::{InputField, NodeInputs, NodeOutputs, ValueType};
+    assert_eq!(
+        <ConversationResult as NodeInputs>::ports(),
+        <ConversationResult as NodeValue>::ports()
+    );
+    assert_eq!(
+        <ConversationResult as NodeOutputs>::ports(),
+        <ConversationResult as NodeValue>::ports()
+    );
+    assert_eq!(
+        <ConversationResult as InputValue>::value_type(),
+        ValueType::Object
+    );
+    assert_eq!(
+        <ConversationResult as OutputValue>::value_type(),
+        ValueType::Object
+    );
+    assert_eq!(
+        <ConversationResult as InputField>::value_type(),
+        ValueType::Object
+    );
+    for (name, wire) in [("append", append()), ("replace_context", replace())] {
+        let result = <ConversationResult as NodeInputs>::from_inputs(values(wire.clone())).unwrap();
+        assert_eq!(result.update.output_name(), name);
+        assert!(ResultAlternatives::Both.allows(&result.update));
+        assert_eq!(
+            <ConversationResult as NodeOutputs>::into_outputs(result.clone()).unwrap(),
+            values(wire)
+        );
+        assert_eq!(
+            <ConversationResult as InputField>::decode_field(
+                "result",
+                Some(result.clone().encode().unwrap())
+            )
+            .unwrap(),
+            result
+        );
+    }
+    for value in [None, Some(ValueRef::null())] {
+        let error = <ConversationResult as InputField>::decode_field("result", value).unwrap_err();
+        assert!(error.pointer().starts_with("/result"));
+    }
+}
+
+#[test]
+fn complete_result_size_is_bounded_before_it_can_be_retained_or_persisted() {
+    let result = ConversationResult::assistant("x".repeat(mf_chat::contract::MAX_RECOVERY_BYTES));
+    assert!(matches!(
+        result.validate(),
+        Err(ChatError::RecoveryTooLarge { .. })
+    ));
+}
+
+#[test]
 fn append_and_replacement_have_distinct_display_and_context_rules() {
     let request = messages(json!([
         {"role":"system","content":"Instructions"},

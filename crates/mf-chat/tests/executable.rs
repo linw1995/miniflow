@@ -147,6 +147,56 @@ fn a_separate_title_output_is_not_an_ownership_hint() {
 }
 
 #[test]
+fn invalid_request_suffixes_fail_before_argument_binding() {
+    for messages in [
+        json!([]),
+        json!([{"role":"system","content":"No current user"}]),
+        json!([{"role":"assistant","content":"Not a submission"}]),
+        json!([{"role":"user","content":""}]),
+    ] {
+        let request = mf_chat::ConversationInputs {
+            context: None,
+            messages: serde_json::from_value(messages).unwrap(),
+        };
+        assert!(matches!(
+            request.validate(),
+            Err(mf_chat::ChatError::Invalid {
+                field: "messages",
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
+fn prepared_result_producers_must_have_object_compatible_metadata() {
+    for name in ["append", "replace_context"] {
+        let definition = serde_json::from_value(json!({
+            "version":"2026-11-13", "dependencies":{},
+            "nodes":[
+                {"id":"params","kind":"builtin.parameters","config":{"parameters":{"messages":{"type":{"list":"object"}}}}},
+                {"id":"wrong","kind":"builtin.code","config":{"language":"cel","inputs":{},"code":{"value":"'not an object'"}}}
+            ],
+            "outputs":[{"name":name,"node":"wrong","port":"value"}]
+        })).unwrap();
+        let Err(error) = mf_chat::WorkflowProfile::new("default", definition, Default::default())
+        else {
+            panic!("expected invalid output metadata")
+        };
+        assert!(
+            matches!(
+                error,
+                mf_chat::ChatError::Invalid {
+                    field: "chat outputs",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
 fn conversation_inputs_are_bound_separately_from_parameters() {
     let manifest = manifest();
     let contract = ChatContract::from_manifest(&manifest).unwrap();

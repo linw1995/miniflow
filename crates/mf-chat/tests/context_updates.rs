@@ -54,6 +54,117 @@ fn advance_context(database: &ChatDatabase, id: &str) {
 }
 
 #[test]
+fn context_query_node_and_message_accessors_preserve_all_roles_and_annotations() {
+    use mf_runtime::NodeValue;
+    let (_root, database, id) = database();
+    let begun = database
+        .begin_turn(&id, "Question", identity(), None)
+        .unwrap();
+    database
+        .complete_turn(begun.invocation, result("query"))
+        .unwrap();
+    let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
+    let node = registry
+        .get("mf_chat.context.load")
+        .unwrap()
+        .instantiate(json!({}))
+        .unwrap();
+    let input = mf_chat::nodes::ModelContextInputs {
+        database_path: database.path().to_str().unwrap().into(),
+        session_id: id.clone(),
+    };
+    let outputs = node
+        .execution
+        .as_task_node()
+        .unwrap()
+        .execute(
+            input.into_values().unwrap(),
+            &mut mf_runtime::ExecutionContext::default(),
+        )
+        .unwrap()
+        .outputs;
+    let loaded = mf_chat::nodes::ModelContextOutputs::from_values(outputs)
+        .unwrap()
+        .context;
+    assert_eq!(loaded, database.model_context(&id).unwrap());
+    let encoded = serde_json::to_value(&loaded).unwrap();
+    assert_eq!(
+        serde_json::from_value::<mf_chat::ModelContext>(encoded).unwrap(),
+        loaded
+    );
+    let records = database.messages(&id, 50, None).unwrap().messages;
+    assert_eq!(records[0].message.role(), "user");
+    assert_eq!(records[0].message.content(), "Question");
+    assert!(records[0].message.metadata().is_none());
+    assert_eq!(records[1].message.role(), "assistant");
+    assert_eq!(records[2].message.role(), "tool");
+    assert_eq!(
+        records[2].message.metadata().unwrap()["original"],
+        json!(true)
+    );
+    assert_eq!(
+        records[4].message.metadata().unwrap()["source"],
+        json!("original")
+    );
+    let system = mf_chat::Message {
+        payload: ChatMessage::System {
+            content: "Instructions".into(),
+            metadata: Some(std::collections::BTreeMap::from([(
+                "source".into(),
+                "system".into(),
+            )])),
+        },
+        ..records[0].message.clone()
+    };
+    assert_eq!(system.role(), "system");
+    assert_eq!(system.content(), "Instructions");
+    assert_eq!(system.metadata().unwrap()["source"], json!("system"));
+}
+
+#[test]
+fn missing_or_unsuccessful_context_revisions_never_become_model_requests() {
+    for missing in [false, true] {
+        let (_root, database, id) = database();
+        if missing {
+            connection(&database)
+                .batch_execute(&format!(
+                    "UPDATE sessions SET context_revision=99 WHERE id='{id}';"
+                ))
+                .unwrap();
+            assert!(matches!(
+                database.model_context(&id),
+                Err(ChatError::ContextMissing { revision: 99, .. })
+            ));
+        } else {
+            let begun = database.begin_turn(&id, "First", identity(), None).unwrap();
+            database
+                .complete_turn(begun.invocation.clone(), result("first"))
+                .unwrap();
+            connection(&database)
+                .batch_execute(&format!(
+                    "UPDATE turns SET state='failed' WHERE id='{}';",
+                    begun.invocation.turn_id
+                ))
+                .unwrap();
+            assert!(matches!(
+                database.model_context(&id),
+                Err(ChatError::Invalid {
+                    field: "model context",
+                    ..
+                })
+            ));
+        }
+        let before = database.session(&id).unwrap().next_sequence;
+        assert!(
+            database
+                .begin_turn(&id, "Never admitted", identity(), None)
+                .is_err()
+        );
+        assert_eq!(database.session(&id).unwrap().next_sequence, before);
+    }
+}
+
+#[test]
 fn append_retains_all_tool_records_and_reopens_the_exact_next_request() {
     let (root, database, id) = database();
     let first = database
