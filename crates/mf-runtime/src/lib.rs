@@ -73,7 +73,9 @@ pub use flow::{
 pub use flow_bindings::{FlowBindingSource, FlowBindings};
 pub use flow_invocation::{FlowEmission, FlowInvocation};
 pub use flow_properties::{interface_properties, value_schema};
-pub use flow_value::{FlowValue, FlowValueBuildError};
+pub use flow_value::{
+    FlowInputConfiguration, FlowInputConfigurationError, FlowValue, FlowValueBuildError,
+};
 #[cfg(feature = "async")]
 pub use future_execution::FutureExecutionError;
 #[doc(hidden)]

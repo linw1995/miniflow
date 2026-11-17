@@ -112,8 +112,8 @@ pub fn interface_properties(
                 // Callable values cannot cross a JSON or model boundary.
                 "runtime_only": input.value_type.is_runtime_only(),
             }));
-            // Secret inputs are resolved from their own environment or default and
-            // cannot be provided by a dynamic caller.
+            // Secrets are never model arguments, regardless of whether the caller
+            // configured them explicitly or the input has a fallback source.
             if input.binding.secret {
                 continue;
             }

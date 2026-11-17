@@ -192,12 +192,21 @@ fn catalog_and_parallel_dispatch_use_actual_children_and_one_shared_chain() {
             .iter()
             .all(|node| node.kind != "workflow.call")
     );
-    assert!(
+    assert_eq!(
         dispatch
             .definition
             .nodes
             .iter()
-            .all(|node| node.kind != "llm.tool_arguments")
+            .map(|node| node.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from([
+            mf_runtime::ITERATION_INPUT_ID,
+            "classify",
+            "encode",
+            "execute",
+            "fail",
+            "gate",
+        ]),
     );
     assert_eq!(
         dispatch
@@ -564,7 +573,7 @@ fn malformed_call_batches_fail_before_any_tool_effects() {
 }
 
 #[test]
-fn private_arguments_do_not_hide_other_calls_or_public_selections() {
+fn secret_model_arguments_do_not_hide_unrelated_calls_or_public_selections() {
     use mf_runtime::ValueRef;
     let definition = configured_tools(BTreeMap::from([("echo".into(), text())]));
     let registry = NodeRegistry::from_inventory().unwrap();
@@ -607,6 +616,171 @@ fn private_arguments_do_not_hide_other_calls_or_public_selections() {
     let mut names: Vec<_> = names.iter().map(|name| name.as_str()).collect();
     names.sort();
     assert_eq!(names, [Some("[REDACTED]"), Some("echo")]);
+}
+
+#[test]
+fn context_configured_flow_inputs_stay_out_of_model_arguments_and_unrelated_calls() {
+    const TOKEN: &str = "synthetic-caller-bound-token";
+    let private = FlowTool {
+        description: "Use a caller-provided credential.".into(),
+        parameters: BTreeMap::new(),
+        body: body(json!({
+            "version":"2026-10-28", "nodes":[
+                {"id":"params", "kind":"builtin.parameters", "config":{"parameters":{
+                    "token":{"type":"string", "secret":true},
+                    "content":{"type":"string", "default":"ready", "secret":false}
+                }}},
+                {"id":"check", "kind":"builtin.code", "config":{
+                    "language":"cel", "inputs":{"token":"string", "content":"string"},
+                    "code":{"content":format!("token == '{TOKEN}' ? content : 'wrong credential'")}
+                }, "inputs":{
+                    "token":{"from":{"node":"params", "port":"token"}},
+                    "content":{"from":{"node":"params", "port":"content"}}
+                }}
+            ], "outputs":[{"name":"content", "node":"check", "port":"content"}]
+        })),
+    };
+    let mut definition = configured_tools(BTreeMap::from([
+        ("private".into(), private),
+        ("public".into(), text()),
+    ]));
+    let params = definition
+        .nodes
+        .iter_mut()
+        .find(|node| node.id.as_str() == "params")
+        .unwrap();
+    params.config["parameters"]["private_token"] = json!({"type":"string","secret":true});
+    params.config["parameters"]["private_content"] = json!({"type":"string","secret":false});
+    definition
+        .nodes
+        .iter_mut()
+        .find(|node| node.id.as_str() == "tool_private")
+        .unwrap()
+        .config["inputs"] = json!({
+        "token":{"$ref":"params.private_token"},
+        "content":{"$ref":"params.private_content"}
+    });
+    definition
+        .order_edges
+        .push(mf_runtime::OrderEdgeDefinition {
+            from_node: "params".into(),
+            to_node: "tool_private".into(),
+        });
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let recording = snapshots::Snapshots::memory();
+    let mut context = ExecutionContext::default();
+    context.set_snapshot_recorder(recording.recorder());
+    context.set_workflow_arguments(
+        WorkflowArguments::try_from(json!({
+            "params.calls":[
+                {"id":"one", "name":"private", "arguments":{}},
+                {"id":"two", "name":"public", "arguments":{}},
+                {"id":"three", "name":"private", "arguments":{"token":"model-override"}},
+                {"id":"four", "name":"private", "arguments":{"content":"model-override"}}
+            ],
+            "params.private_token":TOKEN,
+            "params.private_content":"ready"
+        }))
+        .unwrap(),
+    );
+    let output = instantiate_compiled(&plan, &registry)
+        .unwrap()
+        .execute_in_context(&mut context)
+        .unwrap();
+    assert_eq!(output["results"][0]["content"].as_str(), Some("ready"));
+    assert!(output["results"][0].contains_secret());
+    assert_eq!(output["results"][1]["content"].as_str(), Some("ready"));
+    assert!(!output["results"][1].contains_secret());
+    for index in [2, 3] {
+        let failure: Value =
+            serde_json::from_str(output["results"][index]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(failure["error"], "unknown, secret, or configured argument");
+    }
+    assert_eq!(
+        output["catalog"][0]["input_schema"]["properties"],
+        json!({})
+    );
+    assert!(
+        !serde_json::to_string(&output["catalog"])
+            .unwrap()
+            .contains(TOKEN)
+    );
+    for entry in recording.history() {
+        let snapshot = entry.snapshot.node(&entry.scope, &entry.node).unwrap();
+        assert!(!serde_json::to_string(snapshot).unwrap().contains(TOKEN));
+    }
+    for inputs in [
+        json!({"unknown":"value"}),
+        json!({"content":42}),
+        json!({"token":{"$ref":"missing.output"}}),
+    ] {
+        let mut invalid = definition.clone();
+        invalid
+            .nodes
+            .iter_mut()
+            .find(|node| node.id.as_str() == "tool_private")
+            .unwrap()
+            .config["inputs"] = inputs;
+        assert!(compile_definition(&invalid, &registry).is_err());
+    }
+}
+
+#[test]
+fn configured_runtime_only_inputs_are_native_capabilities_not_model_arguments() {
+    let tool = FlowTool {
+        description: "Invoke the configured capability.".into(),
+        parameters: serde_json::from_value(
+            json!({"callback":{"description":"The application-owned callback."}}),
+        )
+        .unwrap(),
+        body: body(json!({"version":"2026-10-28","nodes":[
+            {"id":"params","kind":"builtin.parameters","config":{"parameters":{"callback":{"type":"flow","secret":false}}}},
+            {"id":"invoke","kind":"workflow.call","config":{
+                "inputs":[],"outputs":[{"name":"content","value_type":"string","required":true}]
+            },"inputs":{"flow":{"from":{"node":"params","port":"callback"}}}}
+        ],"outputs":[{"name":"content","node":"invoke","port":"content"}]})),
+    };
+    let mut definition = configured_tools(BTreeMap::from([("invoke".into(), tool)]));
+    definition.nodes.push(serde_json::from_value(json!({
+        "id":"callback","kind":"builtin.constant","config":{"type":"flow","value":{
+            "version":"2026-10-28","dependencies":{
+                "core":{"package":"mfn-core","path":common::crates_dir().join("builtin-nodes/core")}
+            },"nodes":[{"id":"value","kind":"builtin.constant","config":{"value":"native callback result"}}],
+            "outputs":[{"name":"content","node":"value","port":"value"}]
+        }}
+    })).unwrap());
+    definition
+        .nodes
+        .iter_mut()
+        .find(|node| node.id.as_str() == "tool_invoke")
+        .unwrap()
+        .config["inputs"] = json!({"callback":{"$ref":"callback.value"}});
+    definition
+        .order_edges
+        .push(mf_runtime::OrderEdgeDefinition {
+            from_node: "callback".into(),
+            to_node: "tool_invoke".into(),
+        });
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let output = instantiate_compiled(&plan, &registry)
+        .unwrap()
+        .execute_with_inputs(
+            WorkflowArguments::try_from(json!({
+                "params.calls":[{"id":"native","name":"invoke","arguments":{}}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        output["catalog"][0]["input_schema"]["properties"],
+        json!({})
+    );
+    assert_eq!(
+        output["results"][0]["content"],
+        json!("native callback result")
+    );
 }
 
 #[test]

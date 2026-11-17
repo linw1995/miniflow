@@ -453,9 +453,9 @@ native capability (`value`) and its interface as plain JSON (`properties`), deri
 body: `callable`, `startup`, `parameters`, `allowed`, `required`, `plain`, `outputs`, `streams` and
 `stdin`. Nothing is inferred from the source JSON, re-declared in a tool record, or exposed as a
 separate projection node. `callable` is true only for a body with exactly one startup node, no stdin and
-no incremental outputs; such a body also publishes `allowed` (non-secret input names mapped to JSON
-Schema) and `required` (effective required names, already excluding inputs with an environment or
-default). `plain` reports the sole required string `content` output that encodes as plain text.
+no incremental outputs; such a body also publishes `allowed` (unconfigured, non-secret input names
+mapped to JSON Schema) and `required` (effective required names, already excluding configured inputs
+and inputs with an environment or default). `plain` reports the sole required string `content` output that encodes as plain text.
 
 `mfn-llm.agent` accepts a fixed `params.tools: Map(Flow)` plus `params.tool_properties: Map(Object)`
 holding, per business name, the caller-owned `description`, optional `parameters` documentation, and
@@ -482,18 +482,52 @@ required arguments become tool-result content. Argument names travel flat and ar
 validation failures are caller-data failures and become business results, while blank call IDs,
 cancellation and infrastructure failures still fail execution.
 
-Assertions cover tool structure; types and requiredness come from the prepared interface. Secret inputs
-must carry an environment or default source, cannot be supplied by model arguments, and are omitted from
-`allowed`. Literal defaults and environment names stay in the native Flow; the catalog exposes only
-effective requiredness and documented public inputs. Because a dynamic caller cannot enumerate
-unexpected keys, an unknown-argument report is coarser than a compiled adapter's single-key message;
-a missing required argument is still named.
+Assertions cover tool structure; types and requiredness come from the prepared interface. Configure
+Flow startup inputs directly on the producing `builtin.constant` with `config.inputs`. Values use the
+same execution-time `$ref` and `$template` expressions as node configuration:
+
+```json
+{
+  "id": "calculator",
+  "kind": "builtin.constant",
+  "config": {
+    "type": "flow",
+    "value": {"path": "agent-calculator/calculator.json"},
+    "inputs": {
+      "left": {"$ref": "params.fixed_left"}
+    }
+  }
+}
+```
+
+Declare `params.fixed_left` in the caller and add an explicit dependency from `params` to `calculator`;
+templates do not establish execution order.
+Names may be flat when unambiguous or qualified as `node.port`. Preparation validates names, aliases,
+template syntax, and literal types without reading context or environment. Each producer execution
+resolves templates against its own context and publishes an immutable Flow containing only the
+configured native values, not the context itself. Subsequent calls use fresh invocation state.
+
+Configured inputs are removed from `allowed` and `required`, even when public; `parameters` marks them
+with `configured: true` without disclosing values. Only remaining public inputs enter the model schema.
+The example above exposes only `operation` and `right`; omitting the `left` binding leaves it
+model-visible again. Parameter `default` and `env` declarations remain fallback sources, not immutable
+configuration. Tool documentation may describe configured public inputs, but their
+fields are omitted from the model schema. Unconfigured runtime-only public inputs remain invalid.
+
+Neither models nor ordinary callers can override configured inputs, including through qualified aliases.
+Normal Flow calls and frozen Router branches merge the same configured values before ordinary input
+validation. Secret markers stay on their values and do not taint unrelated calls. There is no separate
+Agent argument map or merge node. Configured values stay out of the model catalog and model-generated
+call records; model-visible tool results retain their normal business content. Literal credentials
+remain embedded in artifacts, so use context references to secret startup parameters for real keys.
+Because a dynamic caller cannot enumerate unexpected keys, an unknown-argument report is coarser than
+a compiled adapter's single-key message; a missing required argument is still named.
 
 Tool constants remain the caller-owned static declarations. The compiler follows their provenance
 across ordinary data edges and Call boundaries, then binds each executable definition directly beneath
 its authored router. Different call sites may bind the same callee source with different route sets.
-Runtime map entries only control enablement; replacing a handle cannot replace a compiled body.
-The router invokes its selected child through Call's shared implementation. Resolve external tool
+Runtime map entries carry the configured values for their selected capability but cannot replace a
+compiled body. The router invokes its selected child through Call's shared implementation. Resolve external tool
 sources in their original directory before composing when that directory differs from the composed
 workflow's directory. There is no runtime JSON catalog override or lexical `flow_ref` transport. Tool
 dispatch remains terminal-only; native dynamic Calls and existing observed-item nested-scope limits are
@@ -894,7 +928,8 @@ Nodes that support [configuration templates](#configuration-templates) can consu
 ### Configuration templates
 
 Providers explicitly enable templates for execution-time configuration fields. LLM and DeepSeek configuration
-support them; structural settings such as parameter declarations, node ports, and Loop bodies remain static.
+and Flow constants' `config.inputs` support them; structural settings such as parameter declarations,
+node ports, and Loop bodies remain static.
 
 | Configuration value | Meaning |
 | --- | --- |
