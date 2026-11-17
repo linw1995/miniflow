@@ -17,7 +17,7 @@ use ratatui::{
 };
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     io::{IsTerminal, Write},
     time::Instant,
 };
@@ -378,22 +378,6 @@ struct ChatView {
     outcome: String,
     animation_started: Instant,
 }
-fn append_diagnostic(output: &mut String, diagnostic: &str) {
-    let mut seen: BTreeSet<String> = output.lines().map(str::to_owned).collect();
-    for line in diagnostic
-        .trim()
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-    {
-        if seen.insert(line.to_owned()) {
-            if !output.is_empty() {
-                output.push('\n');
-            }
-            output.push_str(line);
-        }
-    }
-}
-
 impl ChatView {
     fn new(
         description: &mf_telemetry::description::WorkflowDescription,
@@ -612,24 +596,20 @@ impl ChatView {
                                 self.notice = "Turn did not start".into();
                             }
                         }
-                        self.outcome.clear();
-                        for detail in details {
-                            append_diagnostic(&mut self.outcome, &detail);
-                        }
+                        self.outcome = details.join("\n");
                     }
                     Err(error) => {
                         self.active = None;
                         self.retained = true;
                         self.notice = "Result needs recovery. Ctrl+P to save or discard it".into();
-                        self.outcome.clear();
-                        append_diagnostic(&mut self.outcome, &error.to_string());
+                        self.outcome = error.to_string();
                     }
                 }
                 if let Some(error) = capture_error {
-                    append_diagnostic(&mut self.outcome, &error);
+                    self.outcome.push_str(&format!("\n{error}"));
                 }
                 if !stderr.is_empty() {
-                    append_diagnostic(&mut self.outcome, &stderr);
+                    self.outcome.push_str(&format!("\n{stderr}"));
                 }
                 self.earlier = false;
                 self.load(controller, None);
@@ -2645,18 +2625,6 @@ mod tests {
         assert_eq!(row_of(&loaded, "streamed answer"), 5);
         assert_eq!(loaded.matches("FTT").count(), 1);
         controller.close().unwrap();
-    }
-
-    #[test]
-    fn repeated_terminal_diagnostics_preserve_distinct_root_causes() {
-        let mut output = String::new();
-        let wrapper = "Workflow ended without a terminal conversation result";
-        let root = "DeepSeek fetch request failed with HTTP 404 Not Found";
-        append_diagnostic(&mut output, wrapper);
-        append_diagnostic(&mut output, wrapper);
-        append_diagnostic(&mut output, &format!("\n{wrapper}\n{root}\n"));
-        append_diagnostic(&mut output, "   ");
-        assert_eq!(output, format!("{wrapper}\n{root}"));
     }
 
     #[test]

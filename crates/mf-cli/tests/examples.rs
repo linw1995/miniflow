@@ -122,34 +122,21 @@ fn deepseek_calls(fetch: bool) -> Value {
     }
 }
 
-fn deepseek_retry_call() -> Value {
-    json!([{"id":"call_fetch_retry","type":"function","function":{"name":"fetch","arguments":"{\"url\":\"https://example.com/alternate\"}"}}])
-}
-
-fn deepseek_search_results() -> Value {
-    let mut alternate = search_result();
-    alternate["url"] = "https://example.com/alternate".into();
-    alternate["title"] = "Alternate release".into();
-    json!([search_result(), alternate])
-}
-
 fn deepseek_messages() -> Value {
-    let assistant_calls = |calls: Value| {
-        let calls: Vec<_> = calls.as_array().unwrap().iter().map(|call| {
+    let assistant_calls = |fetch| {
+        let calls: Vec<_> = deepseek_calls(fetch).as_array().unwrap().iter().map(|call| {
             json!({"id":call["id"], "name":call["function"]["name"], "arguments":serde_json::from_str::<Value>(call["function"]["arguments"].as_str().unwrap()).unwrap()})
         }).collect();
         json!({"role":"assistant", "content":"", "tool_calls":calls})
     };
-    let results = json!({"results":deepseek_search_results()}).to_string();
+    let results = json!({"results":[search_result()]}).to_string();
     json!([
-        assistant_calls(deepseek_calls(false)),
+        assistant_calls(false),
         {"role":"tool","tool_call_id":"call_search_a","content":results},
         {"role":"tool","tool_call_id":"call_search_b","content":results},
-        assistant_calls(deepseek_calls(true)),
-        {"role":"tool","tool_call_id":"call_fetch","content":json!({"error":"HTTP 404 Not Found"}).to_string()},
-        assistant_calls(deepseek_retry_call()),
-        {"role":"tool","tool_call_id":"call_fetch_retry","content":json!({"title":"Example","content":"# Markdown"}).to_string()},
-        assistant("DeepSeek findings: https://example.com/alternate")
+        assistant_calls(true),
+        {"role":"tool","tool_call_id":"call_fetch","content":json!({"title":"Example","content":"# Markdown"}).to_string()},
+        assistant("DeepSeek findings: https://example.com/release")
     ])
 }
 
@@ -192,12 +179,7 @@ fn examples() -> [(&'static str, Option<&'static str>, Value); 25] {
             None,
             append_result(
                 deepseek_messages(),
-                json!([
-                    agent_usage(0),
-                    agent_usage(1),
-                    agent_usage(2),
-                    agent_usage(3)
-                ]),
+                json!([agent_usage(0), agent_usage(1), agent_usage(2)]),
             ),
         ),
         (
@@ -353,9 +335,8 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                 vec![
                     streamed_tool_calls(deepseek_calls(false)),
                     streamed_tool_calls(deepseek_calls(true)),
-                    streamed_tool_calls(deepseek_retry_call()),
                     llm_support::Reply::stream_text(
-                        "DeepSeek findings: https://example.com/alternate",
+                        "DeepSeek findings: https://example.com/release",
                     ),
                 ]
             } else if name == "chat-context-flow.json" {
@@ -378,14 +359,9 @@ fn documented_examples_compile_and_produce_expected_outputs() {
         let deepseek_server = (name.starts_with("deepseek-") || name == "chat-deepseek-flow.json")
             .then(|| {
                 let replies = if name == "chat-deepseek-flow.json" {
-                    let mut missing = deepseek_support::Reply::json(
-                        json!({"error":{"message":"synthetic-deepseek-key remote-secret"}}),
-                    );
-                    missing.status = 404;
                     vec![
-                        deepseek_support::Reply::search(deepseek_search_results()),
-                        deepseek_support::Reply::search(deepseek_search_results()),
-                        missing,
+                        deepseek_support::Reply::search(json!([search_result()])),
+                        deepseek_support::Reply::search(json!([search_result()])),
                         deepseek_support::Reply::fetch("Example", "# Markdown"),
                     ]
                 } else if name == "deepseek-search.json" {
@@ -574,7 +550,7 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                 if name == "chat-loop-flow.json" {
                     "replyreply"
                 } else if name == "chat-deepseek-flow.json" {
-                    "DeepSeek findings: https://example.com/alternate"
+                    "DeepSeek findings: https://example.com/release"
                 } else if matches!(name, "chat-calculator-flow.json" | "chat-context-flow.json") {
                     CALCULATOR_ANSWER
                 } else {
@@ -613,19 +589,6 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                 usage["started_at"] = 0.into();
                 assert!(usage.get("timing").is_none_or(Value::is_null));
             }
-        }
-        if name == "chat-deepseek-flow.json" {
-            let failed = &mut actual["append"]["messages"][4]["content"];
-            let content: Value = serde_json::from_str(failed.as_str().unwrap()).unwrap();
-            assert!(
-                content["error"]
-                    .as_str()
-                    .unwrap()
-                    .contains("HTTP 404 Not Found")
-            );
-            assert!(!content.to_string().contains("synthetic-deepseek-key"));
-            assert!(!content.to_string().contains("remote-secret"));
-            *failed = json!({"error":"HTTP 404 Not Found"}).to_string().into();
         }
         assert_eq!(actual, expected, "{name}: unexpected workflow output");
         if name == "chat-calculator-flow.json" {
@@ -677,19 +640,7 @@ fn documented_examples_compile_and_produce_expected_outputs() {
         }
         if name == "chat-deepseek-flow.json" {
             let requests = server.as_ref().unwrap().requests();
-            assert_eq!(requests.len(), 4);
-            assert!(
-                requests[2].body["messages"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|message| {
-                        message["role"] == "tool"
-                            && message["content"]
-                                .as_str()
-                                .is_some_and(|content| content.contains("HTTP 404 Not Found"))
-                    })
-            );
+            assert_eq!(requests.len(), 3);
             for request in &requests {
                 assert_eq!(request.body["model"], "example-model");
                 assert!(request.headers.contains("Bearer synthetic-llm-key"));
@@ -714,11 +665,10 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                 let body = request.body.to_string();
                 assert!(!body.contains("synthetic-deepseek-key"));
                 assert!(!body.contains("synthetic-llm-key"));
-                assert!(!body.contains("remote-secret"));
                 assert!(!body.contains(&deepseek_server.as_ref().unwrap().base_url));
             }
             let requests = deepseek_server.as_ref().unwrap().requests();
-            assert_eq!(requests.len(), 4);
+            assert_eq!(requests.len(), 3);
             let queries: std::collections::BTreeSet<_> = requests[..2]
                 .iter()
                 .map(|request| {
@@ -745,15 +695,6 @@ fn documented_examples_compile_and_produce_expected_outputs() {
             assert_eq!(
                 requests[2].body,
                 json!({"url":"https://example.com/release"})
-            );
-            assert!(
-                requests[3]
-                    .headers
-                    .starts_with("POST /prefix/v1/tools/fetch ")
-            );
-            assert_eq!(
-                requests[3].body,
-                json!({"url":"https://example.com/alternate"})
             );
         }
         if name == "chat-context-flow.json" {

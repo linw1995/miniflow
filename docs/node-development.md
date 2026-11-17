@@ -651,14 +651,7 @@ Tuple/unit structs, enums, borrowed fields, optional collection elements, and ne
 
 `NodeOutputs`, `OutputField`, `OutputValue`, and `encode_output` also support manual output contracts.
 Declarations and encoders must agree on names, requiredness, and JSON types. `OutputEncodeError::pointer()`
-adds the escaped port name to nested failures and preserves the typed error source. Providers can
-classify checked, recoverable domain failures with `NodeBusinessFailedSnafu` and a typed boxed source.
-Packed tool calls may encode these failures as business results; ordinary task execution still fails.
-Do not use this classification for cancellation, runtime/resource failures, output contracts, or
-unknown plugin errors. This keeps provider error types in their owning crates without teaching the
-runtime or Router about individual providers.
-
-Encoding shared
+adds the escaped port name to nested failures and preserves the typed error source. Encoding shared
 `ValueRef` fields and collection descendants retains payload identity without an intermediate Serde tree.
 
 ### Typed task execution

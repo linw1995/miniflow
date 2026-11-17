@@ -84,8 +84,7 @@ fn failure(error: mf_runtime::NodeExecutionError) -> Value {
         "debug": format!("{error:?}"),
         "cause": source.to_string(),
         "typed_credentials": typed_credentials,
-        "typed_runtime": typed_runtime,
-        "business": matches!(error, mf_runtime::NodeExecutionError::BusinessFailed { .. })
+        "typed_runtime": typed_runtime
     })
 }
 
@@ -266,7 +265,6 @@ fn invalid_inputs_fail_before_credentials_or_network_io() {
         );
         assert_eq!(result["ok"], false, "{result}");
         assert_eq!(result["typed_credentials"], false, "{result}");
-        assert_eq!(result["business"], true, "{result}");
     }
     assert!(server.requests().is_empty());
 }
@@ -282,7 +280,6 @@ fn missing_and_empty_credentials_fail_without_network_io() {
     );
     assert_eq!(result["ok"], false, "{result}");
     assert_eq!(result["typed_credentials"], true, "{result}");
-    assert_eq!(result["business"], false, "{result}");
     let empty = probe(
         SEARCH_KIND,
         &server,
@@ -309,7 +306,6 @@ fn provider_errors_are_not_retried_and_diagnostics_hide_the_body() {
             json!({}),
         );
         assert_eq!(result["ok"], false, "{result}");
-        assert_eq!(result["business"], true, "{result}");
         assert!(
             result["error"]
                 .as_str()

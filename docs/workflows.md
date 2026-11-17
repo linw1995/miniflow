@@ -634,9 +634,7 @@ and typed errors. It returns a `result` envelope containing `outputs` or a recov
 Arguments are conservatively private in snapshots, and business-error envelopes are private.
 Cancellation, observation/contract, resource, and output failures propagate rather than becoming
 business results. Recovery is fail-closed: explicit ordinary node execution failures, including known
-Call wrappers, are recoverable. Providers may also return a typed
-`NodeExecutionError::BusinessFailed` retaining their own domain-error source. Unknown plugin errors
-are not assumed to be business failures.
+Call wrappers, are recoverable; unknown plugin errors are not assumed to be business failures.
 Invocation drains incremental emissions terminally without exposing Router stream ports. Ordinary
 `workflow.call` syntax and topology are unchanged.
 
@@ -1180,14 +1178,6 @@ read credentials or contact DeepSeek. Redirects are not followed, requests are n
 and HTTP errors, malformed responses, deadlines, or cancellation fail the invocation without publishing
 node outputs. Retry policy belongs to the enclosing Flow or host, which can account for the API's per-request
 billing and status-specific retry guidance.
-
-Checked Search/Fetch input errors and non-success HTTP statuses retain typed provider sources through
-`NodeExecutionError::BusinessFailed`. A standalone node or ordinary Call still fails without outputs;
-packed Router/tool calls convert these explicit domain failures into tool-result errors. The Agent can
-then choose another query or URL and produce a terminal answer, with the failed call retained in its
-transcript. Configuration, credential lookup, runtime initialization, cancellation/deadline, and
-response-decoding failures are not reclassified as recoverable tool results. No HTTP retry is added;
-any further tool request must be explicitly issued by the model or caller Flow.
 
 ### LLM tool calls
 

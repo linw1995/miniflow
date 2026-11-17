@@ -14,7 +14,7 @@ use mf_runtime::{
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
-use snafu::{IntoError, OptionExt, ResultExt, Snafu, ensure};
+use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
     collections::BTreeMap,
     error::Error,
@@ -249,18 +249,7 @@ impl fmt::Debug for DeepSeekExecutionError {
 
 impl From<DeepSeekExecutionError> for NodeExecutionError {
     fn from(source: DeepSeekExecutionError) -> Self {
-        let business = matches!(
-            source,
-            DeepSeekExecutionError::InvalidInput { .. }
-                | DeepSeekExecutionError::FetchUrl { .. }
-                | DeepSeekExecutionError::ProviderStatus { .. }
-        );
-        let source = Box::<dyn Error + Send + Sync>::from(source);
-        if business {
-            mf_runtime::NodeBusinessFailedSnafu.into_error(source)
-        } else {
-            source.into()
-        }
+        Box::<dyn Error + Send + Sync>::from(source).into()
     }
 }
 

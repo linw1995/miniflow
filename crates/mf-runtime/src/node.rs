@@ -743,11 +743,6 @@ pub enum NodeExecutionError {
     },
     #[snafu(display("node execution failed: {message}"), visibility(pub))]
     ExecutionFailed { message: String },
-    /// A checked domain failure that packed tool calls may return as business data.
-    #[snafu(display("node operation failed: {source}"), visibility(pub))]
-    BusinessFailed {
-        source: Box<dyn Error + Send + Sync + 'static>,
-    },
     #[snafu(display("node plugin failed: {source}"), visibility(pub))]
     PluginFailed {
         source: Box<dyn Error + Send + Sync + 'static>,
