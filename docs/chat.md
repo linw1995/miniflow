@@ -345,12 +345,6 @@ with a complete `params.messages` request, `Map(Flow)` tools, and matching `Map(
 It supports addition, subtraction, multiplication, and division. A normal `builtin.object` assembles
 Agent `status`, generated `messages`, `usages`, and `error` into the single `append` output.
 
-The Agent accumulates assistant call batches, ordered parallel tool results, and the terminal
-assistant without echoing the admitted request. Captured failures and iteration limits retain
-completed rounds and usages. `answer` remains an optional stream of assistant text, including tool
-preambles; it does not carry a live tool lifecycle protocol. Catalog projection runs once before the
-first model call. See [configured Flow tools](workflows.md#configured-flow-tools).
-
 The [DeepSeek web Agent](../examples/chat-deepseek-flow.json) uses the same contract with separate
 Search and Fetch tool Flows. The model can issue parallel searches and fetch discovered pages in later
 rounds. Its root parameters separate `llm_model`, `llm_base_url`, and `llm_api_key` from
@@ -360,6 +354,12 @@ model arguments or hidden child environment lookups. Network-bound
 Search and Fetch nodes also make the nested execution PiPs easier to observe than the calculator's
 short local operations. See [configured Flow tools](workflows.md#configured-flow-tools) for setup,
 provider charges, and latency limitations.
+
+The Agent accumulates assistant call batches, ordered parallel tool results, and the terminal
+assistant without echoing the admitted request. Captured failures and iteration limits retain
+completed rounds and usages. `answer` remains an optional stream of assistant text, including tool
+preambles; it does not carry a live tool lifecycle protocol. Catalog projection runs once before the
+first model call. See [configured Flow tools](workflows.md#configured-flow-tools).
 
 The [context example](../examples/chat-context-flow.json) reuses that calculator chatflow and exposes
 two independent optional result outputs, with no convergence node:
