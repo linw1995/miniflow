@@ -359,7 +359,9 @@ or explicit CLI arguments. The DeepSeek settings travel through caller-owned `to
 model arguments or hidden child environment lookups. Network-bound
 Search and Fetch nodes also make the nested execution PiPs easier to observe than the calculator's
 short local operations. See [configured Flow tools](workflows.md#configured-flow-tools) for setup,
-provider charges, and latency limitations.
+provider charges, and latency limitations. Checked tool failures such as a Fetch HTTP 404 are returned
+to the model as tool results rather than interrupting the whole Agent. Any subsequent request is an
+explicit model decision, not a hidden provider retry; runtime and cancellation failures still stop execution.
 
 The [context example](../examples/chat-context-flow.json) reuses that calculator chatflow and exposes
 two independent optional result outputs, with no convergence node:
