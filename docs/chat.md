@@ -351,6 +351,11 @@ completed rounds and usages. `answer` remains an optional stream of assistant te
 preambles; it does not carry a live tool lifecycle protocol. Catalog projection runs once before the
 first model call. See [configured Flow tools](workflows.md#configured-flow-tools).
 
+Checked tool-operation failures, such as a DeepSeek Fetch HTTP 404, are returned to the model as tool
+results rather than interrupting the whole Agent. The failed exchange remains in the transcript;
+any subsequent request is an explicit model decision, not a hidden provider retry. Runtime and
+cancellation failures still stop execution.
+
 The [context example](../examples/chat-context-flow.json) reuses that calculator chatflow and exposes
 two independent optional result outputs, with no convergence node:
 

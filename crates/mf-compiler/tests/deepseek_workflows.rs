@@ -1,7 +1,10 @@
 #![cfg(unix)]
 
 mod common;
+#[path = "common/tool_values.rs"]
+mod tool_values;
 
+extern crate mfn_code as _;
 extern crate mfn_core as _;
 extern crate mfn_deepseek as _;
 
@@ -100,6 +103,213 @@ fn run(executable: &Path, inputs: &Value) -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).unwrap()
+}
+
+fn web_agent(server: &Server) -> Value {
+    use std::collections::BTreeMap;
+    use tool_values::{FlowTool, configured_agent};
+
+    let mut tools = BTreeMap::new();
+    for (name, argument, outputs) in [
+        ("search", "query", vec!["results"]),
+        ("fetch", "url", vec!["title", "content"]),
+    ] {
+        let body = json!({
+            "version":"2026-10-28",
+            "nodes":[
+                {"id":"params","kind":"builtin.parameters","config":{"parameters":{
+                    argument:{"type":"string","secret":false},
+                    "base_url":{"type":"string","default":server.base_url},
+                    "api_key":{"type":"string","default":"synthetic-tool-key"}
+                }}},
+                {"id":name,"kind":format!("builtin.deepseek.{name}"),"config":{
+                    "base_url":{"$ref":"params.base_url"},
+                    "api_key":{"$ref":"params.api_key"}
+                },"inputs":{argument:{"from":{"node":"params","port":argument}}}}
+            ],
+            "outputs":outputs.into_iter().map(|port| json!({"name":port,"node":name,"port":port})).collect::<Vec<_>>()
+        });
+        tools.insert(
+            name.into(),
+            FlowTool {
+                description: format!("Use DeepSeek {name}."),
+                parameters: serde_json::from_value(
+                    json!({argument:{"description":"The public request argument."}}),
+                )
+                .unwrap(),
+                body: serde_json::from_value(body).unwrap(),
+            },
+        );
+    }
+    fn add_provider(value: &mut Value) {
+        match value {
+            Value::Object(fields) => {
+                if fields.contains_key("version") && fields.contains_key("nodes") {
+                    fields.get_mut("dependencies").unwrap()["deepseek"] = json!({
+                        "package":"mfn-deepseek", "path":common::crates_dir().join("builtin-nodes/deepseek")
+                    });
+                }
+                for child in fields.values_mut() {
+                    add_provider(child);
+                }
+            }
+            Value::Array(values) => values.iter_mut().for_each(add_provider),
+            _ => {}
+        }
+    }
+    let mut value = serde_json::to_value(configured_agent(tools)).unwrap();
+    add_provider(&mut value);
+    value["outputs"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|output| output["name"] != "answer");
+    value
+}
+
+fn model_tool_call(id: &str, name: &str, arguments: Value) -> mfn_llm::test_support::Reply {
+    mfn_llm::test_support::Reply::json(json!({
+        "id":"tool-response","object":"chat.completion","created":0,"model":"example-model",
+        "choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{
+            "id":id,"type":"function","function":{"name":name,"arguments":arguments.to_string()}
+        }]},"finish_reason":"tool_calls"}],
+        "usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}
+    }))
+}
+
+#[test]
+fn checked_fetch_failure_reaches_agent_and_explicit_alternate_source_without_private_bindings() {
+    let results = json!([{
+        "rerank_score":2.4,"title":"Release","url":"https://example.com/missing",
+        "snippet":"Snippet","summary":"Summary","content":"Content","site_name":null,
+        "site_icon":null,"date":null,"authority":3
+    },{
+        "rerank_score":2.0,"title":"Alternate","url":"https://example.com/alternate",
+        "snippet":"Snippet","summary":"Summary","content":"Content","site_name":null,
+        "site_icon":null,"date":null,"authority":3
+    }]);
+    let mut missing = Reply::json(json!({"error":{"message":"synthetic-tool-key remote-secret"}}));
+    missing.status = 404;
+    let attempt = [
+        Reply::search(results),
+        missing,
+        Reply::fetch("Alternate", "# Markdown"),
+    ];
+    let server = Server::start(attempt.iter().cloned().cycle().take(6).collect());
+    let model = mfn_llm::test_support::Server::start(
+        (0..2)
+            .flat_map(|_| {
+                [
+                    model_tool_call("search", "search", json!({"query":"Release sources"})),
+                    model_tool_call(
+                        "missing",
+                        "fetch",
+                        json!({"url":"https://example.com/missing"}),
+                    ),
+                    model_tool_call(
+                        "alternate",
+                        "fetch",
+                        json!({"url":"https://example.com/alternate"}),
+                    ),
+                    mfn_llm::test_support::Reply::text("Answer from the alternate source"),
+                ]
+            })
+            .collect(),
+    );
+    let definition = web_agent(&server);
+    let root = tempfile::tempdir().unwrap();
+    let executable = compile(&definition, root.path());
+    assert!(server.requests().is_empty());
+    assert!(model.requests().is_empty());
+    let inputs = json!({
+        "params.messages":[{"role":"user","content":"Find a readable release source."}],
+        "params.model":"example-model", "params.base_url":model.base_url,
+        "params.api_key":"synthetic-model-key"
+    });
+    let memory = run_memory(&definition, &inputs);
+    fs::remove_file(root.path().join("flow.json")).unwrap();
+    fs::remove_dir_all(root.path().join("build")).unwrap();
+    let standalone = run(&executable, &inputs);
+    for output in [memory, standalone] {
+        assert_eq!(output["status"], "succeeded", "{output}");
+        assert_eq!(output["text"], "Answer from the alternate source");
+        assert_eq!(output["usages"].as_array().unwrap().len(), 4);
+        let messages = &output["messages"];
+        let transcript: Vec<mfn_llm::ChatMessage> =
+            serde_json::from_value(messages.clone()).unwrap();
+        mfn_llm::validate_transcript(&transcript, mfn_llm::TranscriptMode::Complete).unwrap();
+        assert_eq!(transcript.len(), 7);
+        assert_eq!(messages[3]["tool_call_id"], "missing");
+        let failed: Value = serde_json::from_str(messages[3]["content"].as_str().unwrap()).unwrap();
+        assert!(
+            failed["error"]
+                .as_str()
+                .unwrap()
+                .contains("HTTP 404 Not Found")
+        );
+        assert_eq!(messages[5]["tool_call_id"], "alternate");
+        assert_eq!(
+            serde_json::from_str::<Value>(messages[5]["content"].as_str().unwrap()).unwrap(),
+            json!({"title":"Alternate","content":"# Markdown"})
+        );
+        assert!(!output.to_string().contains("synthetic-tool-key"));
+        assert!(!output.to_string().contains("remote-secret"));
+    }
+    let requests = model.requests();
+    assert_eq!(requests.len(), 8);
+    for round in requests.as_chunks::<4>().0 {
+        assert!(
+            round[2].body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| {
+                    message["role"] == "tool"
+                        && message["content"]
+                            .as_str()
+                            .is_some_and(|content| content.contains("HTTP 404 Not Found"))
+                })
+        );
+        for request in round {
+            let body = request.body.to_string();
+            for private in [
+                "synthetic-tool-key",
+                "synthetic-model-key",
+                "remote-secret",
+                &server.base_url,
+            ] {
+                assert!(!body.contains(private), "{body}");
+            }
+            assert!(request.headers.contains("Bearer synthetic-model-key"));
+            for tool in request.body["tools"].as_array().unwrap() {
+                let expected = if tool["function"]["name"] == "fetch" {
+                    json!(["url"])
+                } else {
+                    json!(["query"])
+                };
+                let properties = tool["function"]["parameters"]["properties"]
+                    .as_object()
+                    .unwrap();
+                assert_eq!(json!(properties.keys().collect::<Vec<_>>()), expected);
+            }
+        }
+    }
+    let requests = server.requests();
+    assert_eq!(requests.len(), 6);
+    for round in requests.as_chunks::<3>().0 {
+        assert!(
+            round[0]
+                .headers
+                .starts_with("POST /prefix/v1/tools/search ")
+        );
+        assert_eq!(round[1].body, json!({"url":"https://example.com/missing"}));
+        assert_eq!(
+            round[2].body,
+            json!({"url":"https://example.com/alternate"})
+        );
+        for request in round {
+            assert!(request.headers.contains("Bearer synthetic-tool-key"));
+        }
+    }
 }
 
 #[test]
