@@ -232,9 +232,14 @@ fn next_completion(
                 resolution,
                 status,
                 capture_error,
+                stderr,
                 ..
             }) => {
-                assert!(status.is_none_or(|status| status.success()));
+                assert!(
+                    status.is_none_or(|status| status.success()),
+                    "{status:?}: {stderr}; {:?}",
+                    resolution.as_ref().err()
+                );
                 assert!(capture_error.is_none(), "{capture_error:?}");
                 return resolution.unwrap();
             }

@@ -213,6 +213,22 @@ mod tests {
     }
 
     #[test]
+    fn tool_focus_tolerates_not_yet_rendered_keys_and_anchors_existing_headers() {
+        let mut transcript = Transcript::default();
+        assert!(!transcript.focus("missing"));
+        transcript.begin(20);
+        transcript.literal(
+            "tool".into(),
+            "Tool result\none\ntwo\nthree",
+            Style::default(),
+        );
+        assert_eq!(transcript.top(2, 0), 2);
+        assert!(transcript.focus("tool"));
+        assert_eq!(transcript.top(2, 1), 0);
+        assert_eq!(screen(&transcript, 0, 1), ["Tool result"]);
+    }
+
+    #[test]
     fn browsing_stays_anchored_while_tail_following_advances() {
         let mut transcript = Transcript::default();
         transcript.begin(20);

@@ -165,10 +165,38 @@ impl LivePreview {
             self.omitted = true;
             return;
         }
-        let index = self.tools.iter().position(|t| {
-            (!source.is_empty() && t.source == source) || (!id.is_empty() && t.id == id)
-        });
+        let by_source = self
+            .tools
+            .iter()
+            .position(|t| !source.is_empty() && t.source == source);
+        let by_id = self.tools.iter().position(|t| !id.is_empty() && t.id == id);
+        // Independently forwarded streams can deliver execution before the final call identity.
+        let index = match (by_source, by_id) {
+            (Some(source_index), Some(id_index)) if source_index != id_index => {
+                let duplicate = self.tools.remove(id_index);
+                self.order
+                    .retain(|item| !matches!(item, PreviewItem::Tool(index) if *index == id_index));
+                for item in &mut self.order {
+                    if let PreviewItem::Tool(index) = item
+                        && *index > id_index
+                    {
+                        *index -= 1;
+                    }
+                }
+                let index = source_index - usize::from(id_index < source_index);
+                let tool = &mut self.tools[index];
+                if tool.content.is_none() {
+                    tool.content = duplicate.content;
+                    tool.state = duplicate.state;
+                }
+                Some(index)
+            }
+            _ => by_source.or(by_id),
+        };
         let index = if let Some(index) = index {
+            if self.tools[index].source.is_empty() && !source.is_empty() {
+                self.tools[index].source = source.clone();
+            }
             index
         } else if self.order.len() < MAX_PREVIEW_SEGMENTS {
             self.order.push(PreviewItem::Tool(self.tools.len()));
@@ -193,8 +221,8 @@ impl LivePreview {
                 if let Some(call) = call {
                     tool.id = call.id;
                     tool.name = call.name;
-                    tool.arguments =
-                        serde_json::to_string_pretty(&call.arguments).unwrap_or_default();
+                    tool.arguments = serde_json::to_string_pretty(&call.arguments)
+                        .unwrap_or_else(|_| "[Arguments unavailable]".into());
                     if tool.state == ToolState::Receiving {
                         tool.state = ToolState::Queued;
                     }
@@ -363,6 +391,107 @@ mod tests {
     }
 
     #[test]
+    fn independently_forwarded_execution_events_reconcile_with_partial_call_identity() {
+        for execution_first in [false, true] {
+            for completed in [false, true] {
+                let mut preview = LivePreview::default();
+                preview.begin(Invocation::new("session"));
+                let execution = |preview: &mut LivePreview| {
+                    activity(
+                        preview,
+                        ToolActivity::Running {
+                            tool_call_id: "id".into(),
+                            name: "lookup".into(),
+                        },
+                    );
+                    if completed {
+                        activity(
+                            preview,
+                            ToolActivity::Result {
+                                tool_call_id: "id".into(),
+                                failed: false,
+                                content: "result".into(),
+                            },
+                        );
+                    }
+                };
+                if execution_first {
+                    execution(&mut preview);
+                }
+                activity(
+                    &mut preview,
+                    ToolActivity::Call {
+                        model_call_id: "model".into(),
+                        part: 0,
+                        arguments: "{".into(),
+                        call: None,
+                    },
+                );
+                if !execution_first {
+                    execution(&mut preview);
+                }
+                assert_eq!(preview.tools.len(), 2);
+                activity(
+                    &mut preview,
+                    ToolActivity::Call {
+                        model_call_id: "model".into(),
+                        part: 0,
+                        arguments: String::new(),
+                        call: Some(
+                            serde_json::from_value(
+                                serde_json::json!({"id":"id","name":"lookup","arguments":{}}),
+                            )
+                            .unwrap(),
+                        ),
+                    },
+                );
+                assert_eq!(preview.tools.len(), 1);
+                assert_eq!(preview.order.len(), 1);
+                assert!(matches!(preview.order[0], PreviewItem::Tool(0)));
+                assert_eq!(preview.tools[0].source, "model:0");
+                assert_eq!(preview.tools[0].id, "id");
+                assert_eq!(
+                    preview.tools[0].state,
+                    if completed {
+                        ToolState::Succeeded
+                    } else {
+                        ToolState::Running
+                    }
+                );
+                assert_eq!(
+                    preview.tools[0].content.as_deref(),
+                    completed.then_some("result")
+                );
+            }
+        }
+        let mut preview = LivePreview::default();
+        preview.begin(Invocation::new("session"));
+        activity(
+            &mut preview,
+            ToolActivity::Running {
+                tool_call_id: "id".into(),
+                name: "lookup".into(),
+            },
+        );
+        activity(
+            &mut preview,
+            ToolActivity::Call {
+                model_call_id: "model".into(),
+                part: 0,
+                arguments: String::new(),
+                call: Some(
+                    serde_json::from_value(
+                        serde_json::json!({"id":"id","name":"lookup","arguments":{}}),
+                    )
+                    .unwrap(),
+                ),
+            },
+        );
+        assert_eq!(preview.tools[0].source, "model:0");
+        assert_eq!(preview.tools.len(), 1);
+    }
+
+    #[test]
     fn tool_only_previews_are_bounded_without_stalling_status_updates() {
         let mut preview = LivePreview::default();
         preview.begin(Invocation::new("session"));
@@ -370,6 +499,13 @@ mod tests {
             &mut preview,
             ToolActivity::Running {
                 tool_call_id: "id".into(),
+                name: "lookup".into(),
+            },
+        );
+        activity(
+            &mut preview,
+            ToolActivity::Running {
+                tool_call_id: "x".repeat(MAX_ID_BYTES + 1),
                 name: "lookup".into(),
             },
         );

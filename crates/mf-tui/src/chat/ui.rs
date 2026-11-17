@@ -1647,6 +1647,11 @@ mod tests {
                 ),
                 &controller,
             );
+            view.focus_tool(false);
+            assert_eq!(
+                view.focused_tool.as_deref(),
+                Some(tool_key(&begun.invocation.turn_id, "first").as_str())
+            );
             for reload in [false, true] {
                 if reload {
                     let page = controller

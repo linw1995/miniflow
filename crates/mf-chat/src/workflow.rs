@@ -1124,7 +1124,17 @@ fn register_runner(
                             .into()
                         }
                     };
-                    sink.send(values.into())?;
+                    // Remote records contain populated ports only; other subscriptions must skip this wave.
+                    let skipped = contract
+                        .preview_streams()
+                        .filter(|name| !values.contains_key(*name))
+                        .map(str::to_owned)
+                        .collect();
+                    sink.send(mf_runtime::NodeResult {
+                        outputs: values,
+                        skipped,
+                        loop_summary: None,
+                    })?;
                     Ok(())
                 };
                 let result = backend.invoke(

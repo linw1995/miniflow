@@ -139,3 +139,64 @@ fn consume(delivery: Delivery) -> PreviewEvent {
     let _ = delivery.receipt.acknowledge();
     delivery.event
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_native_and_serde_codecs_preserve_text_and_tool_event_kinds() {
+        let invocation = Invocation::new("session");
+        for delta in [
+            TextDelta {
+                text: "text".into(),
+                model_call_id: "model".into(),
+            }
+            .into(),
+            crate::ToolActivity::Running {
+                tool_call_id: "tool".into(),
+                name: "lookup".into(),
+            }
+            .into(),
+            crate::ToolActivity::Result {
+                tool_call_id: "tool".into(),
+                failed: true,
+                content: "**literal**".into(),
+            }
+            .into(),
+        ] {
+            let event = PreviewEvent {
+                invocation: invocation.clone(),
+                delta,
+            };
+            event.validate().unwrap();
+            assert_eq!(
+                PreviewEvent::from_values(event.clone().into_values().unwrap()).unwrap(),
+                event
+            );
+            assert_eq!(
+                serde_json::from_value::<PreviewEvent>(serde_json::to_value(&event).unwrap())
+                    .unwrap(),
+                event
+            );
+        }
+        let invalid = PreviewDelta::Tool {
+            activity: crate::ToolActivity::Running {
+                tool_call_id: String::new(),
+                name: "lookup".into(),
+            },
+        };
+        let error = invalid.validate().unwrap_err();
+        assert!(std::error::Error::source(&error).is_some());
+        let mut event = PreviewEvent {
+            invocation,
+            delta: TextDelta {
+                text: "text".into(),
+                model_call_id: "model".into(),
+            }
+            .into(),
+        };
+        event.invocation.call_id.clear();
+        assert!(event.validate().is_err());
+    }
+}

@@ -8,7 +8,12 @@ The chat host decodes only declared streams, validates event kinds and identitie
 
 ## Presentation
 
-The bounded live preview preserves event order and correlates model fragments with wire call IDs. Completed calls reconcile partial argument JSON. Parallel tools keep independent states. Missing terminal results leave outstanding activity visibly interrupted, never successful. Authoritative completion replaces all provisional records, including during save-only recovery and reload.
+The bounded live preview preserves event order and correlates model fragments with wire call IDs.
+Completed calls reconcile partial argument JSON. Parallel tools keep independent states. Independently
+forwarded execution events reconcile with partial call identities without duplicating tools or
+downgrading finished states. Missing terminal results leave outstanding activity visibly interrupted,
+never successful. Authoritative completion replaces all provisional records, including during
+save-only recovery and reload.
 
 Tool results are collapsed by default. Expansion keys combine turn identity and tool-call identity, remaining stable across preview replacement and history reload without changing persisted data. Browse-mode Tab/Shift+Tab selects a result; Space or Ctrl+T toggles it. Tool arguments and results remain literal, with control characters escaped and no image loading. Assistant text retains Markdown rendering.
 
