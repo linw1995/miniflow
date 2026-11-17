@@ -174,7 +174,7 @@ fn catalog_and_parallel_dispatch_use_actual_children_and_one_shared_chain() {
             .keys()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        ["calls", "tool_properties", "tools"]
+        ["calls", "tool_arguments", "tool_properties", "tools"]
     );
     let dispatch = &dispatch_call.children[&"dispatch".into()]["body"];
     assert_eq!(dispatch.children[&"execute".into()].len(), 2);
@@ -607,6 +607,85 @@ fn private_arguments_do_not_hide_other_calls_or_public_selections() {
     let mut names: Vec<_> = names.iter().map(|name| name.as_str()).collect();
     names.sort();
     assert_eq!(names, [Some("[REDACTED]"), Some("echo")]);
+}
+
+#[test]
+fn caller_private_bindings_stay_out_of_model_arguments_and_unrelated_calls() {
+    const TOKEN: &str = "synthetic-caller-bound-token";
+    let private = FlowTool {
+        description: "Use a caller-provided credential.".into(),
+        parameters: BTreeMap::new(),
+        body: body(json!({
+            "version":"2026-10-28", "nodes":[
+                {"id":"params", "kind":"builtin.parameters", "config":{"parameters":{
+                    "token":{"type":"string", "secret":true},
+                    "content":{"type":"string", "default":"ready", "secret":false}
+                }}},
+                {"id":"check", "kind":"builtin.code", "config":{
+                    "language":"cel", "inputs":{"token":"string", "content":"string"},
+                    "code":{"content":format!("token == '{TOKEN}' ? content : 'wrong credential'")}
+                }, "inputs":{
+                    "token":{"from":{"node":"params", "port":"token"}},
+                    "content":{"from":{"node":"params", "port":"content"}}
+                }}
+            ], "outputs":[{"name":"content", "node":"check", "port":"content"}]
+        })),
+    };
+    let definition = configured_tools(BTreeMap::from([
+        ("private".into(), private),
+        ("public".into(), text()),
+    ]));
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let recording = snapshots::Snapshots::memory();
+    let mut context = ExecutionContext::default();
+    context.set_snapshot_recorder(recording.recorder());
+    context.set_workflow_arguments(
+        WorkflowArguments::try_from(json!({
+            "params.calls":[
+                {"id":"one", "name":"private", "arguments":{}},
+                {"id":"two", "name":"public", "arguments":{}},
+                {"id":"three", "name":"private", "arguments":{"token":"model-override"}}
+            ],
+            "params.tool_arguments":{"private":{"token":TOKEN}}
+        }))
+        .unwrap(),
+    );
+    let output = instantiate_compiled(&plan, &registry)
+        .unwrap()
+        .execute_in_context(&mut context)
+        .unwrap();
+    assert_eq!(output["results"][0]["content"].as_str(), Some("ready"));
+    assert!(output["results"][0].contains_secret());
+    assert_eq!(output["results"][1]["content"].as_str(), Some("ready"));
+    assert!(!output["results"][1].contains_secret());
+    let failure: Value =
+        serde_json::from_str(output["results"][2]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(failure["error"], "unknown or secret argument");
+    assert!(
+        !serde_json::to_string(&output["catalog"])
+            .unwrap()
+            .contains(TOKEN)
+    );
+    for entry in recording.history() {
+        let snapshot = entry.snapshot.node(&entry.scope, &entry.node).unwrap();
+        assert!(!serde_json::to_string(snapshot).unwrap().contains(TOKEN));
+    }
+    for arguments in [
+        json!({"missing":{"token":TOKEN}}),
+        json!({"private":{"content":"caller-override"}}),
+        json!({"private":{"unknown":TOKEN}}),
+    ] {
+        let result = instantiate_compiled(&plan, &registry)
+            .unwrap()
+            .execute_with_inputs(
+                WorkflowArguments::try_from(
+                    json!({"params.calls":[], "params.tool_arguments":arguments}),
+                )
+                .unwrap(),
+            );
+        assert!(result.is_err());
+    }
 }
 
 #[test]

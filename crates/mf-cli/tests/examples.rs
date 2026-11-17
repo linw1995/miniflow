@@ -63,8 +63,11 @@ fn calculator_calls() -> Value {
 }
 
 fn streamed_calculator_calls() -> llm_support::Reply {
+    streamed_tool_calls(calculator_calls())
+}
+
+fn streamed_tool_calls(mut calls: Value) -> llm_support::Reply {
     let mut streamed = llm_support::Reply::stream_text("");
-    let mut calls = calculator_calls();
     for (index, call) in calls.as_array_mut().unwrap().iter_mut().enumerate() {
         call["index"] = json!(index);
     }
@@ -108,7 +111,36 @@ fn search_result() -> Value {
     })
 }
 
-fn examples() -> [(&'static str, Option<&'static str>, Value); 24] {
+fn deepseek_calls(fetch: bool) -> Value {
+    if fetch {
+        json!([{"id":"call_fetch","type":"function","function":{"name":"fetch","arguments":"{\"url\":\"https://example.com/release\"}"}}])
+    } else {
+        json!([
+            {"id":"call_search_a","type":"function","function":{"name":"search","arguments":"{\"query\":\"DeepSeek Search API\",\"count\":2}"}},
+            {"id":"call_search_b","type":"function","function":{"name":"search","arguments":"{\"query\":\"DeepSeek Fetch API\",\"count\":2}"}}
+        ])
+    }
+}
+
+fn deepseek_messages() -> Value {
+    let assistant_calls = |fetch| {
+        let calls: Vec<_> = deepseek_calls(fetch).as_array().unwrap().iter().map(|call| {
+            json!({"id":call["id"], "name":call["function"]["name"], "arguments":serde_json::from_str::<Value>(call["function"]["arguments"].as_str().unwrap()).unwrap()})
+        }).collect();
+        json!({"role":"assistant", "content":"", "tool_calls":calls})
+    };
+    let results = json!({"results":[search_result()]}).to_string();
+    json!([
+        assistant_calls(false),
+        {"role":"tool","tool_call_id":"call_search_a","content":results},
+        {"role":"tool","tool_call_id":"call_search_b","content":results},
+        assistant_calls(true),
+        {"role":"tool","tool_call_id":"call_fetch","content":json!({"title":"Example","content":"# Markdown"}).to_string()},
+        assistant("DeepSeek findings: https://example.com/release")
+    ])
+}
+
+fn examples() -> [(&'static str, Option<&'static str>, Value); 25] {
     [
         (
             "deepseek-fetch.json",
@@ -141,6 +173,14 @@ fn examples() -> [(&'static str, Option<&'static str>, Value); 24] {
                 "usages":[context_agent_usage(0), context_agent_usage(1), title_usage("summary", "compaction")],
                 "error":""
             }}),
+        ),
+        (
+            "chat-deepseek-flow.json",
+            None,
+            append_result(
+                deepseek_messages(),
+                json!([agent_usage(0), agent_usage(1), agent_usage(2)]),
+            ),
         ),
         (
             "chat-flow.json",
@@ -260,6 +300,16 @@ fn documented_examples_compile_and_produce_expected_outputs() {
         let source = entry.unwrap().path();
         fs::copy(&source, auxiliary.join(source.file_name().unwrap())).unwrap();
     }
+    let deepseek_auxiliary = definitions.join("agent-deepseek");
+    fs::create_dir(&deepseek_auxiliary).unwrap();
+    for entry in fs::read_dir(workspace().join("examples/agent-deepseek")).unwrap() {
+        let source = entry.unwrap().path();
+        fs::copy(
+            &source,
+            deepseek_auxiliary.join(source.file_name().unwrap()),
+        )
+        .unwrap();
+    }
 
     for (name, input, expected) in examples() {
         let definition = definitions.join(name);
@@ -281,6 +331,14 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                     streamed_calculator_calls(),
                     llm_support::Reply::stream_text(CALCULATOR_ANSWER),
                 ]
+            } else if name == "chat-deepseek-flow.json" {
+                vec![
+                    streamed_tool_calls(deepseek_calls(false)),
+                    streamed_tool_calls(deepseek_calls(true)),
+                    llm_support::Reply::stream_text(
+                        "DeepSeek findings: https://example.com/release",
+                    ),
+                ]
             } else if name == "chat-context-flow.json" {
                 vec![
                     streamed_calculator_calls(),
@@ -298,14 +356,21 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                 vec![llm_support::Reply::text("reply"); 2]
             })
         });
-        let deepseek_server = name.starts_with("deepseek-").then(|| {
-            let reply = if name == "deepseek-search.json" {
-                deepseek_support::Reply::search(json!([search_result()]))
-            } else {
-                deepseek_support::Reply::fetch("Example", "# Markdown")
-            };
-            deepseek_support::Server::start(vec![reply])
-        });
+        let deepseek_server = (name.starts_with("deepseek-") || name == "chat-deepseek-flow.json")
+            .then(|| {
+                let replies = if name == "chat-deepseek-flow.json" {
+                    vec![
+                        deepseek_support::Reply::search(json!([search_result()])),
+                        deepseek_support::Reply::search(json!([search_result()])),
+                        deepseek_support::Reply::fetch("Example", "# Markdown"),
+                    ]
+                } else if name == "deepseek-search.json" {
+                    vec![deepseek_support::Reply::search(json!([search_result()]))]
+                } else {
+                    vec![deepseek_support::Reply::fetch("Example", "# Markdown")]
+                };
+                deepseek_support::Server::start(replies)
+            });
         if let Some(server) = &server
             && !name.starts_with("chat-")
         {
@@ -358,11 +423,19 @@ fn documented_examples_compile_and_produce_expected_outputs() {
             "{name}: compilation emitted warnings:\n{stderr}",
         );
 
-        if matches!(name, "chat-calculator-flow.json" | "chat-context-flow.json") {
+        if matches!(
+            name,
+            "chat-calculator-flow.json" | "chat-context-flow.json" | "chat-deepseek-flow.json"
+        ) {
             // The complete Agent, its tool and provider Flows must be frozen into
             // the runner, not reopened during either model turn or tool dispatch.
             fs::remove_file(&definition).unwrap();
-            fs::remove_dir_all(&auxiliary).unwrap();
+            fs::remove_dir_all(if name == "chat-deepseek-flow.json" {
+                &deepseek_auxiliary
+            } else {
+                &auxiliary
+            })
+            .unwrap();
             fs::remove_dir_all(&build).unwrap();
             if name == "chat-context-flow.json" {
                 fs::remove_file(definitions.join("chat-calculator-flow.json")).unwrap();
@@ -394,6 +467,15 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                     inputs["params.compact"] = true.into();
                 }
                 inputs
+            } else if name == "chat-deepseek-flow.json" {
+                json!({
+                    "params.messages":[{"role":"user","content":"Search DeepSeek Search and Fetch APIs, then read a result."}],
+                    "params.llm_model":"example-model",
+                    "params.llm_base_url":server.base_url,
+                    "params.llm_api_key":"synthetic-llm-key",
+                    "params.deepseek_base_url":deepseek_server.as_ref().unwrap().base_url,
+                    "params.deepseek_api_key":"synthetic-deepseek-key"
+                })
             } else if name.starts_with("chat-") {
                 json!({"params.messages":[{"role":"user","content":"Hello"}], "params.model":"example-model", "params.base_url":server.base_url})
             } else if name == "llm-tools.json" {
@@ -409,7 +491,14 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                 .env("NO_PROXY", "127.0.0.1,localhost")
                 .env("no_proxy", "127.0.0.1,localhost");
         }
-        if let Some(server) = &deepseek_server {
+        if name == "chat-deepseek-flow.json" {
+            command
+                .env("DEEPSEEK_BASE_URL", "http://127.0.0.1:1/poisoned")
+                .env("DEEPSEEK_API_KEY", "wrong-deepseek-environment-key");
+        }
+        if let Some(server) = &deepseek_server
+            && name.starts_with("deepseek-")
+        {
             let inputs = if name == "deepseek-search.json" {
                 json!({"params.base_url":server.base_url,"params.query":"DeepSeek"})
             } else {
@@ -445,6 +534,7 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                 | "chat-loop-flow.json"
                 | "chat-calculator-flow.json"
                 | "chat-context-flow.json"
+                | "chat-deepseek-flow.json"
         ) {
             let records: Vec<Value> = serde_json::Deserializer::from_slice(&output.stdout)
                 .into_iter()
@@ -459,6 +549,8 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                 answer,
                 if name == "chat-loop-flow.json" {
                     "replyreply"
+                } else if name == "chat-deepseek-flow.json" {
+                    "DeepSeek findings: https://example.com/release"
                 } else if matches!(name, "chat-calculator-flow.json" | "chat-context-flow.json") {
                     CALCULATOR_ANSWER
                 } else {
@@ -544,6 +636,65 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                         }
                     }
                 }])
+            );
+        }
+        if name == "chat-deepseek-flow.json" {
+            let requests = server.as_ref().unwrap().requests();
+            assert_eq!(requests.len(), 3);
+            for request in &requests {
+                assert_eq!(request.body["model"], "example-model");
+                assert!(request.headers.contains("Bearer synthetic-llm-key"));
+            }
+            let tools = requests[0].body["tools"].as_array().unwrap();
+            assert_eq!(tools.len(), 2);
+            for tool in tools {
+                let function = &tool["function"];
+                let properties = function["parameters"]["properties"].as_object().unwrap();
+                let expected = if function["name"] == "search" {
+                    vec!["count", "query"]
+                } else {
+                    vec!["url"]
+                };
+                assert_eq!(
+                    properties.keys().map(String::as_str).collect::<Vec<_>>(),
+                    expected
+                );
+                assert_eq!(function["parameters"]["additionalProperties"], false);
+            }
+            for request in &requests {
+                let body = request.body.to_string();
+                assert!(!body.contains("synthetic-deepseek-key"));
+                assert!(!body.contains("synthetic-llm-key"));
+                assert!(!body.contains(&deepseek_server.as_ref().unwrap().base_url));
+            }
+            let requests = deepseek_server.as_ref().unwrap().requests();
+            assert_eq!(requests.len(), 3);
+            let queries: std::collections::BTreeSet<_> = requests[..2]
+                .iter()
+                .map(|request| {
+                    assert!(request.headers.starts_with("POST /prefix/v1/tools/search "));
+                    assert!(request.headers.contains("Bearer synthetic-deepseek-key"));
+                    assert_eq!(request.body["count"], 2);
+                    request.body["query"].as_str().unwrap()
+                })
+                .collect();
+            assert_eq!(
+                queries,
+                std::collections::BTreeSet::from(["DeepSeek Search API", "DeepSeek Fetch API"])
+            );
+            assert!(
+                requests[2]
+                    .headers
+                    .starts_with("POST /prefix/v1/tools/fetch ")
+            );
+            assert!(
+                requests[2]
+                    .headers
+                    .contains("Bearer synthetic-deepseek-key")
+            );
+            assert_eq!(
+                requests[2].body,
+                json!({"url":"https://example.com/release"})
             );
         }
         if name == "chat-context-flow.json" {

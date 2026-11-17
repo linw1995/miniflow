@@ -58,7 +58,12 @@ mod tests {
             .find(|node| node.id.as_str() == "repeat")
             .unwrap();
         let loop_inputs = repeat.config["inputs"].as_object().unwrap();
-        assert_eq!(loop_inputs.len(), 6);
+        assert_eq!(loop_inputs.len(), 7);
+        assert_eq!(loop_inputs["tool_arguments"], json!({"map":"object"}));
+        assert_eq!(
+            params.config["parameters"]["tool_arguments"]["default"],
+            json!({})
+        );
         assert_eq!(loop_inputs["tools"], json!({"map":"flow"}));
         assert_eq!(loop_inputs["tool_properties"], json!({"map":"object"}));
         let variables = repeat.config["variables"].as_array().unwrap();

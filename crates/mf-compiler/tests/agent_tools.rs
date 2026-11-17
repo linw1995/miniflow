@@ -334,7 +334,8 @@ fn zero_one_and_three_tool_supersets_keep_the_same_agent_source_and_ports() {
             .unwrap()
     };
     let parameters = node("params")["config"]["parameters"].as_object().unwrap();
-    assert_eq!(parameters.len(), 6);
+    assert_eq!(parameters.len(), 7);
+    assert_eq!(parameters["tool_arguments"]["default"], json!({}));
     assert_eq!(parameters["tools"]["type"], json!({"map":"flow"}));
     assert_eq!(
         parameters["tool_properties"]["type"],
@@ -351,7 +352,8 @@ fn zero_one_and_three_tool_supersets_keep_the_same_agent_source_and_ports() {
     );
     let repeat = node("repeat");
     let shared_inputs = repeat["config"]["inputs"].as_object().unwrap();
-    assert_eq!(shared_inputs.len(), 6);
+    assert_eq!(shared_inputs.len(), 7);
+    assert_eq!(shared_inputs["tool_arguments"], json!({"map":"object"}));
     assert_eq!(shared_inputs["tools"], json!({"map":"flow"}));
     assert_eq!(shared_inputs["tool_properties"], json!({"map":"object"}));
     assert_eq!(shared_inputs["tool_definitions"], json!({"list":"object"}));
@@ -382,7 +384,12 @@ fn zero_one_and_three_tool_supersets_keep_the_same_agent_source_and_ports() {
             .keys()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        ["params.calls", "params.tool_properties", "params.tools"]
+        [
+            "params.calls",
+            "params.tool_arguments",
+            "params.tool_properties",
+            "params.tools"
+        ]
     );
     assert!(dispatch["config"].get("body").is_none());
 

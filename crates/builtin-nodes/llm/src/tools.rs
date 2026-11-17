@@ -7,6 +7,7 @@ use mf_runtime::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use snafu::{ResultExt, Snafu, ensure};
+use std::collections::BTreeMap;
 
 /// Documentation attached to a startup input, not an executable binding.
 ///
@@ -89,10 +90,130 @@ fn encode_factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
 
 inventory::submit! { NodeRegistration { kind: "llm.tool_result", factory: NodeFactory::Plain(encode_factory) } }
 
+struct PrivateArgumentsNode;
+
+#[derive(NodeValue)]
+struct PrivateArgumentsInputs {
+    name: Shared<String>,
+    arguments: Shared<BTreeMap<String, ValueRef>>,
+    bindings: Shared<BTreeMap<String, BTreeMap<String, ValueRef>>>,
+}
+
+#[derive(NodeValue)]
+struct PrivateArgumentsOutputs {
+    arguments: Shared<BTreeMap<String, ValueRef>>,
+}
+
+impl TypedTaskNode for PrivateArgumentsNode {
+    type Input = PrivateArgumentsInputs;
+    type Output = PrivateArgumentsOutputs;
+
+    fn execute(
+        &self,
+        input: Self::Input,
+        _: &mut ExecutionContext,
+    ) -> Result<TypedNodeResult<Self::Output>, NodeExecutionError> {
+        let name = input.name.decode().boxed()?;
+        let private = input.bindings.value().get(name.as_str());
+        let mut arguments = input.arguments.value().clone();
+        if let Some(private) = private {
+            let mut fields = input.arguments.value().as_object().unwrap().clone();
+            fields.extend(private.as_object().unwrap().clone());
+            arguments = ValueRef::object(fields).inherit_secrets([private]);
+        }
+        // Only the selected binding may taint this call. A JSON/CEL round trip
+        // would either lose field markers or hide unrelated public calls.
+        let arguments = arguments.inherit_secrets([input.arguments.value(), input.name.value()]);
+        Ok(PrivateArgumentsOutputs {
+            arguments: Shared::new(arguments).boxed()?,
+        }
+        .into())
+    }
+}
+
+fn private_arguments_factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Config {}
+    let _: Config = deserialize_config(config)?;
+    PreparedNode::typed_task(
+        PrivateArgumentsNode,
+        NodeMetadata {
+            input_bindings: BTreeMap::from([(
+                "bindings".into(),
+                mf_runtime::InputBinding {
+                    secret: true,
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        },
+    )
+}
+
+inventory::submit! { NodeRegistration { kind: "llm.private_arguments", factory: NodeFactory::Plain(private_arguments_factory) } }
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use mf_runtime::{Inputs, PortSpec, ValueType};
+    #[test]
+    fn private_bindings_preserve_secrets_without_hiding_unrelated_calls() {
+        let bindings = ValueRef::from(json!({"private":{"token":"synthetic-token"}})).into_secret();
+        for name in ["private", "public"] {
+            let arguments: ValueRef = json!({"query":"example"}).into();
+            let output = mf_runtime::execute_typed_task(
+                &PrivateArgumentsNode,
+                Inputs::from([
+                    ("name".into(), ValueRef::from(name)),
+                    ("arguments".into(), arguments.clone()),
+                    ("bindings".into(), bindings.clone()),
+                ]),
+                &mut ExecutionContext::default(),
+            )
+            .unwrap()
+            .outputs
+            .remove("arguments")
+            .unwrap();
+            if name == "private" {
+                assert_eq!(output["token"].as_str(), Some("synthetic-token"));
+                assert!(output.contains_secret());
+                assert!(!output.redacted().to_string().contains("synthetic-token"));
+            } else {
+                assert!(output.ptr_eq(&arguments));
+                assert!(!output.contains_secret());
+            }
+        }
+        assert!(private_arguments_factory(json!({})).is_ok());
+        assert!(private_arguments_factory(json!({"unexpected":true})).is_err());
+    }
+
+    #[test]
+    fn private_argument_codecs_preserve_native_secret_values() {
+        let inputs = ValueRef::object([
+            ("name".into(), "private".into()),
+            ("arguments".into(), json!({"query":"example"}).into()),
+            (
+                "bindings".into(),
+                ValueRef::from(json!({"private":{"token":"synthetic-token"}})).into_secret(),
+            ),
+        ]);
+        let decoded =
+            <PrivateArgumentsInputs as mf_runtime::InputValue>::decode(inputs.clone()).unwrap();
+        let encoded = mf_runtime::OutputValue::encode(decoded).unwrap();
+        assert_eq!(encoded, inputs);
+        assert!(encoded["bindings"].contains_secret());
+        let outputs = ValueRef::object([(
+            "arguments".into(),
+            ValueRef::from(json!({"token":"synthetic-token"})).into_secret(),
+        )]);
+        let decoded =
+            <PrivateArgumentsOutputs as mf_runtime::InputValue>::decode(outputs.clone()).unwrap();
+        let encoded = mf_runtime::OutputValue::encode(decoded).unwrap();
+        assert_eq!(encoded, outputs);
+        assert!(encoded["arguments"].contains_secret());
+    }
+
     fn encode_value(call: ValueRef, result: ValueRef, plain_content: Option<bool>) -> ValueRef {
         let mut inputs = Inputs::from([("call".into(), call), ("result".into(), result)]);
         if let Some(plain_content) = plain_content {

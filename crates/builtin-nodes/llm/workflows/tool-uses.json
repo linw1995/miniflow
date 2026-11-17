@@ -34,6 +34,13 @@
               "map": "object"
             },
             "secret": false
+          },
+          "tool_arguments": {
+            "type": {
+              "map": "object"
+            },
+            "default": {},
+            "secret": true
           }
         }
       }
@@ -46,10 +53,16 @@
         "inputs": {
           "calls": {
             "list": "object"
+          },
+          "arguments": {
+            "map": "object"
+          },
+          "tools": {
+            "map": "object"
           }
         },
         "code": {
-          "valid": "calls.all(c, size(c) == 3 && 'id' in c && type(c.id) == string && c.id.matches(r'\\S') && 'name' in c && type(c.name) == string && 'arguments' in c)"
+          "valid": "calls.all(c, size(c) == 3 && 'id' in c && type(c.id) == string && c.id.matches(r'\\S') && 'name' in c && type(c.name) == string && 'arguments' in c) && arguments.all(name, name in tools && arguments[name].all(k, tools[name].interface.parameters.exists(p, p.name == k && p.secret && !p.runtime_only)))"
         }
       },
       "inputs": {
@@ -58,6 +71,18 @@
             "node": "params",
             "port": "calls"
           }
+        },
+        "arguments": {
+          "from": {
+            "node": "params",
+            "port": "tool_arguments"
+          }
+        },
+        "tools": {
+          "from": {
+            "node": "params",
+            "port": "tool_properties"
+          }
         }
       }
     },
@@ -65,7 +90,7 @@
       "id": "require_calls",
       "kind": "builtin.assert",
       "config": {
-        "message": "Tool calls must contain exactly a nonblank string id, a string name, and arguments",
+        "message": "Tool calls must contain exactly a nonblank string id, a string name, and arguments; private arguments must name declared secret inputs of known tools",
         "condition": {
           "source": {
             "output": "calls_valid.valid",
@@ -100,6 +125,9 @@
           },
           "flows": {
             "map": "flow"
+          },
+          "tool_arguments": {
+            "map": "object"
           }
         },
         "body": {
@@ -116,7 +144,7 @@
                 },
                 "code": {
                   "name": "call.name",
-                  "ok": "call.name in tools && type(call.arguments) == map && size(call.arguments) == size(call.arguments.transformMap(k, v, k in tools[call.name].interface.allowed, v)) && tools[call.name].interface.required.all(r, r in call.arguments) && tools[call.name].interface.parameters.all(p, !p.secret || p.has_env || p.has_default)",
+                  "ok": "call.name in tools && type(call.arguments) == map && size(call.arguments) == size(call.arguments.transformMap(k, v, k in tools[call.name].interface.allowed, v)) && tools[call.name].interface.required.all(r, r in call.arguments)",
                   "arguments": "call.name in tools && type(call.arguments) == map ? call.arguments.transformMap(k, v, k in tools[call.name].interface.allowed, v) : {}",
                   "error": "cel.bind(missing, (call.name in tools ? tools[call.name].interface.required.filter(r, !(r in (type(call.arguments) == map ? call.arguments : {}))) : []), {'error': !(call.name in tools) ? 'unknown tool' : type(call.arguments) != map ? 'arguments must be a JSON object' : size(call.arguments) != size(call.arguments.transformMap(k, v, k in tools[call.name].interface.allowed, v)) ? 'unknown or secret argument' : size(missing) > 0 ? 'missing required argument `' + missing[0] + '`' : ''})",
                   "plain": "call.name in tools && tools[call.name].interface.plain"
@@ -157,6 +185,30 @@
               }
             },
             {
+              "id": "private_arguments",
+              "kind": "llm.private_arguments",
+              "inputs": {
+                "name": {
+                  "from": {
+                    "node": "classify",
+                    "port": "name"
+                  }
+                },
+                "arguments": {
+                  "from": {
+                    "node": "classify",
+                    "port": "arguments"
+                  }
+                },
+                "bindings": {
+                  "from": {
+                    "node": "%iteration",
+                    "port": "tool_arguments"
+                  }
+                }
+              }
+            },
+            {
               "id": "execute",
               "kind": "builtin.router",
               "config": {
@@ -177,7 +229,7 @@
                 },
                 "arguments": {
                   "from": {
-                    "node": "classify",
+                    "node": "private_arguments",
                     "port": "arguments"
                   }
                 }
@@ -277,6 +329,12 @@
           "from": {
             "node": "params",
             "port": "tools"
+          }
+        },
+        "tool_arguments": {
+          "from": {
+            "node": "params",
+            "port": "tool_arguments"
           }
         }
       }

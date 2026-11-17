@@ -131,7 +131,8 @@ pub fn configured_tools(tools: BTreeMap<String, FlowTool>) -> WorkflowDefinition
     });
     value["nodes"].as_array_mut().unwrap().extend([
         json!({"id":"params","kind":"builtin.parameters","config":{"parameters":{
-            "calls":{"type":{"list":"object"},"secret":false}
+            "calls":{"type":{"list":"object"},"secret":false},
+            "tool_arguments":{"type":{"map":"object"},"default":{},"secret":true}
         }}}),
         json!({"id":"catalog","kind":"workflow.call","config":{"flow":"tool-catalog"},"inputs":{
             "params.properties":edge("tool_properties","value")
@@ -139,7 +140,8 @@ pub fn configured_tools(tools: BTreeMap<String, FlowTool>) -> WorkflowDefinition
         json!({"id":"dispatch","kind":"workflow.call","config":{"flow":"tool-uses"},"inputs":{
             "params.calls":edge("params","calls"),
             "params.tools":edge("tools","value"),
-            "params.tool_properties":edge("tool_properties","value")
+            "params.tool_properties":edge("tool_properties","value"),
+            "params.tool_arguments":edge("params","tool_arguments")
         }}),
     ]);
     // ToolUses reads the same native Flows directly. Its execution still waits

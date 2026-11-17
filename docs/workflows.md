@@ -483,9 +483,18 @@ validation failures are caller-data failures and become business results, while 
 cancellation and infrastructure failures still fail execution.
 
 Assertions cover tool structure; types and requiredness come from the prepared interface. Secret inputs
-must carry an environment or default source, cannot be supplied by model arguments, and are omitted from
-`allowed`. Literal defaults and environment names stay in the native Flow; the catalog exposes only
-effective requiredness and documented public inputs. Because a dynamic caller cannot enumerate
+are omitted from `allowed` and cannot be supplied by model arguments. The optional
+`params.tool_arguments: Map(Object)` input on both `mfn-llm.agent` and `mfn-llm.tool-uses` defaults to
+`{}` and carries caller-owned private arguments, keyed by tool name and then flat startup input name.
+Only declared secret, non-runtime-only inputs of known tools may be configured this way; unknown tools,
+unknown inputs, and public-input overrides fail validation before dispatch. Ordinary Call binding
+validates types and resolves missing private values from the tool's own environment or default source.
+
+Private arguments never enter the model catalog or model-generated call records. A small native
+`llm.private_arguments` merge preserves secret markers for the selected tool without tainting unrelated
+public calls; validation and routing remain in the composed Flow. The private map is a secret startup
+input, including when supplied directly to a generated runner. Literal defaults and environment names
+stay in the native Flow; the catalog exposes only effective requiredness and documented public inputs. Because a dynamic caller cannot enumerate
 unexpected keys, an unknown-argument report is coarser than a compiled adapter's single-key message;
 a missing required argument is still named.
 
@@ -524,6 +533,44 @@ The calculator supports add/subtract/multiply/divide and plain-text numeric resu
 nix develop --command cargo run -p mf-cli --features development-support -- compile examples/chat-calculator-flow.json --output target/chat-calculator
 nix develop --command cargo run -p mf-cli --features development-support -- run target/chat-calculator --chat --params.model your-model
 ```
+
+The [DeepSeek web Agent](../examples/chat-deepseek-flow.json) composes the same Agent with
+[Search](../examples/agent-deepseek/search.json) and [Fetch](../examples/agent-deepseek/fetch.json)
+tool Flows. Independent searches can run in parallel; subsequent rounds can fetch a discovered URL
+before answering. Search returns structured results, and Fetch returns the page title and Markdown.
+The model sees only `query` and optional `count` for Search, or `url` for Fetch. Both wrappers keep
+credentials and the tool endpoint outside the model's argument schema. The caller builds the trusted
+`tool_arguments` map from explicit root parameters and forwards it through the unchanged Agent loop.
+
+The example exposes distinct settings for each provider:
+
+| Root parameter | Purpose | Environment fallback / default |
+| --- | --- | --- |
+| `params.llm_model` | Chat model | `your-model` |
+| `params.llm_base_url` | Chat Completions prefix | `https://api.openai.com/v1` |
+| `params.llm_api_key` | Chat model credential | `OPENAI_API_KEY` |
+| `params.deepseek_base_url` | Search/Fetch prefix | `DEEPSEEK_BASE_URL` / `https://api.deepseek.com` |
+| `params.deepseek_api_key` | Search/Fetch credential | `DEEPSEEK_API_KEY` |
+
+Explicit arguments override environment fallbacks. The model and tool credentials are never implicitly
+shared, even when both services are provided by DeepSeek. Export the two keys in your shell, then run:
+
+```sh
+nix develop --command cargo run -p mf-cli --features development-support -- compile examples/chat-deepseek-flow.json --output target/chat-deepseek
+nix develop --command cargo run -p mf-cli --features development-support -- run target/chat-deepseek --chat --params.llm_model your-model --params.llm_base_url https://api.openai.com/v1 --params.deepseek_base_url https://api.deepseek.com
+```
+
+`params.llm_api_key` and `params.deepseek_api_key` can also be supplied explicitly, although environment
+fallbacks avoid putting credentials in shell history and process arguments. Tool wrappers receive both
+settings as ordinary private Call inputs and do not independently read credential or endpoint variables.
+Compilation requires neither credential and makes no provider requests.
+
+For PiP observation, request two independent searches followed by fetching their useful sources.
+The running tool path ends at `builtin.deepseek.search` or `builtin.deepseek.fetch` beneath the
+Agent Loop, dispatch Call, parallel Iteration, and Router. Actual network latency determines how
+long each node remains visible; this example does not insert artificial delays or force tool use.
+Search and Fetch requests may incur provider charges. Their failures and cancellation retain the
+existing tool-dispatch behavior; the example does not add hidden retries.
 
 The [context-replacement example](../examples/chat-context-flow.json) calls the same calculator Flow,
 then selects either its unchanged `append` result or a separate `replace_context` branch. With

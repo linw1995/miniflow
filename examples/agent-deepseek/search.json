@@ -1,0 +1,73 @@
+{
+  "version": "2026-10-28",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../../crates/builtin-nodes/core"
+    },
+    "deepseek": {
+      "package": "mfn-deepseek",
+      "path": "../../crates/builtin-nodes/deepseek"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "query": {
+            "type": "string",
+            "secret": false
+          },
+          "count": {
+            "type": "uint",
+            "default": 5,
+            "secret": false
+          },
+          "api_key": {
+            "type": "string",
+            "secret": true
+          },
+          "base_url": {
+            "type": "string",
+            "secret": true
+          }
+        }
+      }
+    },
+    {
+      "id": "search",
+      "kind": "builtin.deepseek.search",
+      "config": {
+        "api_key": {
+          "$ref": "params.api_key"
+        },
+        "base_url": {
+          "$ref": "params.base_url"
+        }
+      },
+      "inputs": {
+        "query": {
+          "from": {
+            "node": "params",
+            "port": "query"
+          }
+        },
+        "count": {
+          "from": {
+            "node": "params",
+            "port": "count"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "results",
+      "node": "search",
+      "port": "results"
+    }
+  ]
+}

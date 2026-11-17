@@ -52,6 +52,13 @@
               "map": "object"
             },
             "secret": false
+          },
+          "tool_arguments": {
+            "type": {
+              "map": "object"
+            },
+            "default": {},
+            "secret": true
           }
         }
       }
@@ -87,6 +94,9 @@
             "map": "flow"
           },
           "tool_properties": {
+            "map": "object"
+          },
+          "tool_arguments": {
             "map": "object"
           }
         },
@@ -300,6 +310,12 @@
                     "node": "%loop",
                     "port": "tool_properties"
                   }
+                },
+                "params.tool_arguments": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "tool_arguments"
+                  }
                 }
               }
             },
@@ -479,6 +495,12 @@
           "from": {
             "node": "params",
             "port": "tool_properties"
+          }
+        },
+        "tool_arguments": {
+          "from": {
+            "node": "params",
+            "port": "tool_arguments"
           }
         }
       }

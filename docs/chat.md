@@ -338,7 +338,7 @@ names take precedence. Title candidates are trimmed, nonempty, free of control c
 most 120 characters. Invalid or stale candidates do not prevent saving the main result. The original
 candidate remains in the canonical result for replay; read the saved session for the applied title.
 
-## Calculator Agent and context replacement
+## Tool Agents and context replacement
 
 The [calculator example](../examples/chat-calculator-flow.json) calls the fixed `mfn-llm.agent` Flow
 with a complete `params.messages` request, `Map(Flow)` tools, and matching `Map(Object)` properties.
@@ -350,6 +350,16 @@ assistant without echoing the admitted request. Captured failures and iteration 
 completed rounds and usages. `answer` remains an optional stream of assistant text, including tool
 preambles; it does not carry a live tool lifecycle protocol. Catalog projection runs once before the
 first model call. See [configured Flow tools](workflows.md#configured-flow-tools).
+
+The [DeepSeek web Agent](../examples/chat-deepseek-flow.json) uses the same contract with separate
+Search and Fetch tool Flows. The model can issue parallel searches and fetch discovered pages in later
+rounds. Its root parameters separate `llm_model`, `llm_base_url`, and `llm_api_key` from
+`deepseek_base_url` and `deepseek_api_key`. Keys can come from `OPENAI_API_KEY` and `DEEPSEEK_API_KEY`
+or explicit CLI arguments. The DeepSeek settings travel through caller-owned `tool_arguments`, not
+model arguments or hidden child environment lookups. Network-bound
+Search and Fetch nodes also make the nested execution PiPs easier to observe than the calculator's
+short local operations. See [configured Flow tools](workflows.md#configured-flow-tools) for setup,
+provider charges, and latency limitations.
 
 The [context example](../examples/chat-context-flow.json) reuses that calculator chatflow and exposes
 two independent optional result outputs, with no convergence node:
