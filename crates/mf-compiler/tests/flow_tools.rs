@@ -192,12 +192,21 @@ fn catalog_and_parallel_dispatch_use_actual_children_and_one_shared_chain() {
             .iter()
             .all(|node| node.kind != "workflow.call")
     );
-    assert!(
+    assert_eq!(
         dispatch
             .definition
             .nodes
             .iter()
-            .all(|node| node.kind != "llm.tool_arguments")
+            .map(|node| node.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from([
+            mf_runtime::ITERATION_INPUT_ID,
+            "classify",
+            "encode",
+            "execute",
+            "fail",
+            "gate",
+        ]),
     );
     assert_eq!(
         dispatch
@@ -564,7 +573,7 @@ fn malformed_call_batches_fail_before_any_tool_effects() {
 }
 
 #[test]
-fn private_arguments_do_not_hide_other_calls_or_public_selections() {
+fn secret_model_arguments_do_not_hide_unrelated_calls_or_public_selections() {
     use mf_runtime::ValueRef;
     let definition = configured_tools(BTreeMap::from([("echo".into(), text())]));
     let registry = NodeRegistry::from_inventory().unwrap();
