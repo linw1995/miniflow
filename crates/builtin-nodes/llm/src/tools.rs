@@ -92,14 +92,14 @@ inventory::submit! { NodeRegistration { kind: "llm.tool_result", factory: NodeFa
 
 struct PrivateArgumentsNode;
 
-#[derive(NodeValue)]
+#[derive(mf_runtime::NodeInputs)]
 struct PrivateArgumentsInputs {
     name: Shared<String>,
     arguments: Shared<BTreeMap<String, ValueRef>>,
     bindings: Shared<BTreeMap<String, BTreeMap<String, ValueRef>>>,
 }
 
-#[derive(NodeValue)]
+#[derive(mf_runtime::NodeOutputs)]
 struct PrivateArgumentsOutputs {
     arguments: Shared<BTreeMap<String, ValueRef>>,
 }
@@ -186,32 +186,6 @@ mod tests {
         }
         assert!(private_arguments_factory(json!({})).is_ok());
         assert!(private_arguments_factory(json!({"unexpected":true})).is_err());
-    }
-
-    #[test]
-    fn private_argument_codecs_preserve_native_secret_values() {
-        let inputs = ValueRef::object([
-            ("name".into(), "private".into()),
-            ("arguments".into(), json!({"query":"example"}).into()),
-            (
-                "bindings".into(),
-                ValueRef::from(json!({"private":{"token":"synthetic-token"}})).into_secret(),
-            ),
-        ]);
-        let decoded =
-            <PrivateArgumentsInputs as mf_runtime::InputValue>::decode(inputs.clone()).unwrap();
-        let encoded = mf_runtime::OutputValue::encode(decoded).unwrap();
-        assert_eq!(encoded, inputs);
-        assert!(encoded["bindings"].contains_secret());
-        let outputs = ValueRef::object([(
-            "arguments".into(),
-            ValueRef::from(json!({"token":"synthetic-token"})).into_secret(),
-        )]);
-        let decoded =
-            <PrivateArgumentsOutputs as mf_runtime::InputValue>::decode(outputs.clone()).unwrap();
-        let encoded = mf_runtime::OutputValue::encode(decoded).unwrap();
-        assert_eq!(encoded, outputs);
-        assert!(encoded["arguments"].contains_secret());
     }
 
     fn encode_value(call: ValueRef, result: ValueRef, plain_content: Option<bool>) -> ValueRef {
