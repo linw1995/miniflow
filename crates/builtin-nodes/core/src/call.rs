@@ -154,6 +154,24 @@ impl CallNode {
         inputs: Inputs,
         context: &mut ExecutionContext,
     ) -> Result<NodeResult, NodeExecutionError> {
+        self.execute_packed_configured(inputs, context, None)
+    }
+
+    pub fn execute_packed_with_flow(
+        &self,
+        inputs: Inputs,
+        context: &mut ExecutionContext,
+        flow: &mf_runtime::FlowValue,
+    ) -> Result<NodeResult, NodeExecutionError> {
+        self.execute_packed_configured(inputs, context, Some(flow))
+    }
+
+    fn execute_packed_configured(
+        &self,
+        inputs: Inputs,
+        context: &mut ExecutionContext,
+        flow: Option<&mf_runtime::FlowValue>,
+    ) -> Result<NodeResult, NodeExecutionError> {
         if let Some(error) = context.cancellation().failure() {
             return Err(error.into());
         }
@@ -166,6 +184,9 @@ impl CallNode {
                 .collect(),
         );
         let outputs = (|| {
+            if let Some(flow) = flow {
+                arguments = flow.invocation_arguments(arguments)?;
+            }
             arguments.qualify_inputs(&self.body.inputs)?;
             self.body.inputs.mark_secrets(&mut arguments);
             self.invoke(arguments, context, &mut mf_runtime::DiscardSink)

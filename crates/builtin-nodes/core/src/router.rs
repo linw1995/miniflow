@@ -123,7 +123,23 @@ impl TaskNode for Router {
             )])
             .into());
         };
-        let mut result = call.execute_packed(inputs, context)?;
+        let configured = inputs
+            .get("flows")
+            .and_then(|flows| flows.get(requested))
+            .and_then(ValueRef::as_flow)
+            .cloned();
+        if inputs.contains_key("flows") && configured.is_none() {
+            return Ok(Outputs::from([(
+                "result".into(),
+                ValueRef::from(serde_json::json!({"error":"unknown or disabled route"}))
+                    .inherit_secrets([&route, enables]),
+            )])
+            .into());
+        }
+        let mut result = match configured {
+            Some(flow) => call.execute_packed_with_flow(inputs, context, &flow)?,
+            None => call.execute_packed(inputs, context)?,
+        };
         for value in result.outputs.values_mut() {
             *value = value.clone().inherit_secrets([&route, enables]);
         }
@@ -272,6 +288,46 @@ mod tests {
                     .get("error")
                     .is_some()
             );
+        }
+    }
+
+    #[test]
+    fn runtime_flow_maps_require_the_selected_capability_but_cannot_replace_static_bodies() {
+        let node = mf_runtime::FlowNode::new("choose", router(None))
+            .into_task()
+            .unwrap();
+        let selected = mf_runtime::FlowValue::new(PreparedSubgraph::new(
+            vec![],
+            vec![PortSpec::new("selected", ValueType::String, true)],
+            |_| panic!("a runtime map cannot replace the frozen body"),
+        ))
+        .unwrap();
+        for (flows, expected) in [
+            (ValueRef::object([]), false),
+            (ValueRef::object([("first".into(), selected.into())]), true),
+        ] {
+            let output = node
+                .node
+                .execute(
+                    Inputs::from([
+                        ("route".into(), "first".into()),
+                        ("arguments".into(), ValueRef::object([])),
+                        ("flows".into(), flows),
+                    ]),
+                    &mut ExecutionContext::default(),
+                )
+                .unwrap();
+            if expected {
+                assert_eq!(
+                    output.outputs["result"]["outputs"]["selected"],
+                    json!("first")
+                );
+            } else {
+                assert_eq!(
+                    output.outputs["result"]["error"],
+                    json!("unknown or disabled route")
+                );
+            }
         }
     }
 

@@ -99,6 +99,14 @@
         "type": "flow",
         "value": {
           "path": "agent-deepseek/search.json"
+        },
+        "inputs": {
+          "api_key": {
+            "$ref": "params.deepseek_api_key"
+          },
+          "base_url": {
+            "$ref": "params.deepseek_base_url"
+          }
         }
       }
     },
@@ -109,53 +117,13 @@
         "type": "flow",
         "value": {
           "path": "agent-deepseek/fetch.json"
-        }
-      }
-    },
-    {
-      "id": "deepseek_arguments",
-      "kind": "builtin.object",
-      "config": {
-        "fields": {
-          "api_key": "string",
-          "base_url": "string"
-        }
-      },
-      "inputs": {
-        "api_key": {
-          "from": {
-            "node": "params",
-            "port": "deepseek_api_key"
-          }
         },
-        "base_url": {
-          "from": {
-            "node": "params",
-            "port": "deepseek_base_url"
-          }
-        }
-      }
-    },
-    {
-      "id": "tool_arguments",
-      "kind": "builtin.object",
-      "config": {
-        "fields": {
-          "search": "object",
-          "fetch": "object"
-        }
-      },
-      "inputs": {
-        "search": {
-          "from": {
-            "node": "deepseek_arguments",
-            "port": "value"
-          }
-        },
-        "fetch": {
-          "from": {
-            "node": "deepseek_arguments",
-            "port": "value"
+        "inputs": {
+          "api_key": {
+            "$ref": "params.deepseek_api_key"
+          },
+          "base_url": {
+            "$ref": "params.deepseek_base_url"
           }
         }
       }
@@ -289,12 +257,6 @@
             "port": "value"
           }
         },
-        "params.tool_arguments": {
-          "from": {
-            "node": "tool_arguments",
-            "port": "value"
-          }
-        },
         "params.messages": {
           "from": {
             "node": "params",
@@ -362,6 +324,16 @@
           }
         }
       }
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "params",
+      "to_node": "search"
+    },
+    {
+      "from_node": "params",
+      "to_node": "fetch"
     }
   ],
   "outputs": [

@@ -1,8 +1,10 @@
 ## Implementation
 
-- [x] Add optional private argument transport to Agent and tool-dispatch Flows.
-- [x] Validate configured tool/input names and keep public model arguments separate.
-- [x] Merge native values while preserving per-tool secret isolation.
-- [x] Separate root LLM and DeepSeek configuration and remove child environment dependencies.
-- [x] Cover native secrecy, invalid bindings, model override rejection, and source-free CLI configuration.
-- [x] Run focused and affected tests, strict specification validation, and repository hooks.
+- [x] Add immutable native Flow input binding and shared context-template preparation.
+- [x] Publish residual callable properties and input ports without configured values.
+- [x] Apply configured values to native and frozen Router calls; reject override aliases.
+- [x] Remove the provisional Agent-private argument map and native merge node.
+- [x] Configure DeepSeek tools directly from separate root provider settings.
+- [x] Cover public and secret bindings, model schema filtering, and unrelated-call isolation.
+- [x] Cover ordinary and source-free calls, producer refresh, dependency failures, and configured runtime-only values.
+- [x] Run focused and affected tests, coverage, strict specification validation, and repository hooks.

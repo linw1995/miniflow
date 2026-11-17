@@ -334,8 +334,7 @@ fn zero_one_and_three_tool_supersets_keep_the_same_agent_source_and_ports() {
             .unwrap()
     };
     let parameters = node("params")["config"]["parameters"].as_object().unwrap();
-    assert_eq!(parameters.len(), 7);
-    assert_eq!(parameters["tool_arguments"]["default"], json!({}));
+    assert_eq!(parameters.len(), 6);
     assert_eq!(parameters["tools"]["type"], json!({"map":"flow"}));
     assert_eq!(
         parameters["tool_properties"]["type"],
@@ -352,8 +351,7 @@ fn zero_one_and_three_tool_supersets_keep_the_same_agent_source_and_ports() {
     );
     let repeat = node("repeat");
     let shared_inputs = repeat["config"]["inputs"].as_object().unwrap();
-    assert_eq!(shared_inputs.len(), 7);
-    assert_eq!(shared_inputs["tool_arguments"], json!({"map":"object"}));
+    assert_eq!(shared_inputs.len(), 6);
     assert_eq!(shared_inputs["tools"], json!({"map":"flow"}));
     assert_eq!(shared_inputs["tool_properties"], json!({"map":"object"}));
     assert_eq!(shared_inputs["tool_definitions"], json!({"list":"object"}));
@@ -384,12 +382,7 @@ fn zero_one_and_three_tool_supersets_keep_the_same_agent_source_and_ports() {
             .keys()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        [
-            "params.calls",
-            "params.tool_arguments",
-            "params.tool_properties",
-            "params.tools"
-        ]
+        ["params.calls", "params.tool_properties", "params.tools"]
     );
     assert!(dispatch["config"].get("body").is_none());
 
@@ -744,6 +737,71 @@ fn native_agent_loop_stops_after_eight_tool_turns() {
 }
 
 #[test]
+fn context_configured_public_inputs_are_excluded_from_model_schema_and_call_records() {
+    let server = Server::start(vec![
+        tool_reply(
+            json!([
+                call(
+                    "configured",
+                    "calculator",
+                    json!({"operation":"add","right":3.0})
+                ),
+                call(
+                    "override",
+                    "calculator",
+                    json!({"operation":"add","left":99.0,"right":3.0})
+                ),
+            ]),
+            false,
+        ),
+        Reply::text("The configured operand was used"),
+    ]);
+    let mut definition = configured_agent(calculator_tools());
+    definition
+        .nodes
+        .iter_mut()
+        .find(|node| node.id.as_str() == "params")
+        .unwrap()
+        .config["parameters"]["fixed_left"] = json!({"type":"double","secret":false});
+    definition
+        .nodes
+        .iter_mut()
+        .find(|node| node.id.as_str() == "tool_calculator")
+        .unwrap()
+        .config["inputs"] = json!({"left":{"$ref":"params.fixed_left"}});
+    definition
+        .order_edges
+        .push(mf_runtime::OrderEdgeDefinition {
+            from_node: "params".into(),
+            to_node: "tool_calculator".into(),
+        });
+    let mut request = inputs(&server);
+    request["params.fixed_left"] = json!(2.0);
+    let (output, recording) = memory(definition, request);
+    assert_success(&output, "The configured operand was used", 2);
+    assert_catalog_once_outside_loop(&recording, 1);
+    assert_eq!(output["messages"][1]["content"], "5.0");
+    assert!(
+        output["messages"][2]["content"]
+            .as_str()
+            .unwrap()
+            .contains("configured argument")
+    );
+    assert!(
+        output["messages"][0]["tool_calls"][0]["arguments"]
+            .get("left")
+            .is_none()
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    for request in requests {
+        let parameters = &request.body["tools"][0]["function"]["parameters"];
+        assert!(parameters["properties"].get("left").is_none());
+        assert_eq!(parameters["required"], json!(["operation", "right"]));
+    }
+}
+
+#[test]
 fn unknown_and_invalid_tool_arguments_are_ordered_results_and_the_agent_can_recover() {
     let calls = json!([
         call("unknown", "missing", json!({})),
@@ -807,7 +865,7 @@ fn unknown_and_invalid_tool_arguments_are_ordered_results_and_the_agent_can_reco
     assert!(errors[3].contains("left"));
     // A dynamic map caller cannot enumerate unexpected keys, so the report is
     // deliberately coarser than a compiled adapter's single-key message.
-    assert!(errors[4].contains("unknown or secret argument"));
+    assert!(errors[4].contains("unknown, secret, or configured argument"));
     assert_eq!(messages[7]["content"], "5.0");
 }
 

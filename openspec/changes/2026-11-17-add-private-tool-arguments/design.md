@@ -1,19 +1,17 @@
 # Design
 
-## Explicit configuration transport
+## Generic Flow configuration
 
-`params.tool_arguments` maps business tool names to objects keyed by flat startup input names. Both the shared Agent and direct tool-dispatch Flow accept it with an empty default. The Agent passes the same immutable map through read-only Loop inputs to dispatch; it never passes the map to model generation or catalog projection.
+A `builtin.constant` with `type: "flow"` may declare `config.inputs`, keyed by unambiguous flat or qualified startup names. Its values are literals or the shared context-template syntax. Preparation validates names, duplicate aliases, template syntax, and literal types without resolving sources or executing the body. The producer declares template references in ordinary node metadata, so existing explicit ancestor and scheduling checks apply.
 
-Dispatch validates configured tool names and input names before executing the batch. Bindings may target only secret inputs that are not declared runtime-only. Model arguments remain restricted to the public interface and cannot replace a private value. Ordinary Call binding performs type checking and resolves any remaining environment/default sources before tool work begins.
+Each producer execution resolves the templates in its own context and publishes a new immutable capability containing the resulting native values. It never retains an ExecutionContext or exposes configuration values through interface properties. Empty configuration preserves the existing constant's identity behavior. Repeated and parallel producer executions cannot share invocation state or stale resolved values.
 
-## Native secret-preserving merge
+## Residual interface and invocation
 
-The composed Flow retains call classification, validation, gating, and routing. `llm.private_arguments` performs only a native value merge after public argument classification. It selects a binding by tool name and preserves the existing argument value when no binding exists. Only the selected binding and this call's original sensitivity influence the merged value.
+Configured inputs are omitted from the capability's input ports and from interface `allowed` and `required`. Their declaration metadata carries `configured: true`, without values, so documentation can remain attached to declared public inputs. Model schemas include only unconfigured public inputs; configured runtime-only values do not cross JSON. Defaults and environment declarations remain fallback sources, not fixed bindings.
 
-A CEL merge would conservatively propagate sensitivity from the entire shared private map, hiding unrelated public calls. A JSON round trip would lose field metadata. The small native merge avoids both problems without capturing caller context or changing frozen Flow identities.
+Native calls merge configured values with fresh supplied arguments before ordinary startup resolution. Frozen Router branches use the same merge while executing their existing compiled body and observation scope. Flat and qualified attempts to override a configured input fail. Bound values retain their types, identities, and secret markers; unrelated calls do not inherit configuration sensitivity. Capability identity distinguishes different bound instances.
 
-## DeepSeek example
+## Shared Agent and example
 
-The root example exposes `llm_model`, `llm_base_url`, `llm_api_key`, `deepseek_base_url`, and `deepseek_api_key`. Credentials have independent environment fallbacks. The root constructs one private DeepSeek configuration object and binds it to Search and Fetch through `tool_arguments`.
-
-Tool wrappers receive credentials and endpoint as required private startup inputs. They do not independently read process environment variables. Integration checks use distinct model/tool endpoints and credentials, poison environment fallbacks, remove authoring sources, and verify successful compiled execution plus unchanged model-facing schemas.
+The Agent continues to receive only tools and properties, with no private-argument transport or merge node. Catalog validation accepts documentation for configured public inputs but filters them from the model schema. The DeepSeek example binds each capability's key and endpoint directly from its separate root parameters and retains explicit producer prerequisites. Its child definitions and application strategy remain ordinary Flows.

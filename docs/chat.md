@@ -349,8 +349,9 @@ The [DeepSeek web Agent](../examples/chat-deepseek-flow.json) uses the same cont
 Search and Fetch tool Flows. The model can issue parallel searches and fetch discovered pages in later
 rounds. Its root parameters separate `llm_model`, `llm_base_url`, and `llm_api_key` from
 `deepseek_base_url` and `deepseek_api_key`. Keys can come from `OPENAI_API_KEY` and `DEEPSEEK_API_KEY`
-or explicit CLI arguments. The DeepSeek settings travel through caller-owned `tool_arguments`, not
-model arguments or hidden child environment lookups. Network-bound
+or explicit CLI arguments. Each tool Flow binds its DeepSeek settings with context templates in the
+producing Flow constant's `config.inputs`; only unconfigured public inputs become model arguments.
+No Agent-specific argument channel or hidden child environment lookup is required. Network-bound
 Search and Fetch nodes also make the nested execution PiPs easier to observe than the calculator's
 short local operations. See [configured Flow tools](workflows.md#configured-flow-tools) for setup,
 provider charges, and latency limitations.

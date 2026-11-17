@@ -345,24 +345,9 @@ impl WorkflowArguments {
     ) -> Result<(), WorkflowInputError> {
         let mut renamed = Vec::new();
         for name in self.0.keys() {
-            if name.contains('.') {
-                continue;
-            }
-            let mut matches = schema
-                .inputs
-                .iter()
-                .filter(|(_, ports)| ports.contains_key(name))
-                .map(|(node, _)| crate::output_id(node, name));
-            match (matches.next(), matches.next()) {
-                (Some(qualified), None) => renamed.push((name.clone(), qualified)),
-                (Some(_), Some(_)) => {
-                    return InvalidSnafu {
-                        path: pointer("", name),
-                        message: "ambiguous workflow input name",
-                    }
-                    .fail();
-                }
-                _ => {}
+            let qualified = schema.qualify_name(name)?;
+            if qualified != *name {
+                renamed.push((name.clone(), qualified));
             }
         }
         for (name, qualified) in renamed {
@@ -375,8 +360,29 @@ impl WorkflowArguments {
 }
 
 impl WorkflowInputSchema {
-    /// Checks supplied values and declarations without resolving external sources.
-    pub fn validate(&self, arguments: &WorkflowArguments) -> Result<(), WorkflowInputError> {
+    /// Normalizes a flat startup name without resolving values or external sources.
+    pub fn qualify_name(&self, name: &str) -> Result<String, WorkflowInputError> {
+        if name.contains('.') {
+            return Ok(name.into());
+        }
+        let mut matches = self
+            .inputs
+            .iter()
+            .filter(|(_, ports)| ports.contains_key(name))
+            .map(|(node, _)| crate::output_id(node, name));
+        match (matches.next(), matches.next()) {
+            (Some(qualified), None) => Ok(qualified),
+            (Some(_), Some(_)) => InvalidSnafu {
+                path: pointer("", name),
+                message: "ambiguous workflow input name",
+            }
+            .fail(),
+            _ => Ok(name.into()),
+        }
+    }
+
+    /// Checks supplied fields without requiring a complete invocation.
+    pub fn validate_values(&self, arguments: &WorkflowArguments) -> Result<(), WorkflowInputError> {
         for (name, value) in &arguments.0 {
             let path = pointer("", name);
             let input = self
@@ -387,6 +393,12 @@ impl WorkflowInputSchema {
                 .validate_shared(value)
                 .context(TypeMismatchSnafu { path })?;
         }
+        Ok(())
+    }
+
+    /// Checks supplied values and declarations without resolving external sources.
+    pub fn validate(&self, arguments: &WorkflowArguments) -> Result<(), WorkflowInputError> {
+        self.validate_values(arguments)?;
         for (node, ports) in &self.inputs {
             for (port, input) in ports {
                 let name = crate::output_id(node, port);
