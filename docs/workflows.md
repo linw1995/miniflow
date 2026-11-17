@@ -488,21 +488,20 @@ same execution-time `$ref` and `$template` expressions as node configuration:
 
 ```json
 {
-  "id": "search",
+  "id": "calculator",
   "kind": "builtin.constant",
   "config": {
     "type": "flow",
-    "value": {"path": "agent-deepseek/search.json"},
+    "value": {"path": "agent-calculator/calculator.json"},
     "inputs": {
-      "api_key": {"$ref": "params.deepseek_api_key"},
-      "base_url": {"$ref": "params.deepseek_base_url"},
-      "count": 5
+      "left": {"$ref": "params.fixed_left"}
     }
   }
 }
 ```
 
-Add an explicit dependency from `params` to `search`; templates do not establish execution order.
+Declare `params.fixed_left` in the caller and add an explicit dependency from `params` to `calculator`;
+templates do not establish execution order.
 Names may be flat when unambiguous or qualified as `node.port`. Preparation validates names, aliases,
 template syntax, and literal types without reading context or environment. Each producer execution
 resolves templates against its own context and publishes an immutable Flow containing only the
@@ -510,9 +509,9 @@ configured native values, not the context itself. Subsequent calls use fresh inv
 
 Configured inputs are removed from `allowed` and `required`, even when public; `parameters` marks them
 with `configured: true` without disclosing values. Only remaining public inputs enter the model schema.
-The example above exposes only `query`; omitting the fixed `count` binding leaves `count` model-visible
-with its ordinary default fallback. Parameter `default` and `env` declarations remain fallback sources,
-not immutable configuration. Tool documentation may describe configured public inputs, but their
+The example above exposes only `operation` and `right`; omitting the `left` binding leaves it
+model-visible again. Parameter `default` and `env` declarations remain fallback sources, not immutable
+configuration. Tool documentation may describe configured public inputs, but their
 fields are omitted from the model schema. Unconfigured runtime-only public inputs remain invalid.
 
 Neither models nor ordinary callers can override configured inputs, including through qualified aliases.
@@ -661,7 +660,9 @@ and typed errors. It returns a `result` envelope containing `outputs` or a recov
 Arguments are conservatively private in snapshots, and business-error envelopes are private.
 Cancellation, observation/contract, resource, and output failures propagate rather than becoming
 business results. Recovery is fail-closed: explicit ordinary node execution failures, including known
-Call wrappers, are recoverable; unknown plugin errors are not assumed to be business failures.
+Call wrappers, are recoverable. Providers may also return a typed
+`NodeExecutionError::BusinessFailed` retaining their own domain-error source. Unknown plugin errors
+are not assumed to be business failures.
 Invocation drains incremental emissions terminally without exposing Router stream ports. Ordinary
 `workflow.call` syntax and topology are unchanged.
 
@@ -1206,6 +1207,14 @@ read credentials or contact DeepSeek. Redirects are not followed, requests are n
 and HTTP errors, malformed responses, deadlines, or cancellation fail the invocation without publishing
 node outputs. Retry policy belongs to the enclosing Flow or host, which can account for the API's per-request
 billing and status-specific retry guidance.
+
+Checked Search/Fetch input errors and non-success HTTP statuses retain typed provider sources through
+`NodeExecutionError::BusinessFailed`. A standalone node or ordinary Call still fails without outputs;
+packed Router/tool calls convert these explicit domain failures into tool-result errors. The Agent can
+then choose another query or URL and produce a terminal answer, with the failed call retained in its
+transcript. Configuration, credential lookup, runtime initialization, cancellation/deadline, and
+response-decoding failures are not reclassified as recoverable tool results. No HTTP retry is added;
+any further tool request must be explicitly issued by the model or caller Flow.
 
 ### LLM tool calls
 

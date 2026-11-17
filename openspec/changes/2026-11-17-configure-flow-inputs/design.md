@@ -12,6 +12,6 @@ Configured inputs are omitted from the capability's input ports and from interfa
 
 Native calls merge configured values with fresh supplied arguments before ordinary startup resolution. Frozen Router branches use the same merge while executing their existing compiled body and observation scope. Flat and qualified attempts to override a configured input fail. Bound values retain their types, identities, and secret markers; unrelated calls do not inherit configuration sensitivity. Capability identity distinguishes different bound instances.
 
-## Shared Agent and example
+## Shared Agent
 
-The Agent continues to receive only tools and properties, with no private-argument transport or merge node. Catalog validation accepts documentation for configured public inputs but filters them from the model schema. The DeepSeek example binds each capability's key and endpoint directly from its separate root parameters and retains explicit producer prerequisites. Its child definitions and application strategy remain ordinary Flows.
+The Agent continues to receive only tools and properties, with no private-argument transport or merge node. Catalog validation accepts documentation for configured public inputs but filters them from the model schema. Native and compiler fixtures verify public settings, credentials, ordinary Calls, and runtime-only callbacks without depending on a specific application or new example.

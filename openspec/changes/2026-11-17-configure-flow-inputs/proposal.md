@@ -11,7 +11,7 @@ Tool Flows need the same context-template configuration available to root-Flow n
 - Project only unconfigured public inputs into the model schema and reject all caller overrides of configured inputs.
 - Share value merging, typing, and secret propagation across native Flow calls and frozen Router calls.
 - Remove the provisional Agent `tool_arguments` channel and `llm.private_arguments` node.
-- Keep separate root model and DeepSeek settings, configuring each tool capability before publication.
+- Configure each tool capability before publication without requiring an application-specific Agent.
 
 ## Impact
 
