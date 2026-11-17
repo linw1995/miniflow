@@ -1,4 +1,4 @@
-use crate::{LlmEmission, LlmExecutionError, TextDelta, ToolCall, ToolCallEvent};
+use crate::{LlmEmission, LlmExecutionError, TextDelta, ToolActivity, ToolCall, ToolCallEvent};
 use futures::StreamExt;
 use mf_runtime::{TypedEmitter, TypedNodeResult};
 use rig_core::{
@@ -50,29 +50,53 @@ pub fn complete(
                         model_call_id: call_id.into(),
                     }),
                     tool_call: None,
+                    tool_call_delta: None,
                 }
             }
-            Item::Event(StreamEvent::End {
-                content: AssistantContent::ToolCall(call),
-                ..
-            }) if allow_tools => LlmEmission {
+            Item::Event(StreamEvent::Arguments { part, json }) if allow_tools => LlmEmission {
                 delta: None,
-                tool_call: Some(ToolCallEvent {
+                tool_call: None,
+                tool_call_delta: Some(ToolActivity::Call {
                     model_call_id: call_id.into(),
-                    call: ToolCall::from_provider(call)?,
+                    part: part.index() as u64,
+                    arguments: json,
+                    call: None,
                 }),
             },
+            Item::Event(StreamEvent::End {
+                part,
+                content: AssistantContent::ToolCall(call),
+            }) if allow_tools => {
+                let call = ToolCall::from_provider(call)?;
+                LlmEmission {
+                    delta: None,
+                    tool_call: Some(ToolCallEvent {
+                        model_call_id: call_id.into(),
+                        call: call.clone(),
+                    }),
+                    tool_call_delta: Some(ToolActivity::Call {
+                        model_call_id: call_id.into(),
+                        part: part.index() as u64,
+                        arguments: String::new(),
+                        call: Some(call),
+                    }),
+                }
+            }
             _ => continue,
         };
-        let skipped = if emission.delta.is_some() {
-            "tool_call"
-        } else {
-            "delta"
-        };
+        let skipped = [
+            ("delta", emission.delta.is_none()),
+            ("tool_call", emission.tool_call.is_none()),
+            ("tool_call_delta", emission.tool_call_delta.is_none()),
+        ]
+        .into_iter()
+        .filter(|(_, absent)| *absent)
+        .map(|(name, _)| name.into())
+        .collect();
         emitter
             .send(TypedNodeResult {
                 outputs: emission,
-                skipped: std::collections::BTreeSet::from([skipped.into()]),
+                skipped,
                 loop_summary: None,
             })
             .context(crate::PublicationSnafu)?;

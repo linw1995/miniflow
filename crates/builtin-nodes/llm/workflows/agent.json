@@ -432,6 +432,18 @@
           ]
         },
         "stream_outputs": {
+          "tool_call": {
+            "node": "turn",
+            "port": "tool_call"
+          },
+          "tool_started": {
+            "node": "dispatch",
+            "port": "tool_started"
+          },
+          "tool_finished": {
+            "node": "dispatch",
+            "port": "tool_finished"
+          },
           "answer": {
             "node": "turn",
             "port": "answer"
@@ -533,6 +545,24 @@
   ],
   "edges": [],
   "outputs": [
+    {
+      "name": "tool_call",
+      "node": "repeat",
+      "port": "tool_call",
+      "optional": true
+    },
+    {
+      "name": "tool_started",
+      "node": "repeat",
+      "port": "tool_started",
+      "optional": true
+    },
+    {
+      "name": "tool_finished",
+      "node": "repeat",
+      "port": "tool_finished",
+      "optional": true
+    },
     {
       "name": "answer",
       "node": "repeat",

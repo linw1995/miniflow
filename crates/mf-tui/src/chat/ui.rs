@@ -46,8 +46,27 @@ fn message(
     transcript: &mut super::transcript::Transcript,
     key: &str,
     message: &mf_chat::ChatMessage,
+    turn: &str,
+    expanded: &BTreeSet<String>,
+    focused: Option<&str>,
 ) {
     use mf_chat::ChatMessage;
+    if let ChatMessage::ToolResult {
+        tool_call_id,
+        content,
+        ..
+    } = message
+    {
+        tool_result(
+            transcript,
+            turn,
+            tool_call_id,
+            content,
+            "Completed",
+            (expanded, focused),
+        );
+        return;
+    }
     let label = match message {
         ChatMessage::User { .. } => "You".into(),
         ChatMessage::System { .. } => "System".into(),
@@ -88,6 +107,45 @@ fn message(
         | ChatMessage::ToolResult { content, .. } => {
             transcript.literal(format!("{key}:body"), content, Style::default());
         }
+    }
+}
+
+fn tool_key(turn: &str, id: &str) -> String {
+    format!("tool-result:{turn}:{id}")
+}
+
+fn tool_result(
+    transcript: &mut super::transcript::Transcript,
+    turn: &str,
+    id: &str,
+    content: &str,
+    status: &str,
+    presentation: (&BTreeSet<String>, Option<&str>),
+) {
+    let (expanded, focused) = presentation;
+    let key = tool_key(turn, id);
+    let open = expanded.contains(&key);
+    transcript.plain(
+        key.clone(),
+        vec![role_label(
+            &format!(
+                "{} Tool result [{}] [{}] {} ({} bytes)",
+                if focused == Some(key.as_str()) {
+                    ">"
+                } else {
+                    " "
+                },
+                id,
+                status,
+                if open { "v" } else { ">" },
+                content.len()
+            ),
+            Color::Yellow,
+            None,
+        )],
+    );
+    if open {
+        transcript.literal(format!("{key}:body"), content, Style::default());
     }
 }
 
@@ -368,6 +426,8 @@ struct ChatView {
     retained: bool,
     reply: Option<PresentedResult>,
     preview: LivePreview,
+    expanded_tools: BTreeSet<String>,
+    focused_tool: Option<String>,
     latest_invocation: Option<Invocation>,
     observation: Option<LocalObservation>,
     show_execution: bool,
@@ -414,6 +474,8 @@ impl ChatView {
             retained: false,
             reply: None,
             preview: LivePreview::default(),
+            expanded_tools: BTreeSet::new(),
+            focused_tool: None,
             latest_invocation: None,
             observation: None,
             show_execution: true,
@@ -460,6 +522,8 @@ impl ChatView {
         self.active = None;
         self.running = false;
         self.preview = LivePreview::default();
+        self.expanded_tools.clear();
+        self.focused_tool = None;
         self.reply = None;
         self.retained = false;
         self.latest_invocation = None;
@@ -775,6 +839,77 @@ impl ChatView {
             self.earlier = false;
         }
     }
+    fn tool_keys(&self) -> Vec<String> {
+        let mut keys = Vec::new();
+        if let Some(page) = &self.page {
+            for record in &page.messages {
+                if let mf_chat::ChatMessage::ToolResult { tool_call_id, .. } =
+                    &record.message.payload
+                {
+                    keys.push(tool_key(&record.message.turn_id, tool_call_id));
+                }
+            }
+        }
+        let turn = self
+            .latest_invocation
+            .as_ref()
+            .map_or("", |i| i.turn_id.as_str());
+        if let Some(reply) = &self.reply {
+            for message in reply.result.display_messages() {
+                if let mf_chat::ChatMessage::ToolResult { tool_call_id, .. } = message {
+                    keys.push(tool_key(turn, tool_call_id));
+                }
+            }
+        } else {
+            keys.extend(
+                self.preview
+                    .tools
+                    .iter()
+                    .filter(|t| t.content.is_some())
+                    .map(|t| tool_key(turn, &t.id)),
+            );
+        }
+        let mut seen = BTreeSet::new();
+        keys.retain(|key| seen.insert(key.clone()));
+        keys
+    }
+
+    fn focus_tool(&mut self, previous: bool) {
+        let keys = self.tool_keys();
+        if keys.is_empty() {
+            return;
+        }
+        let current = self
+            .focused_tool
+            .as_ref()
+            .and_then(|key| keys.iter().position(|k| k == key));
+        let index = match current {
+            Some(index) if previous => (index + keys.len() - 1) % keys.len(),
+            Some(index) => (index + 1) % keys.len(),
+            None => keys.len() - 1,
+        };
+        let key = keys[index].clone();
+        if self.transcript.get_mut().focus(&key) {
+            self.scroll.set(1);
+        }
+        self.focused_tool = Some(key);
+    }
+
+    fn toggle_tool(&mut self) {
+        if self
+            .focused_tool
+            .as_ref()
+            .is_none_or(|key| !self.tool_keys().contains(key))
+        {
+            self.focus_tool(false);
+        }
+        if let Some(key) = &self.focused_tool
+            && !self.expanded_tools.remove(key)
+        {
+            self.expanded_tools.insert(key.clone());
+        }
+    }
+
     fn key(&mut self, key: KeyEvent, controller: &ChatController) -> bool {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
@@ -793,6 +928,10 @@ impl ChatView {
                 KeyCode::Char('s') => return self.act(Action::Switch, controller),
                 KeyCode::Char('e') => {
                     self.show_execution = !self.show_execution;
+                    return false;
+                }
+                KeyCode::Char('t') if self.mode != Mode::Inspect => {
+                    self.toggle_tool();
                     return false;
                 }
                 KeyCode::Char('u') if self.mode == Mode::Input => {
@@ -848,6 +987,9 @@ impl ChatView {
                 _ => self.editor.key(key),
             },
             Mode::Browse => match key.code {
+                KeyCode::Tab => self.focus_tool(false),
+                KeyCode::BackTab => self.focus_tool(true),
+                KeyCode::Char(' ') => self.toggle_tool(),
                 KeyCode::Enter => self.submit(controller),
                 KeyCode::Char('i') | KeyCode::Esc => self.mode = Mode::Input,
                 KeyCode::Up | KeyCode::Char('k') => {
@@ -986,7 +1128,14 @@ impl ChatView {
                 .collect();
             for (index, record) in page.messages.iter().enumerate() {
                 let key = format!("message:{}", record.message.id);
-                message(&mut transcript, &key, &record.message.payload);
+                message(
+                    &mut transcript,
+                    &key,
+                    &record.message.payload,
+                    &record.message.turn_id,
+                    &self.expanded_tools,
+                    self.focused_tool.as_deref(),
+                );
                 let mut metadata = vec![];
                 let last_in_turn = page
                     .messages
@@ -1035,7 +1184,14 @@ impl ChatView {
         if let Some(reply) = &self.reply {
             for (index, record) in reply.result.display_messages().iter().enumerate() {
                 let key = format!("turn:{turn}:display:{index}");
-                message(&mut transcript, &key, record);
+                message(
+                    &mut transcript,
+                    &key,
+                    record,
+                    turn,
+                    &self.expanded_tools,
+                    self.focused_tool.as_deref(),
+                );
                 if index + 1 < reply.result.display_messages().len() {
                     transcript.plain(format!("{key}:gap"), vec![Line::default()]);
                 }
@@ -1052,11 +1208,7 @@ impl ChatView {
             transcript.plain(format!("turn:{turn}:metadata"), metadata);
         } else {
             let loading = self.pending.is_some() || self.running;
-            let has_preview = self
-                .preview
-                .segments
-                .iter()
-                .any(|segment| !segment.text.is_empty());
+            let has_preview = !self.preview.order.is_empty();
             if loading || has_preview {
                 let indicator = loading.then(|| {
                     let frame = (self.animation_started.elapsed().as_millis() / 100
@@ -1068,23 +1220,49 @@ impl ChatView {
                     vec![role_label("Assistant", Color::Cyan, indicator)],
                 );
             }
-            for (index, segment) in self
-                .preview
-                .segments
-                .iter()
-                .filter(|segment| !segment.text.is_empty())
-                .enumerate()
-            {
-                if index > 0 {
-                    transcript.plain(
-                        format!("turn:{turn}:preview:{index}:gap"),
-                        vec![Line::default()],
-                    );
+            for item in &self.preview.order {
+                match *item {
+                    super::preview::PreviewItem::Text(index) => {
+                        let segment = &self.preview.segments[index];
+                        transcript.markdown(
+                            format!("turn:{turn}:preview:{}", segment.model_call_id),
+                            &segment.text,
+                        );
+                    }
+                    super::preview::PreviewItem::Tool(index) => {
+                        let tool = &self.preview.tools[index];
+                        let id = if tool.id.is_empty() {
+                            &tool.source
+                        } else {
+                            &tool.id
+                        };
+                        let key = format!("turn:{turn}:tool:{id}");
+                        let status = tool.state.label(self.preview.incomplete);
+                        transcript.plain(
+                            format!("{key}:label"),
+                            vec![role_label(
+                                &format!("Tool call {} [{}] [{status}]", tool.name, id),
+                                Color::Yellow,
+                                None,
+                            )],
+                        );
+                        transcript.literal(
+                            format!("{key}:arguments"),
+                            &tool.arguments,
+                            Style::default(),
+                        );
+                        if let Some(content) = &tool.content {
+                            tool_result(
+                                &mut transcript,
+                                turn,
+                                id,
+                                content,
+                                status,
+                                (&self.expanded_tools, self.focused_tool.as_deref()),
+                            );
+                        }
+                    }
                 }
-                transcript.markdown(
-                    format!("turn:{turn}:preview:{}", segment.model_call_id),
-                    &segment.text,
-                );
             }
             let mut status = vec![];
             if !loading && has_preview && self.preview.incomplete {
@@ -1126,7 +1304,9 @@ impl ChatView {
         drop(transcript);
         let hint = match self.mode {
             Mode::Input => " Alt+Enter send | Enter newline | Esc browse ",
-            Mode::Browse => " Enter send | i edit | arrows scroll ",
+            Mode::Browse => {
+                " Enter send | i edit | Tab/Shift+Tab tool | Space fold | arrows scroll "
+            }
             _ => "",
         };
         let editor = Paragraph::new(input).wrap(Wrap { trim: false });
@@ -1286,6 +1466,127 @@ mod tests {
     }
 
     #[test]
+    fn live_tools_show_states_and_results_expand_without_changing_conversation_facts() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
+        view.show_execution = false;
+        let controller = ChatController::open(launch).unwrap();
+        let session = controller
+            ._database
+            .create_session("default", None, None)
+            .unwrap();
+        let invocation = Invocation::new(&session.id);
+        view.event(
+            ChatEvent::Submitted {
+                session: session.clone(),
+                invocation: invocation.clone(),
+                prompt: "Question".into(),
+            },
+            &controller,
+        );
+        view.preview.begin(invocation.clone());
+        let call = serde_json::from_value(
+            serde_json::json!({"id":"first","name":"lookup","arguments":{"query":"example"}}),
+        )
+        .unwrap();
+        for activity in [
+            mf_chat::ToolActivity::Call {
+                model_call_id: "model".into(),
+                part: 0,
+                arguments: "{\"query\":".into(),
+                call: None,
+            },
+            mf_chat::ToolActivity::Call {
+                model_call_id: "model".into(),
+                part: 0,
+                arguments: String::new(),
+                call: Some(call),
+            },
+        ] {
+            view.preview
+                .apply(mf_chat::PreviewEvent {
+                    invocation: invocation.clone(),
+                    delta: activity.into(),
+                })
+                .unwrap();
+        }
+        assert!(render(&view, 130, 40).contains("[Queued]"));
+        view.preview
+            .apply(mf_chat::PreviewEvent {
+                invocation: invocation.clone(),
+                delta: mf_chat::ToolActivity::Running {
+                    tool_call_id: "first".into(),
+                    name: "lookup".into(),
+                }
+                .into(),
+            })
+            .unwrap();
+        assert!(render(&view, 130, 40).contains("[Running]"));
+        view.preview
+            .apply(mf_chat::PreviewEvent {
+                invocation: invocation.clone(),
+                delta: mf_chat::ToolActivity::Result {
+                    tool_call_id: "first".into(),
+                    failed: false,
+                    content: "**literal**\n![inert](tool.png)\n\u{1b}[31m".into(),
+                }
+                .into(),
+            })
+            .unwrap();
+        let collapsed = render(&view, 130, 40);
+        assert!(collapsed.contains("[Succeeded]") && !collapsed.contains("**literal**"));
+        view.key(
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+            &controller,
+        );
+        let expanded = render(&view, 130, 40);
+        assert!(expanded.contains("**literal**") && expanded.contains("![inert](tool.png)"));
+        assert!(expanded.contains("\\u{1b}[31m"));
+        assert_eq!(
+            controller
+                ._database
+                .model_context(&session.id)
+                .unwrap()
+                .revision,
+            0
+        );
+        assert_eq!(
+            controller
+                ._database
+                .messages(&session.id, 50, None)
+                .unwrap()
+                .messages
+                .len(),
+            0
+        );
+        view.key(
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+            &controller,
+        );
+        assert!(!render(&view, 130, 40).contains("**literal**"));
+        view.preview
+            .apply(mf_chat::PreviewEvent {
+                invocation: invocation.clone(),
+                delta: mf_chat::ToolActivity::Running {
+                    tool_call_id: "second".into(),
+                    name: "fetch".into(),
+                }
+                .into(),
+            })
+            .unwrap();
+        view.preview.incomplete = true;
+        view.running = false;
+        let interrupted = render(&view, 130, 40);
+        assert!(interrupted.contains("[Interrupted]") && interrupted.contains("[Succeeded]"));
+        view.switch(None);
+        assert!(view.expanded_tools.is_empty() && view.focused_tool.is_none());
+        view.toggle_tool();
+        assert!(view.focused_tool.is_none());
+        controller.close().unwrap();
+    }
+
+    #[test]
     fn full_display_replaces_previews_and_survives_pending_reload_then_save() {
         for replace in [false, true] {
             let root = tempfile::tempdir().unwrap();
@@ -1324,9 +1625,14 @@ mod tests {
                     delta: mf_chat::TextDelta {
                         text: "provisional only".into(),
                         model_call_id: "preview".into(),
-                    },
+                    }
+                    .into(),
                 })
                 .unwrap();
+            view.expanded_tools.extend([
+                tool_key(&begun.invocation.turn_id, "first"),
+                tool_key(&begun.invocation.turn_id, "second"),
+            ]);
             let result = tool_result(replace, false);
             view.event(
                 finish(
@@ -1558,6 +1864,18 @@ mod tests {
             },
             &controller,
         );
+        let collapsed = render(&view, 120, 35);
+        assert!(!collapsed.contains("**literal tool**"));
+        view.mode = Mode::Browse;
+        view.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &controller);
+        view.key(
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+            &controller,
+        );
+        view.key(
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+            &controller,
+        );
         let screen = render(&view, 120, 35);
         assert_eq!(screen.matches("Tool result").count(), 2);
         assert!(screen.contains("[second]") && screen.contains("[first]"));
@@ -1630,7 +1948,8 @@ mod tests {
                 delta: mf_chat::TextDelta {
                     text: "Later preview".into(),
                     model_call_id: "preview".into(),
-                },
+                }
+                .into(),
             })
             .unwrap();
         view.event(
@@ -2471,7 +2790,8 @@ mod tests {
                 delta: mf_chat::TextDelta {
                     text: "**draft prefix**".into(),
                     model_call_id: "model-call".into(),
-                },
+                }
+                .into(),
             })
             .unwrap();
         preview
@@ -2480,7 +2800,8 @@ mod tests {
                 delta: mf_chat::TextDelta {
                     text: "second call output".into(),
                     model_call_id: "second-call".into(),
-                },
+                }
+                .into(),
             })
             .unwrap();
         view.event(
@@ -2585,7 +2906,8 @@ mod tests {
                 delta: mf_chat::TextDelta {
                     text: "streamed answer".into(),
                     model_call_id: "model-call".into(),
-                },
+                }
+                .into(),
             })
             .unwrap();
         view.event(
@@ -2681,11 +3003,15 @@ mod tests {
         );
         view.preview.begin(invocation.clone());
         view.preview
-            .segments
-            .push(super::super::preview::PreviewSegment {
-                model_call_id: "model-call".into(),
-                text: "partial text".into(),
-            });
+            .apply(mf_chat::PreviewEvent {
+                invocation: invocation.clone(),
+                delta: mf_chat::TextDelta {
+                    model_call_id: "model-call".into(),
+                    text: "partial text".into(),
+                }
+                .into(),
+            })
+            .unwrap();
         view.event(
             ChatEvent::Finished {
                 invocation: invocation.clone(),

@@ -94,6 +94,16 @@
       "config": {
         "mode": "parallel",
         "on_error": "terminate",
+        "stream_outputs": {
+          "tool_started": {
+            "node": "start",
+            "port": "activity"
+          },
+          "tool_finished": {
+            "node": "encode",
+            "port": "activity"
+          }
+        },
         "inputs": {
           "tools": {
             "map": "object"
@@ -105,6 +115,18 @@
         "body": {
           "version": "2026-10-28",
           "nodes": [
+            {
+              "id": "start",
+              "kind": "llm.tool_start",
+              "inputs": {
+                "call": {
+                  "from": {
+                    "node": "%iteration",
+                    "port": "item"
+                  }
+                }
+              }
+            },
             {
               "id": "classify",
               "kind": "builtin.code",
@@ -237,6 +259,10 @@
           ],
           "edges": [
             {
+              "from_node": "start",
+              "to_node": "classify"
+            },
+            {
               "from_node": "classify",
               "to_node": "gate"
             },
@@ -293,6 +319,18 @@
     }
   ],
   "outputs": [
+    {
+      "name": "tool_started",
+      "node": "dispatch",
+      "port": "tool_started",
+      "optional": true
+    },
+    {
+      "name": "tool_finished",
+      "node": "dispatch",
+      "port": "tool_finished",
+      "optional": true
+    },
     {
       "name": "results",
       "node": "dispatch",

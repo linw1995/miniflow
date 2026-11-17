@@ -1,20 +1,54 @@
 use crate::{ChatError, Invocation, TextDelta, error::*};
-use mf_runtime::{NodeValue, StreamCancellation, StreamDelivery};
+use mf_runtime::{NodeEnum, NodeValue, StreamCancellation, StreamDelivery};
 use snafu::{ResultExt, ensure};
 use std::sync::mpsc;
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, NodeEnum)]
+#[serde(tag = "kind")]
+#[value(tag = "kind")]
+pub enum PreviewDelta {
+    Text { delta: TextDelta },
+    Tool { activity: crate::ToolActivity },
+}
+
+impl From<TextDelta> for PreviewDelta {
+    fn from(delta: TextDelta) -> Self {
+        Self::Text { delta }
+    }
+}
+
+impl From<crate::ToolActivity> for PreviewDelta {
+    fn from(activity: crate::ToolActivity) -> Self {
+        Self::Tool { activity }
+    }
+}
+
+impl PreviewDelta {
+    pub fn validate(&self) -> Result<(), ChatError> {
+        match self {
+            Self::Text { delta } => ensure!(
+                !delta.text.is_empty() && !delta.model_call_id.trim().is_empty(),
+                InvalidSnafu {
+                    field: "answer stream",
+                    reason: "requires nonempty text and a model call identity"
+                }
+            ),
+            Self::Tool { activity } => activity.validate().boxed().context(PreviewDeliverySnafu)?,
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, NodeValue)]
 pub struct PreviewEvent {
     pub invocation: Invocation,
-    pub delta: TextDelta,
+    pub delta: PreviewDelta,
 }
 
 impl PreviewEvent {
     pub fn validate(&self) -> Result<(), ChatError> {
         ensure!(
-            !self.delta.text.is_empty()
-                && !self.delta.model_call_id.trim().is_empty()
-                && !self.invocation.session_id.trim().is_empty()
+            !self.invocation.session_id.trim().is_empty()
                 && !self.invocation.turn_id.trim().is_empty()
                 && !self.invocation.call_id.trim().is_empty(),
             InvalidSnafu {
@@ -22,7 +56,7 @@ impl PreviewEvent {
                 reason: "requires text, invocation, and model call identities"
             }
         );
-        Ok(())
+        self.delta.validate()
     }
 }
 

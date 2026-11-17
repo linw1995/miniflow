@@ -27,7 +27,7 @@ pub use contract::{
 pub use error::{BackendSnafu, CaptureSnafu, ChatError};
 pub use host::{ChatHost, ChatJob, HostConfig};
 pub use models::{Message, ModelCall, Session, Turn};
-pub use preview::{PreviewConsumer, PreviewEvent, PreviewReceiver};
+pub use preview::{PreviewConsumer, PreviewDelta, PreviewEvent, PreviewReceiver};
 pub use session::{MessagePage, MessageRecord, SessionPage};
 pub use storage::ChatDatabase;
 pub use turn::{Invocation, ModelIdentity};
@@ -38,7 +38,7 @@ pub use usage::{
 };
 
 pub use mfn_llm::{
-    ChatMessage, MessageMetadata, TextDelta, UsageAttribution, UsageNode, UsageScope,
+    ChatMessage, MessageMetadata, TextDelta, ToolActivity, UsageAttribution, UsageNode, UsageScope,
 };
 
 pub use workflow::{ConversationBackend, WorkflowProfile};

@@ -77,7 +77,7 @@ impl ConversationBackend for Runner {
         _: &Invocation,
         request: ConversationInputs,
         context: &mut ExecutionContext,
-        preview: Option<&mut dyn FnMut(mf_chat::TextDelta) -> Result<(), ChatError>>,
+        preview: Option<&mut dyn FnMut(mf_chat::PreviewDelta) -> Result<(), ChatError>>,
         _: Option<&mf_telemetry::observation::Observer>,
     ) -> Result<ConversationResult, ChatError> {
         assert!(context.output("begin.database_path").is_err());
@@ -93,7 +93,8 @@ impl ConversationBackend for Runner {
             mf_chat::TextDelta {
                 text: "preview".into(),
                 model_call_id: "model".into(),
-            },
+            }
+            .into(),
         )?;
         let reply = ConversationResult::assistant(request.prompt()?);
         if self.fail_after_reply {
@@ -127,7 +128,9 @@ fn setup(fail_after_reply: bool) -> (tempfile::TempDir, ChatHost, String, Arc<Ru
 fn registered_runner_streams_inside_a_call_without_linked_child_nodes() {
     let (_root, host, session, runner) = setup(false);
     let (job, receiver) = host.submit_stream(&session, "first").unwrap();
-    assert_eq!(receiver.recv().unwrap().delta.text, "preview");
+    assert!(
+        matches!(receiver.recv().unwrap().delta, mf_chat::PreviewDelta::Text { delta } if delta.text == "preview")
+    );
     assert!(receiver.recv().is_err());
     assert_eq!(job.join().unwrap().result.final_text(), Some("first"));
     assert_eq!(

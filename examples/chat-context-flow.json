@@ -329,6 +329,24 @@
   ],
   "outputs": [
     {
+      "name": "tool_call",
+      "node": "conversation",
+      "port": "tool_call",
+      "optional": true
+    },
+    {
+      "name": "tool_started",
+      "node": "conversation",
+      "port": "tool_started",
+      "optional": true
+    },
+    {
+      "name": "tool_finished",
+      "node": "conversation",
+      "port": "tool_finished",
+      "optional": true
+    },
+    {
       "name": "append",
       "node": "normal",
       "port": "value",

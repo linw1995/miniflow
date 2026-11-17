@@ -206,6 +206,7 @@ fn catalog_and_parallel_dispatch_use_actual_children_and_one_shared_chain() {
             "execute",
             "fail",
             "gate",
+            "start",
         ]),
     );
     assert_eq!(
@@ -501,14 +502,15 @@ fn unknown_and_invalid_calls_do_not_execute_tool_business_work() {
             WorkflowArguments::try_from(json!({"params.calls":[
                 {"id":"unknown", "name":"missing", "arguments":{"value":1}},
                 {"id":"invalid", "name":"effect", "arguments":{"value":"wrong"}},
-                {"id":"valid", "name":"effect", "arguments":{"value":42}}
+                {"id":"valid", "name":"effect", "arguments":{"value":42}},
+                {"id":"blank", "name":"", "arguments":{}}
             ]}))
             .unwrap(),
         )
         .unwrap();
     assert_eq!(TOOL_EXECUTIONS.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_eq!(output["results"][2]["content"], json!("42"));
-    for index in [0, 1] {
+    for index in [0, 1, 3] {
         assert!(
             output["results"][index]["content"]
                 .as_str()

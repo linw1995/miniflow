@@ -1,8 +1,8 @@
-use crate::{ToolCall, ToolResult};
+use crate::{ToolActivity, ToolCall, ToolResult};
 use mf_runtime::{
     ExecutionContext, NodeBuildError, NodeExecutionError, NodeFactory, NodeMetadata,
-    NodeRegistration, NodeValue, PreparedNode, Shared, TypedNodeResult, TypedTaskNode, ValueRef,
-    deserialize_config,
+    NodeRegistration, NodeValue, OutputValue, PreparedNode, Shared, TypedEmitter, TypedNodeResult,
+    TypedTaskStreamNode, ValueRef, deserialize_config,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -19,9 +19,12 @@ pub struct ParameterDescription {
 }
 
 #[derive(Debug, Snafu)]
+#[snafu(visibility(pub(super)))]
 pub enum ToolExecutionError {
     #[snafu(display("tool call ID must not be blank"))]
     BlankCallId,
+    #[snafu(display("tool activity requires nonblank call identities and names"))]
+    InvalidActivity,
 }
 
 impl From<ToolExecutionError> for NodeExecutionError {
@@ -41,50 +44,123 @@ struct EncodeInputs {
 struct EncodeOutputs {
     result: Shared<ToolResult>,
 }
-impl TypedTaskNode for EncodeNode {
+fn encode_result(
+    input: EncodeInputs,
+) -> Result<TypedNodeResult<EncodeOutputs>, NodeExecutionError> {
+    let call = input.call.decode().boxed()?;
+    ensure!(!call.id.trim().is_empty(), BlankCallIdSnafu);
+    let content = if let Some(error) = input.result.get("error") {
+        serde_json::to_string(&json!({"error": error})).boxed()?
+    } else if input.plain_content.unwrap_or(false)
+        && let Some(content) = input
+            .result
+            .get("outputs")
+            .and_then(|value| value.get("content"))
+            .and_then(ValueRef::as_str)
+    {
+        content.to_owned()
+    } else {
+        serde_json::to_string(input.result.get("outputs").unwrap_or(&input.result)).boxed()?
+    };
+    // Business encoding retains the payload; only observation formatting redacts.
+    // Owned strings do not carry sensitivity, so mark the published object explicitly.
+    let result = ValueRef::object([
+        ("tool_call_id".into(), call.id.into()),
+        ("content".into(), content.into()),
+    ])
+    .inherit_secrets([&input.result, input.call.value()]);
+    Ok(EncodeOutputs {
+        result: Shared::new(result).boxed()?,
+    }
+    .into())
+}
+
+#[derive(NodeValue)]
+struct ActivityEmission {
+    activity: Shared<ToolActivity>,
+}
+
+impl TypedTaskStreamNode for EncodeNode {
     type Input = EncodeInputs;
     type Output = EncodeOutputs;
+    type Emission = ActivityEmission;
 
     fn execute(
         &self,
-        input: EncodeInputs,
+        input: Self::Input,
         _: &mut ExecutionContext,
-    ) -> Result<TypedNodeResult<EncodeOutputs>, NodeExecutionError> {
-        let call = input.call.decode().boxed()?;
-        ensure!(!call.id.trim().is_empty(), BlankCallIdSnafu);
-        let content = if let Some(error) = input.result.get("error") {
-            serde_json::to_string(&json!({"error": error})).boxed()?
-        } else if input.plain_content.unwrap_or(false)
-            && let Some(content) = input
-                .result
-                .get("outputs")
-                .and_then(|value| value.get("content"))
-                .and_then(ValueRef::as_str)
-        {
-            content.to_owned()
-        } else {
-            serde_json::to_string(input.result.get("outputs").unwrap_or(&input.result)).boxed()?
-        };
-        // Business encoding retains the payload; only observation formatting redacts.
-        // Owned strings do not carry sensitivity, so mark the published object explicitly.
-        let result = ValueRef::object([
-            ("tool_call_id".into(), call.id.into()),
-            ("content".into(), content.into()),
-        ])
-        .inherit_secrets([&input.result, input.call.value()]);
-        Ok(EncodeOutputs {
-            result: Shared::new(result).boxed()?,
-        }
-        .into())
+        emitter: &mut TypedEmitter<'_, '_, Self::Emission>,
+    ) -> Result<TypedNodeResult<Self::Output>, NodeExecutionError> {
+        let failed = input.result.get("error").is_some();
+        let output = encode_result(input)?;
+        let result = output.outputs.result.decode().boxed()?;
+        let activity = OutputValue::encode(ToolActivity::Result {
+            tool_call_id: result.tool_call_id,
+            failed,
+            content: result.content,
+        })
+        .boxed()?
+        .inherit_secrets([output.outputs.result.value()]);
+        emitter.send(ActivityEmission {
+            activity: Shared::new(activity).boxed()?,
+        })?;
+        Ok(output)
     }
 }
+
+#[derive(NodeValue)]
+struct StartInputs {
+    call: Shared<ToolCall>,
+}
+
+#[derive(NodeValue)]
+struct StartOutputs {}
+
+struct StartNode;
+
+impl TypedTaskStreamNode for StartNode {
+    type Input = StartInputs;
+    type Output = StartOutputs;
+    type Emission = ActivityEmission;
+
+    fn execute(
+        &self,
+        input: Self::Input,
+        _: &mut ExecutionContext,
+        emitter: &mut TypedEmitter<'_, '_, Self::Emission>,
+    ) -> Result<TypedNodeResult<Self::Output>, NodeExecutionError> {
+        let call = input.call.decode().boxed()?;
+        let activity = ToolActivity::Running {
+            tool_call_id: call.id,
+            name: call.name,
+        };
+        activity.validate()?;
+        let activity = OutputValue::encode(activity)
+            .boxed()?
+            .inherit_secrets([input.call.value()]);
+        emitter.send(ActivityEmission {
+            activity: Shared::new(activity).boxed()?,
+        })?;
+        Ok(StartOutputs {}.into())
+    }
+}
+
+fn start_factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Config {}
+    let _: Config = deserialize_config(config)?;
+    PreparedNode::typed_task_stream(StartNode, NodeMetadata::default())
+}
+
+inventory::submit! { NodeRegistration { kind: "llm.tool_start", factory: NodeFactory::Plain(start_factory) } }
 
 fn encode_factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Config {}
     let _: Config = deserialize_config(config)?;
-    PreparedNode::typed_task(EncodeNode, NodeMetadata::default())
+    PreparedNode::typed_task_stream(EncodeNode, NodeMetadata::default())
 }
 
 inventory::submit! { NodeRegistration { kind: "llm.tool_result", factory: NodeFactory::Plain(encode_factory) } }
@@ -98,9 +174,11 @@ mod tests {
         if let Some(plain_content) = plain_content {
             inputs.insert("plain_content".into(), plain_content.into());
         }
-        mf_runtime::execute_typed_task(&EncodeNode, inputs, &mut ExecutionContext::default())
+        encode_result(EncodeInputs::from_values(inputs).unwrap())
             .unwrap()
             .outputs
+            .into_values()
+            .unwrap()
             .remove("result")
             .unwrap()
     }
@@ -228,17 +306,13 @@ mod tests {
             json!({"id":"id", "name":"lookup", "arguments":{}, "extra":true}),
         ] {
             let call = Shared::new(call.into()).unwrap();
-            let error = EncodeNode
-                .execute(
-                    EncodeInputs {
-                        call,
-                        result: json!({}).into(),
-                        plain_content: None,
-                    },
-                    &mut ExecutionContext::default(),
-                )
-                .err()
-                .unwrap();
+            let error = encode_result(EncodeInputs {
+                call,
+                result: json!({}).into(),
+                plain_content: None,
+            })
+            .err()
+            .unwrap();
             assert!(std::error::Error::source(&error).is_some());
         }
     }
@@ -262,19 +336,13 @@ mod tests {
         );
         for id in ["", " \n"] {
             assert!(
-                EncodeNode
-                    .execute(
-                        EncodeInputs {
-                            call: Shared::new(
-                                json!({"id":id, "name":"lookup", "arguments":{}}).into(),
-                            )
-                            .unwrap(),
-                            result: json!({}).into(),
-                            plain_content: None,
-                        },
-                        &mut ExecutionContext::default()
-                    )
-                    .is_err()
+                encode_result(EncodeInputs {
+                    call: Shared::new(json!({"id":id, "name":"lookup", "arguments":{}}).into(),)
+                        .unwrap(),
+                    result: json!({}).into(),
+                    plain_content: None,
+                },)
+                .is_err()
             );
         }
     }

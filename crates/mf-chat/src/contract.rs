@@ -115,12 +115,24 @@ pub use recovery::{
 pub struct ChatContract {
     pub parameters: WorkflowInputSchema,
     pub answer_stream: bool,
+    pub activity_streams: std::collections::BTreeSet<String>,
     pub streaming: bool,
     inputs: BTreeMap<String, String>,
     pub alternatives: ResultAlternatives,
 }
 
 impl ChatContract {
+    pub fn has_previews(&self) -> bool {
+        self.answer_stream || !self.activity_streams.is_empty()
+    }
+
+    pub fn preview_streams(&self) -> impl Iterator<Item = &str> {
+        self.answer_stream
+            .then_some("answer")
+            .into_iter()
+            .chain(self.activity_streams.iter().map(String::as_str))
+    }
+
     /// Returns the qualified workflow ports bound to conversation inputs.
     pub fn input_targets(&self) -> impl Iterator<Item = &str> {
         self.inputs.values().map(String::as_str)
@@ -222,8 +234,18 @@ impl ChatContract {
             .outputs
             .iter()
             .any(|output| output.name == "answer");
+        let activity_streams = outputs
+            .iter()
+            .filter(|output| {
+                matches!(
+                    output.name.as_ref(),
+                    "tool_call" | "tool_started" | "tool_finished"
+                )
+            })
+            .map(|output| output.name.to_string())
+            .collect::<std::collections::BTreeSet<_>>();
         ensure!(
-            !answer_stream || streaming,
+            (!answer_stream && activity_streams.is_empty()) || streaming,
             InvalidSnafu {
                 field: "answer stream",
                 reason: "requires native streaming execution"
@@ -232,6 +254,7 @@ impl ChatContract {
         Ok(Self {
             parameters: configuration,
             answer_stream,
+            activity_streams,
             streaming,
             inputs,
             alternatives,
@@ -397,6 +420,7 @@ pub fn decode_answer_delta(
 /// Validates native workflow output records against the conversation protocol.
 pub struct ConversationOutputDecoder {
     answer: bool,
+    activities: std::collections::BTreeSet<String>,
     terminal: TerminalResultDecoder,
 }
 
@@ -404,6 +428,7 @@ impl ConversationOutputDecoder {
     pub fn new(contract: &ChatContract) -> Self {
         Self {
             answer: contract.answer_stream,
+            activities: contract.activity_streams.clone(),
             terminal: TerminalResultDecoder::new(contract.alternatives),
         }
     }
@@ -411,10 +436,42 @@ impl ConversationOutputDecoder {
     pub fn accept(
         &mut self,
         mut values: NodeValues,
-    ) -> Result<Option<mfn_llm::TextDelta>, ChatError> {
+    ) -> Result<Option<crate::PreviewDelta>, ChatError> {
         let answer = values.remove("answer");
+        let activities: Vec<_> = ["tool_call", "tool_started", "tool_finished"]
+            .into_iter()
+            .filter_map(|name| values.remove(name).map(|value| (name, value)))
+            .collect();
         // Count terminal alternatives even when a mixed record carries an invalid preview.
         self.terminal.accept(values)?;
+        ensure!(
+            activities.len() + usize::from(answer.is_some()) <= 1,
+            InvalidSnafu {
+                field: "conversation preview",
+                reason: "requires one preview event per record"
+            }
+        );
+        if let Some((name, value)) = activities.into_iter().next() {
+            ensure!(
+                self.activities.contains(name),
+                InvalidSnafu {
+                    field: "tool activity stream",
+                    reason: "was not declared by the workflow"
+                }
+            );
+            let activity =
+                <crate::ToolActivity as mf_runtime::InputField>::decode_field(name, Some(value))?;
+            ensure!(
+                activity.stream_name() == name,
+                InvalidSnafu {
+                    field: "tool activity stream",
+                    reason: "event kind does not match the stream"
+                }
+            );
+            let delta = crate::PreviewDelta::from(activity);
+            delta.validate()?;
+            return Ok(Some(delta));
+        }
         let delta = answer
             .map(|value| -> Result<_, ChatError> {
                 ensure!(
@@ -432,7 +489,7 @@ impl ConversationOutputDecoder {
                         reason: "requires nonempty text and a model call identity"
                     }
                 );
-                Ok(delta)
+                Ok(delta.into())
             })
             .transpose()?;
         Ok(delta)
@@ -457,6 +514,7 @@ mod output_tests {
             alternatives: ResultAlternatives::Both,
             parameters: Default::default(),
             answer_stream: answer,
+            activity_streams: Default::default(),
             streaming: true,
             inputs: Default::default(),
         })
@@ -464,6 +522,48 @@ mod output_tests {
 
     fn values(value: serde_json::Value) -> NodeValues {
         serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn tool_previews_require_declared_matching_streams_and_valid_identities() {
+        for (name, event) in [
+            (
+                "tool_call",
+                json!({"kind":"call", "model_call_id":"model", "part":0, "arguments":"{"}),
+            ),
+            (
+                "tool_started",
+                json!({"kind":"running", "tool_call_id":"id", "name":"lookup"}),
+            ),
+            (
+                "tool_finished",
+                json!({"kind":"result", "tool_call_id":"id", "failed":false, "content":""}),
+            ),
+        ] {
+            let record = values(json!({name:event}));
+            assert!(decoder(false).accept(record.clone()).is_err());
+            let mut declared = decoder(false);
+            declared.activities.insert(name.into());
+            let preview = declared.accept(record).unwrap().unwrap();
+            assert!(matches!(preview, crate::PreviewDelta::Tool { .. }));
+        }
+        let mut declared = decoder(false);
+        declared
+            .activities
+            .extend(["tool_started".into(), "tool_finished".into()]);
+        for record in [
+            json!({"tool_started":{"kind":"result","tool_call_id":"id","failed":false,"content":"x"}}),
+            json!({"tool_started":{"kind":"running","tool_call_id":"","name":"lookup"}}),
+            json!({"tool_finished":{"kind":"result","tool_call_id":" ","failed":false,"content":"x"}}),
+            json!({"tool_finished":{"kind":"unknown"}}),
+            json!({"answer":{"text":"text","model_call_id":"model"},"tool_finished":{"kind":"result","tool_call_id":"id","failed":false,"content":"x"}}),
+        ] {
+            assert!(declared.accept(values(record)).is_err());
+        }
+        let mut conflict = decoder(false);
+        conflict.accept(values(json!({"append":{"status":"succeeded","messages":[{"role":"assistant","content":"first"}],"usages":[]}}))).unwrap();
+        assert!(conflict.accept(values(json!({"tool_finished":null,"append":{"status":"succeeded","messages":[{"role":"assistant","content":"other"}],"usages":[]}}))).is_err());
+        assert!(conflict.finish().is_err());
     }
 
     #[test]
@@ -486,7 +586,7 @@ mod output_tests {
             ))
             .unwrap()
             .unwrap();
-        assert_eq!(delta.text, "prefix");
+        assert!(matches!(delta, crate::PreviewDelta::Text { delta } if delta.text == "prefix"));
         assert_eq!(decoder.finish().unwrap().final_text(), Some("canonical"));
     }
 

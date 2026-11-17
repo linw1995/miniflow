@@ -718,7 +718,7 @@ fn paused_rendering_keeps_capture_draining_with_bounded_previews() {
     let preview = controller.preview.lock().unwrap().clone();
     assert_eq!(preview.segments.len(), 1);
     assert_eq!(
-        preview.segments[0].text.len(),
+        preview.segments[0].text.len() + preview.segments[0].model_call_id.len(),
         super::preview::MAX_PREVIEW_BYTES
     );
     assert!(preview.omitted);

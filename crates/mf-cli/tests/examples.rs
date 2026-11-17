@@ -558,6 +558,32 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                 }
             );
             assert_eq!(server.as_ref().unwrap().requests()[0].body["stream"], true);
+            if matches!(
+                name,
+                "chat-calculator-flow.json" | "chat-context-flow.json" | "chat-deepseek-flow.json"
+            ) {
+                let expected = if name == "chat-deepseek-flow.json" {
+                    3
+                } else {
+                    2
+                };
+                assert!(
+                    records
+                        .iter()
+                        .any(|record| record.get("tool_call").is_some()),
+                    "{name}: missing call fragments"
+                );
+                for stream in ["tool_started", "tool_finished"] {
+                    assert_eq!(
+                        records
+                            .iter()
+                            .filter(|record| record.get(stream).is_some())
+                            .count(),
+                        expected,
+                        "{name}: {stream}"
+                    );
+                }
+            }
             records
                 .into_iter()
                 .find(|record| {

@@ -338,6 +338,24 @@
   ],
   "outputs": [
     {
+      "name": "tool_call",
+      "node": "agent",
+      "port": "tool_call",
+      "optional": true
+    },
+    {
+      "name": "tool_started",
+      "node": "agent",
+      "port": "tool_started",
+      "optional": true
+    },
+    {
+      "name": "tool_finished",
+      "node": "agent",
+      "port": "tool_finished",
+      "optional": true
+    },
+    {
       "name": "answer",
       "node": "agent",
       "port": "answer",

@@ -5,7 +5,9 @@ pub use call::{
     CallOutcome, ToolCall, ToolCallEvent, ToolDefinition, ToolResult, TranscriptError,
     TranscriptMode, validate_transcript,
 };
+mod activity;
 mod streaming;
+pub use activity::ToolActivity;
 #[cfg(feature = "test-support")]
 #[path = "../tests/support/mod.rs"]
 pub mod test_support;
@@ -129,7 +131,7 @@ macro_rules! impl_message_serde {
     };
 }
 
-impl_message_serde!(ChatMessage, ToolCall, ToolResult);
+impl_message_serde!(ChatMessage, ToolCall, ToolResult, ToolActivity);
 
 #[derive(Clone, Debug, NodeValue)]
 pub struct LlmInputs {
@@ -165,6 +167,7 @@ pub struct TextDelta {
 pub struct LlmEmission {
     pub delta: Option<TextDelta>,
     pub tool_call: Option<ToolCallEvent>,
+    pub tool_call_delta: Option<ToolActivity>,
 }
 
 #[derive(mf_runtime::NodeInputs)]

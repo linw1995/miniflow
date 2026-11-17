@@ -91,6 +91,19 @@ impl Transcript {
         self.order.push(key);
     }
 
+    pub fn focus(&mut self, key: &str) -> bool {
+        let Some((position, _)) = self
+            .entries
+            .get(key)
+            .and_then(|entry| entry.document.row(0))
+        else {
+            return false;
+        };
+        self.anchor = Some((key.to_owned(), position));
+        self.requested_scroll = 1;
+        true
+    }
+
     pub fn is_empty(&self) -> bool {
         self.ends.last().copied().unwrap_or_default() == 0
     }
