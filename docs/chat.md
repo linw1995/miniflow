@@ -571,10 +571,11 @@ its matching call on the current page, regardless of result arrival order. A pag
 still shows the result with its tool-call ID. Grouping changes only the display, not stored order.
 Tool arguments and results are inert literal data, never prompts, Markdown images, or commands.
 Tool call groups start collapsed (`[+]`) and can be opened (`[-]`) as soon as a preview appears.
-An open group displays argument fragments as received. The status on its header comes separately
-from the runtime observations used by the tracing view, matched by call ID. An observed call without
-an argument preview still uses a tool call group. `ChatJob::tool_metrics()` exposes the in-process
-view by tool-call ID. Missing observations never imply a start or success.
+An open group displays argument fragments as received. Live assistant blocks use model-call IDs
+and the same spacing between messages and tools as settled replies. The status on each tool header
+comes separately from runtime observations, matched by call ID. An observed call without a matching
+preview appears under `Observed tools`. `ChatJob::tool_metrics()` exposes the in-process view by
+call ID. Missing observations never imply a start or success.
 
 The fold marker leads the group header. Focus and expansion follow a group when a late ID makes it
 identifiable, and remain when the authoritative transcript replaces its preview or reloads from

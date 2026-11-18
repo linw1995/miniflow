@@ -106,6 +106,42 @@ fn page_turns(page: &MessagePage) -> impl Iterator<Item = &[mf_chat::MessageReco
         .chunk_by(|left, right| left.message.turn_id == right.message.turn_id)
 }
 
+fn group_gap(transcript: &mut super::transcript::Transcript, key: &str) {
+    transcript.plain(format!("{key}:gap"), vec![Line::default()]);
+}
+
+fn render_tools<'a>(
+    transcript: &mut super::transcript::Transcript,
+    key: &str,
+    tools: impl IntoIterator<Item = ToolGroup<'a>>,
+    expanded: &BTreeSet<String>,
+    focused: Option<&str>,
+) {
+    for (index, tool) in tools.into_iter().enumerate() {
+        if index > 0 {
+            group_gap(transcript, &format!("{key}:call:{index}"));
+        }
+        tool.render(transcript, expanded, focused);
+    }
+}
+
+fn render_assistant<'a>(
+    transcript: &mut super::transcript::Transcript,
+    key: &str,
+    text: &str,
+    tools: impl IntoIterator<Item = ToolGroup<'a>>,
+    indicator: Option<char>,
+    expanded: &BTreeSet<String>,
+    focused: Option<&str>,
+) {
+    transcript.plain(
+        format!("{key}:label"),
+        vec![role_label("Assistant", Color::Cyan, indicator)],
+    );
+    transcript.markdown(format!("{key}:body"), text);
+    render_tools(transcript, key, tools, expanded, focused);
+}
+
 fn render_message_group(
     transcript: &mut super::transcript::Transcript,
     key: &str,
@@ -117,13 +153,26 @@ fn render_message_group(
 ) {
     use mf_chat::ChatMessage;
     if group.index > 0 {
-        transcript.plain(format!("{key}:gap"), vec![Line::default()]);
+        group_gap(transcript, key);
     }
-    let message = group.message;
-    let (label, content) = match message {
+    let (label, content) = match group.message {
         ChatMessage::User { content, .. } => ("You", content),
         ChatMessage::System { content, .. } => ("System", content),
-        ChatMessage::Assistant { content, .. } => ("Assistant", content),
+        ChatMessage::Assistant {
+            content,
+            tool_calls,
+            ..
+        } => {
+            let tools = tool_calls.iter().flatten().map(|call| ToolGroup {
+                key: tool_key(turn, &call.id),
+                title: tool_call_label(Some(&call.name), &call.id),
+                arguments: Some(ToolArguments::Canonical(&call.arguments)),
+                result: group.results.get(call.id.as_str()).copied(),
+                execution: executions.get(&call.id),
+            });
+            render_assistant(transcript, key, content, tools, None, expanded, focused);
+            return;
+        }
         ChatMessage::ToolResult {
             tool_call_id,
             content,
@@ -138,24 +187,7 @@ fn render_message_group(
         format!("{key}:label"),
         vec![role_label(label, Color::Cyan, None)],
     );
-    if let ChatMessage::Assistant { tool_calls, .. } = message {
-        transcript.markdown(format!("{key}:body"), content);
-        for (index, call) in tool_calls.iter().flatten().enumerate() {
-            if index > 0 {
-                transcript.plain(format!("{key}:call:{index}:gap"), vec![Line::default()]);
-            }
-            ToolGroup {
-                key: tool_key(turn, &call.id),
-                title: tool_call_label(Some(&call.name), &call.id),
-                arguments: Some(ToolArguments::Canonical(&call.arguments)),
-                result: group.results.get(call.id.as_str()).copied(),
-                execution: executions.get(&call.id),
-            }
-            .render(transcript, expanded, focused);
-        }
-    } else {
-        transcript.literal(format!("{key}:body"), content, Style::default());
-    }
+    transcript.literal(format!("{key}:body"), content, Style::default());
 }
 
 fn tool_key(turn: &str, id: &str) -> String {
@@ -281,20 +313,41 @@ fn unique_preview_ids(preview: &LivePreview) -> BTreeSet<&str> {
     unique
 }
 
-enum LiveRow<'a> {
-    Text(&'a super::preview::PreviewSegment),
-    Tool(ToolGroup<'a>),
+struct LiveMessage<'a> {
+    model_call_id: &'a str,
+    text: &'a str,
+    tools: Vec<ToolGroup<'a>>,
 }
 
-fn live_rows<'a>(
+struct LiveMessages<'a> {
+    messages: Vec<LiveMessage<'a>>,
+    unmatched: Vec<ToolGroup<'a>>,
+}
+
+fn live_messages<'a>(
     turn: &str,
     preview: &'a LivePreview,
     executions: &'a BTreeMap<String, mf_chat::ToolExecution>,
-) -> Vec<LiveRow<'a>> {
+) -> LiveMessages<'a> {
     let unique = unique_preview_ids(preview);
-    let previews = preview.segments.iter().map(|segment| {
+    let mut messages = Vec::new();
+    let mut positions = BTreeMap::new();
+    for segment in &preview.segments {
+        // Preserve first appearance even when segments from different calls are interleaved.
+        let model_call_id = segment.model_call_id.as_str();
+        let position = *positions.entry(model_call_id).or_insert_with(|| {
+            let position = messages.len();
+            messages.push(LiveMessage {
+                model_call_id,
+                text: "",
+                tools: Vec::new(),
+            });
+            position
+        });
+        let message = &mut messages[position];
         let Some(tool) = &segment.tool else {
-            return LiveRow::Text(segment);
+            message.text = &segment.text;
+            continue;
         };
         let id = tool.id.as_deref().filter(|id| unique.contains(id));
         let execution = id.and_then(|id| executions.get(id));
@@ -302,30 +355,32 @@ fn live_rows<'a>(
             .map(|execution| execution.name.as_str())
             .or(tool.name.as_deref());
         let index = format!("index {}", tool.index);
-        LiveRow::Tool(ToolGroup {
+        message.tools.push(ToolGroup {
             key: id.map_or_else(
-                || preview_tool_key(turn, &segment.model_call_id, tool.index),
+                || preview_tool_key(turn, model_call_id, tool.index),
                 |id| tool_key(turn, id),
             ),
             title: tool_call_label(name, id.unwrap_or(&index)),
             arguments: (!segment.text.is_empty()).then_some(ToolArguments::Raw(&segment.text)),
             result: None,
             execution,
-        })
-    });
+        });
+    }
     let unmatched = executions
         .iter()
         .filter(|(id, _)| !unique.contains(id.as_str()))
-        .map(|(id, execution)| {
-            LiveRow::Tool(ToolGroup {
-                key: tool_key(turn, id),
-                title: tool_call_label(Some(&execution.name), id),
-                arguments: None,
-                result: None,
-                execution: Some(execution),
-            })
-        });
-    previews.chain(unmatched).collect()
+        .map(|(id, execution)| ToolGroup {
+            key: tool_key(turn, id),
+            title: tool_call_label(Some(&execution.name), id),
+            arguments: None,
+            result: None,
+            execution: Some(execution),
+        })
+        .collect();
+    LiveMessages {
+        messages,
+        unmatched,
+    }
 }
 
 fn tool_status(execution: &mf_chat::ToolExecution) -> &'static str {
@@ -1108,13 +1163,16 @@ impl ChatView {
             } else {
                 BTreeMap::new()
             };
+            let LiveMessages {
+                messages,
+                unmatched,
+            } = live_messages(turn, &self.preview, &executions);
             keys.extend(
-                live_rows(turn, &self.preview, &executions)
+                messages
                     .into_iter()
-                    .filter_map(|row| match row {
-                        LiveRow::Tool(group) => Some(group.key),
-                        LiveRow::Text(_) => None,
-                    }),
+                    .flat_map(|message| message.tools)
+                    .chain(unmatched)
+                    .map(|tool| tool.key),
             );
         }
         let mut seen = BTreeSet::new();
@@ -1452,34 +1510,57 @@ impl ChatView {
         } else {
             let loading = self.pending.is_some() || self.running;
             let has_preview = !self.preview.segments.is_empty();
-            if loading || has_preview {
-                let indicator = loading.then(|| {
-                    let frame = (self.animation_started.elapsed().as_millis() / 100
-                        % LOADING_FRAMES.len() as u128) as usize;
-                    LOADING_FRAMES[frame]
-                });
-                transcript.plain(
-                    format!("turn:{turn}:assistant:label"),
-                    vec![role_label("Assistant", Color::Cyan, indicator)],
-                );
-            }
             let executions = if self.running {
                 &executions
             } else {
                 &no_executions
             };
-            for row in live_rows(turn, &self.preview, executions) {
-                match row {
-                    LiveRow::Tool(group) => group.render(
-                        &mut transcript,
-                        &self.expanded_tools,
-                        self.focused_tool.as_deref(),
-                    ),
-                    LiveRow::Text(segment) => transcript.markdown(
-                        format!("turn:{turn}:preview:{}", segment.model_call_id),
-                        &segment.text,
-                    ),
+            let indicator = loading.then(|| {
+                let frame = (self.animation_started.elapsed().as_millis() / 100
+                    % LOADING_FRAMES.len() as u128) as usize;
+                LOADING_FRAMES[frame]
+            });
+            let LiveMessages {
+                messages,
+                unmatched,
+            } = live_messages(turn, &self.preview, executions);
+            let count = messages.len();
+            if count == 0 && loading {
+                transcript.plain(
+                    format!("turn:{turn}:assistant:label"),
+                    vec![role_label("Assistant", Color::Cyan, indicator)],
+                );
+            }
+            for (index, message) in messages.into_iter().enumerate() {
+                let model = message.model_call_id;
+                let key = format!("turn:{turn}:preview:{}:{model}", model.len());
+                if index > 0 {
+                    group_gap(&mut transcript, &key);
                 }
+                render_assistant(
+                    &mut transcript,
+                    &key,
+                    message.text,
+                    message.tools,
+                    indicator.filter(|_| index + 1 == count),
+                    &self.expanded_tools,
+                    self.focused_tool.as_deref(),
+                );
+            }
+            if !unmatched.is_empty() {
+                let key = format!("turn:{turn}:observed-tools");
+                group_gap(&mut transcript, &key);
+                transcript.plain(
+                    format!("{key}:label"),
+                    vec![role_label("Observed tools", Color::Cyan, None)],
+                );
+                render_tools(
+                    &mut transcript,
+                    &key,
+                    unmatched,
+                    &self.expanded_tools,
+                    self.focused_tool.as_deref(),
+                );
             }
             let mut status = vec![];
             if !loading && has_preview && self.preview.incomplete {
@@ -1702,6 +1783,108 @@ mod tests {
             stderr: String::new(),
             capture_error: None,
         }
+    }
+
+    #[test]
+    fn interleaved_live_messages_match_settled_tool_spacing_and_focus_order() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
+        view.show_execution = false;
+        view.running = true;
+        let invocation = Invocation::new("session");
+        view.latest_invocation = Some(invocation.clone());
+        view.preview.begin(invocation.clone());
+        let text = |model: &str, text: &str| -> mf_chat::PreviewDelta {
+            mf_chat::TextDelta {
+                text: text.into(),
+                model_call_id: model.into(),
+            }
+            .into()
+        };
+        let tool = |model: &str, index, id: &str| -> mf_chat::PreviewDelta {
+            mf_chat::ToolCallDelta {
+                model_call_id: model.into(),
+                index,
+                arguments: "{}".into(),
+                id: Some(id.into()),
+                name: Some("lookup".into()),
+            }
+            .into()
+        };
+        for delta in [
+            tool("z", 0, "one"),
+            text("a", "Next step"),
+            tool("a", 0, "three"),
+            tool("z", 1, "two"),
+            text("z", "Checking"),
+            text("final", "Final answer"),
+        ] {
+            view.preview
+                .apply(mf_chat::PreviewEvent {
+                    invocation: invocation.clone(),
+                    delta,
+                })
+                .unwrap();
+        }
+        let layout = [
+            "Assistant",
+            "Checking",
+            "[+] Tool call lookup [one]",
+            "",
+            "[+] Tool call lookup [two]",
+            "",
+            "Assistant",
+            "Next step",
+            "[+] Tool call lookup [three]",
+            "",
+            "Assistant",
+            "Final answer",
+        ];
+        let expected_keys = ["one", "two", "three"].map(|id| tool_key(&invocation.turn_id, id));
+        let assert_layout = |screen: &str| {
+            let first = row_of(screen, "Assistant");
+            let last = row_of(screen, "Final answer");
+            let lines: Vec<_> = screen
+                .lines()
+                .skip(first)
+                .take(last + 1 - first)
+                .map(|line| line.trim_end().trim_end_matches(LOADING_FRAMES).trim_end())
+                .collect();
+            assert_eq!(lines, layout, "{screen}");
+        };
+        let live = render(&view, 100, 30);
+        assert_layout(&live);
+        assert_eq!(live.matches(LOADING_FRAMES).count(), 1);
+        assert!(
+            live.lines()
+                .nth(row_of(&live, "Final answer") - 1)
+                .unwrap()
+                .contains(LOADING_FRAMES)
+        );
+        assert_eq!(view.tool_keys(), expected_keys);
+
+        let result = mf_chat::ConversationResult::append(serde_json::from_value(serde_json::json!([
+            {"role":"assistant","content":"Checking","tool_calls":[
+                {"id":"one","name":"lookup","arguments":{}},
+                {"id":"two","name":"lookup","arguments":{}}
+            ]},
+            {"role":"tool","tool_call_id":"two","content":"second result"},
+            {"role":"tool","tool_call_id":"one","content":"first result"},
+            {"role":"assistant","content":"Next step","tool_calls":[{"id":"three","name":"lookup","arguments":{}}]},
+            {"role":"tool","tool_call_id":"three","content":"third result"},
+            {"role":"assistant","content":"Final answer"}
+        ])).unwrap());
+        result.validate().unwrap();
+        view.running = false;
+        view.reply = Some(PresentedResult {
+            result,
+            saved: true,
+        });
+        let settled = render(&view, 100, 30);
+        assert_layout(&settled);
+        assert!(!settled.contains(LOADING_FRAMES));
+        assert_eq!(view.tool_keys(), expected_keys);
     }
 
     #[test]
@@ -2542,17 +2725,18 @@ mod tests {
                 )
             })
             .collect();
-        let rows = live_rows(turn, &preview, &executions);
-        let [
-            LiveRow::Tool(first),
-            LiveRow::Tool(second),
-            LiveRow::Tool(known),
-            LiveRow::Tool(observed),
-        ] = rows.as_slice()
-        else {
-            panic!(
-                "expected two anonymous previews, one known group and one unmatched observation"
-            );
+        let LiveMessages {
+            messages,
+            unmatched,
+        } = live_messages(turn, &preview, &executions);
+        let [message] = messages.as_slice() else {
+            panic!("expected one preview batch");
+        };
+        let [first, second, known] = message.tools.as_slice() else {
+            panic!("expected two anonymous previews and one known group");
+        };
+        let [observed] = unmatched.as_slice() else {
+            panic!("expected one observation without a known model-call identity");
         };
         assert_ne!(first.key, second.key);
         assert!(first.execution.is_none() && second.execution.is_none());
@@ -2629,6 +2813,15 @@ mod tests {
         assert!(!screen.contains("Tool result") && !screen.contains("Flow execution"));
         assert!(!screen.contains("Tool execution"));
         assert_eq!(screen.matches("[matched]").count(), 1);
+        assert_eq!(screen.matches("Assistant").count(), 1);
+        assert_eq!(
+            row_of(&screen, "Observed tools"),
+            row_of(&screen, "[matched]") + 2
+        );
+        assert_eq!(
+            row_of(&screen, "[done]"),
+            row_of(&screen, "[ambiguous]") + 2
+        );
         view.toggle_tool();
         let opened = render(&view, 100, 25);
         assert!(opened.contains("[-] [Interrupted] Tool call search [stopped]"));
@@ -3191,7 +3384,7 @@ mod tests {
         let screen = render(&view, 100, 30);
         assert!(screen.contains("draft prefix"));
         assert!(screen.contains("second call output"));
-        assert_eq!(screen.matches("Assistant").count(), 1);
+        assert_eq!(screen.matches("Assistant").count(), 2);
         assert!(screen.contains(LOADING_FRAMES));
         assert!(!screen.contains("provisional"));
         assert!(!screen.contains("segment"));

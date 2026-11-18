@@ -9,6 +9,7 @@ Chat SHALL group arguments and results by call. Groups SHALL start collapsed and
 - **WHEN** the model sends interleaved fragments for multiple tool calls
 - **THEN** each fragment appears in its expanded group without waiting for a tool result
 - **AND** an unambiguous late wire ID and canonical replacement preserve the group's focus and expansion
+- **AND** live rows have the same message and inter-tool spacing as the corresponding settled batches
 
 #### Scenario: Pair parallel calls and results
 

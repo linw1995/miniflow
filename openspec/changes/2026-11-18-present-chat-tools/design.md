@@ -16,7 +16,9 @@ Router can opt into a static observation category and an optional public `observ
 
 The live cache groups arguments by invocation, model call, and index. Rendering and keyboard
 navigation use the same live tool group projection. Each group folds its arguments and any result
-behind a leading `[+]` or `[-]` marker. Browse-mode Tab/Shift+Tab selects groups in display order;
+behind a leading `[+]` or `[-]` marker. Preview rows use the model-call identity to reproduce the
+same message and inter-tool spacing as settled batches. Unmatched observations use the same rule
+without guessing a message identity. Browse-mode Tab/Shift+Tab selects groups in display order;
 Space or Ctrl+T toggles the selection. A late, unambiguous wire ID transfers focus, expansion, and
 scrolling to the canonical group key. Only a correlated execution observation updates the group
 status. Missing or ambiguous hints do not match by position or name.
