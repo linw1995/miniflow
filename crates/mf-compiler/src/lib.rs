@@ -29,7 +29,6 @@ mod lowering;
 #[cfg(feature = "codegen")]
 mod pipeline;
 mod plan;
-mod plan_document;
 mod routers;
 #[cfg(feature = "codegen")]
 mod state;
@@ -101,10 +100,9 @@ pub use pipeline::{
     CompileRequest, PipelineError, cargo_command, compile_project, compile_project_with_options,
     resolve_project,
 };
-pub use plan::{
-    CompiledWorkflow, GeneratedExecutionArtifacts, GeneratedRunnerArtifacts,
-    GeneratedWorkflowArtifacts, PlanError,
-};
+#[cfg(feature = "codegen")]
+pub use plan::{CodegenOptions, GeneratedWorkflowArtifacts};
+pub use plan::{CompiledWorkflow, PlanError};
 #[cfg(feature = "codegen")]
 pub use state::{BuildGuard, StateError, atomic_copy, atomic_write, write_if_changed};
 pub use streaming::{instantiate_stream, start_stream};
@@ -114,18 +112,10 @@ pub use typed_plan::{
 };
 
 pub use construction::{
-    FlowBuildError, FlowBuilder, InvalidDefinitionSnafu as WorkflowInvalidDefinitionSnafu,
-    InvalidEmbeddedConfigSnafu as WorkflowInvalidEmbeddedConfigSnafu,
-    MetadataSnafu as WorkflowMetadataSnafu, NodeConstructionSnafu as WorkflowNodeConstructionSnafu,
-    StreamBuildError, SubgraphSnafu as WorkflowSubgraphSnafu,
-    UnknownKindSnafu as WorkflowUnknownKindSnafu, WorkflowBuildError, bind_workflow_inputs,
-    build_flow, build_stream_program, instantiate_node_with_metadata,
-    instantiate_subgraphs_with_metadata, into_task, partition_execution_domains, prepare_stream,
-    prepared_loop_assign_from_json, prepared_loop_source_from_json,
-    prepared_router_assign_from_json, prepared_scope_source_from_json, stream_workflow_inputs,
-    validate_compiled_graph, validate_execution, validate_node_flow_parameters,
-    validate_scope_bindings, validate_stream_limits, validate_success_connection,
-    workflow_input_schema,
+    FlowBuildError, FlowBuilder, StreamBuildError, WorkflowBuildError, build_flow,
+    build_stream_program, into_task, partition_execution_domains, prepare_stream,
+    stream_workflow_inputs, validate_compiled_graph, validate_execution, validate_scope_bindings,
+    validate_stream_limits, validate_success_connection, workflow_input_schema,
 };
 pub use mf_runtime::{
     FlowRuntime, RuntimeOptions, TaskFlowNode, WorkflowInputError, WorkflowInputSchema,

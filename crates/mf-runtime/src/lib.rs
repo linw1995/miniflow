@@ -108,7 +108,7 @@ pub use node::{
     TypedTaskHandle,
 };
 pub use node_target::{
-    NodeTarget, NodeTargetDescriptor, NodeTargetError, NodeTargetKind, PreparedTaskTarget,
+    NodeTarget, NodeTargetError, NodeTargetKind, PreparedTaskTarget,
     UnknownSnafu as NodeTargetUnknownSnafu, target_ports,
 };
 pub use number::{compare_json_numbers, number_to_f64, number_to_i64, number_to_u64};

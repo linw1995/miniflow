@@ -76,9 +76,12 @@ fn main() {
     black_box(flow.execute().unwrap());
     let execute_ms = started.elapsed().as_secs_f64() * 1000.0;
     let started = Instant::now();
-    let source_bytes = black_box(plan.generate_artifacts().unwrap())
-        .rust_source
-        .len();
+    let source_bytes = black_box(
+        plan.generate_artifacts(&registry, Default::default())
+            .unwrap(),
+    )
+    .rust_source
+    .len();
     let generate_ms = started.elapsed().as_secs_f64() * 1000.0;
     println!(
         "{}",

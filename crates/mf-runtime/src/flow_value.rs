@@ -134,7 +134,7 @@ impl FlowValue {
             (outputs, Vec::new())
         };
         let body = PreparedSubgraph::streaming(Vec::new(), outputs, stream_outputs, execute)
-            .with_input_schema(manifest.input_schema.clone());
+            .with_input_schema(manifest.descriptor.input_schema.clone());
         let mut value = Self::new(body)?;
         value.1 = InvocationBoundary::External;
         Ok(value)
@@ -376,7 +376,7 @@ mod tests {
             panic!("preparation must not execute")
         })
         .unwrap();
-        assert_eq!(flow.body().inputs, manifest.input_schema);
+        assert_eq!(flow.body().inputs, manifest.descriptor.input_schema);
         assert!(flow.body().nodes.is_empty());
         assert!(flow.body().origin().is_none());
         assert!(matches!(

@@ -4,7 +4,6 @@ use crate::{DefinitionId, PlanError};
 use mf_runtime::{CompiledGraph, ScopeInstruction};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use snafu::ResultExt;
 use std::collections::BTreeMap;
 
 pub fn scope(
@@ -170,9 +169,7 @@ pub fn scope(
     Ok((preparation, nodes, flow))
 }
 
-pub fn stream_artifacts(
-    workflow: &crate::CompiledWorkflow,
-) -> Result<crate::GeneratedRunnerArtifacts, PlanError> {
+pub fn stream_preparation(workflow: &crate::CompiledWorkflow) -> Result<TokenStream, PlanError> {
     let (preparation, nodes, _) = scope(
         &workflow.graph,
         "stream",
@@ -190,8 +187,7 @@ pub fn stream_artifacts(
         .limits;
     let pending = limits.max_pending_messages;
     let workers = limits.workers;
-    let source = quote! {
-        include!(concat!(env!("OUT_DIR"), "/flow-plans.rs"));
+    Ok(quote! {
         pub fn prepare_stream(registry: &mf_runtime::NodeRegistry) -> Result<mf_runtime::PreparedStream, mf_runtime::generated::BindError> {
             #[allow(unused_imports)]
             use snafu::ResultExt as _;
@@ -206,10 +202,6 @@ pub fn stream_artifacts(
                 execution, vec![#(#nodes),*], stream_program(), input_schema_stream(),
             )))
         }
-    };
-    let syntax = syn::parse2(source).context(crate::plan::GeneratedSyntaxSnafu)?;
-    Ok(crate::GeneratedRunnerArtifacts {
-        rust_source: prettyplease::unparse(&syntax),
     })
 }
 

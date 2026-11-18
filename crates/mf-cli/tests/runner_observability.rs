@@ -145,7 +145,7 @@ fn selected_record(
     project: &Path,
     workflow: &mf_telemetry::identity::WorkflowId,
     id: &str,
-) -> mf_runtime::NodeTargetDescriptor {
+) -> mf_runtime::NodeTarget {
     let target = std::env::var_os("MF_TEST_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| project.join("target"));

@@ -60,17 +60,13 @@ fn main() {
 
 fn generate() -> Result<(), Box<dyn std::error::Error>> {
     let registry = mf_runtime::NodeRegistry::from_inventory()?;
-    let workflow = compiled_workflow()?;
-    let artifacts = workflow.generate_runner_execution_plans(&registry)?;
-    let workflow = &artifacts.resolved_workflow;
-    if workflow.graph.definition.execution.is_some() {
+    let artifacts = compiled_workflow()?.generate_artifacts(&registry, mf_compiler::CodegenOptions::default())?;
+    let mut manifest = artifacts.manifest;
+    if manifest.definition.execution.is_some() {
         println!("cargo:rustc-cfg=mf_streaming");
     }
-    let source = workflow.generate_runner_artifacts()?;
     let output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo output directory"));
-    std::fs::write(output.join("workflow.rs"), source.rust_source)?;
-    std::fs::write(output.join("flow-plans.rs"), artifacts.rust_source)?;
-    let mut manifest = mf_runtime::WorkflowManifest::from_bytes(&artifacts.manifest_bytes)?;
+    std::fs::write(output.join("workflow.rs"), artifacts.rust_source)?;
     let (entry, sources): (String, std::collections::BTreeMap<String, String>) =
         serde_json::from_str(include_str!("workflow-sources.json"))?;
     manifest.definition = mf_runtime::WorkflowDefinition::from_json(
@@ -79,7 +75,7 @@ fn generate() -> Result<(), Box<dyn std::error::Error>> {
     manifest.entry = entry;
     manifest.sources = sources;
     std::fs::write(output.join("workflow-manifest.bin"), manifest.to_bytes()?)?;
-    std::fs::write(output.join("typed-fast-paths.json"), artifacts.typed_plan_json)?;
+    std::fs::write(output.join("typed-fast-paths.json"), serde_json::to_vec_pretty(&artifacts.typed_plan)?)?;
     Ok(())
 }
 "#;
@@ -123,10 +119,7 @@ fn main() -> std::process::ExitCode {
 }
 
 fn run(#[cfg(unix)] signals: &mut mf_runtime::RunnerSignals) -> Result<(), Box<dyn std::error::Error>> {
-    let targets = workflow_manifest()?.descriptor.node_targets.into_iter().map(|descriptor| {
-        let index = workflow::compiled_node_index(&descriptor.id)?;
-        Ok(descriptor.bind_to(index))
-    }).collect::<Result<Vec<_>, mf_runtime::NodeTargetError>>()?;
+    let targets = workflow_manifest()?.descriptor.node_targets;
     let invocation = mf_runtime::RunnerInvocation::parse(
         std::env::args_os().skip(1), &workflow::compiled_input_schema(), &targets,
     )?;
@@ -196,15 +189,14 @@ fn execute_selected(
                 if let Some(observation) = state.observation_mut() { observation.preparation_failed_unattributed(error.to_string()); }
             })?;
             workflow_manifest()?.validate_prepared_schema(prepared.plan().input_schema())?;
-            workflow::verify_stream_metadata(&prepared)?;
-            let task = target.bind_stream(&prepared)?;
+            let task = target.bind_stream(&prepared, workflow::compiled_node_index(&target.id)?)?;
             mf_runtime::FlowRuntime::default().execute_target_in_context(&task, state, inputs, context)?
         };
         #[cfg(not(mf_streaming))]
         let outputs = {
             let flow = workflow::prepare_workflow(&registry, state.observation_mut())?;
             workflow_manifest()?.validate_prepared_schema(flow.input_schema())?;
-            let task = target.bind_flow(&flow)?;
+            let task = target.bind_flow(&flow, workflow::compiled_node_index(&target.id)?)?;
             mf_runtime::FlowRuntime::default().execute_target_in_context(&task, state, inputs, context)?
         };
         stdio.write_json(&outputs).inspect_err(|error| {
@@ -268,7 +260,6 @@ fn execute_stream(arguments: mf_runtime::WorkflowArguments, verbose: u8, #[cfg(u
             if let Some(observation) = &observation { observation.preparation_failed(error.to_string()); }
         })?;
         workflow_manifest()?.validate_prepared_schema(prepared.plan().input_schema())?;
-        workflow::verify_stream_metadata(&prepared)?;
         prepared.plan().input_schema().validate(&arguments)?;
         let needs_stdin = prepared.plan().input_schema().stdin_owner(&arguments)?.is_some();
         let stdin = if needs_stdin { stdio.take_input() } else { None };
@@ -419,7 +410,7 @@ fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: 
         let registry = mf_runtime::NodeRegistry::from_inventory()?;
         let flow = workflow::prepare_workflow(&registry, state.observation_mut())?;
         workflow_manifest()?.validate_prepared_schema(flow.input_schema())?;
-        Ok(workflow::run_workflow_in_context(&flow, state)?)
+        Ok(mf_runtime::FlowRuntime::default().execute_in_context(&flow, state)?)
     });
     if let Some(snapshots) = snapshots {
         snapshots.finish();

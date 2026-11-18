@@ -147,7 +147,8 @@ impl RunHelp {
         {
             let manifest = mf_tui::manifest::read_manifest(&executable)
                 .context(InspectSnafu { path: executable })?;
-            let runner_help = mf_runtime::runner_help_command(&manifest.input_schema).render_help();
+            let runner_help =
+                mf_runtime::runner_help_command(&manifest.descriptor.input_schema).render_help();
             writeln!(
                 io::stdout().lock(),
                 "CLI help:\n{cli_help}\n\nRunner help:\n{runner_help}"

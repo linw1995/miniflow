@@ -236,6 +236,7 @@ mod tests {
         })
         .unwrap();
         manifest
+            .descriptor
             .input_schema
             .inputs
             .insert("source".into(), Default::default());

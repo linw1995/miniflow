@@ -168,17 +168,12 @@ impl CompiledGraph {
     }
 
     /// Identifies all authoritative compiled relationships and child scopes.
-    /// Plain child-free graphs retain their historical definition/order identity.
     pub fn workflow_id(&self) -> Result<WorkflowId, GraphDescriptionError> {
         let order = self
             .execution_order
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>();
-        if self.children.is_empty() && self.relations == GraphRelations::default() {
-            return WorkflowId::from_definition(&self.definition, &order)
-                .context(GraphObservationSnafu);
-        }
         WorkflowId::from_definition(&self.identity_record(), &order).context(GraphObservationSnafu)
     }
 }

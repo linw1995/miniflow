@@ -160,7 +160,7 @@ fn identity_projection_preserves_concrete_relationships_without_serializing_the_
 }
 
 #[test]
-fn only_plain_child_free_graphs_retain_definition_order_identity() {
+fn every_graph_uses_its_explicit_identity_projection() {
     let mut graph = graph();
     let order = graph
         .execution_order
@@ -168,7 +168,7 @@ fn only_plain_child_free_graphs_retain_definition_order_identity() {
         .map(ToString::to_string)
         .collect::<Vec<_>>();
     let historical = WorkflowId::from_definition(&graph.definition, &order).unwrap();
-    assert_eq!(graph.workflow_id().unwrap(), historical);
+    assert_ne!(graph.workflow_id().unwrap(), historical);
     graph.relations.scope = Some(scope());
     assert_ne!(graph.workflow_id().unwrap(), historical);
     assert_eq!(

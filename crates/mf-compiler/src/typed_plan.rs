@@ -1,8 +1,8 @@
 use mf_runtime::{Flow, NodeId, RustValueType, output_id};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TypedFallbackReason {
     UnsupportedMode,
@@ -21,7 +21,7 @@ pub enum TypedFallbackReason {
     SecretInput,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct TypedConnectionReport {
     pub source: String,
     pub output: String,
@@ -30,13 +30,13 @@ pub struct TypedConnectionReport {
     pub fallback: Option<TypedFallbackReason>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct TypedSegment {
     pub domain: usize,
     pub positions: Vec<usize>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct TypedPlan {
     pub segments: Vec<TypedSegment>,
     pub connections: Vec<TypedConnectionReport>,

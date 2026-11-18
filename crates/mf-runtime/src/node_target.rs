@@ -14,15 +14,9 @@ pub enum NodeTargetKind {
     Stream,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NodeTarget {
-    pub index: usize,
-    pub descriptor: NodeTargetDescriptor,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct NodeTargetDescriptor {
+pub struct NodeTarget {
     pub id: String,
     pub kind: NodeTargetKind,
     #[serde(default)]
@@ -144,27 +138,7 @@ pub fn target_ports(ports: &[crate::PortSpec]) -> BTreeMap<String, WorkflowInput
         .collect()
 }
 
-impl std::ops::Deref for NodeTarget {
-    type Target = NodeTargetDescriptor;
-    fn deref(&self) -> &Self::Target {
-        &self.descriptor
-    }
-}
-
-impl std::ops::DerefMut for NodeTarget {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.descriptor
-    }
-}
-
-impl NodeTargetDescriptor {
-    pub fn bind_to(self, index: usize) -> NodeTarget {
-        NodeTarget {
-            index,
-            descriptor: self,
-        }
-    }
-
+impl NodeTarget {
     pub fn start_observation(
         &self,
         observer: &mf_telemetry::observation::Observer,
@@ -332,8 +306,9 @@ impl NodeTarget {
     pub fn bind_flow<'a>(
         &'a self,
         flow: &'a Flow,
+        index: usize,
     ) -> Result<PreparedTaskTarget<'a>, NodeTargetError> {
-        let node = flow.nodes().get(self.index).context(DriftSnafu {
+        let node = flow.nodes().get(index).context(DriftSnafu {
             id: &self.id,
             component: "node index",
         })?;
@@ -349,6 +324,7 @@ impl NodeTarget {
     pub fn bind_stream<'a>(
         &'a self,
         stream: &'a PreparedStream,
+        index: usize,
     ) -> Result<PreparedTaskTarget<'a>, NodeTargetError> {
         ensure!(
             self.worker_limit.map(std::num::NonZeroUsize::get)
@@ -359,13 +335,13 @@ impl NodeTarget {
             }
         );
         let nodes = stream.plan().nodes();
-        let node = nodes.get(self.index).context(DriftSnafu {
+        let node = nodes.get(index).context(DriftSnafu {
             id: &self.id,
             component: "node index",
         })?;
         self.bind(
             node,
-            stream.task_node(self.index),
+            stream.task_node(index),
             nodes
                 .iter()
                 .map(|node| (node.definition_id.as_str(), &node.metadata)),

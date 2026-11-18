@@ -32,7 +32,7 @@ pub enum WorkflowManifestVersion {
 pub struct RunnerDescriptor {
     pub description: WorkflowDescription,
     pub input_schema: WorkflowInputSchema,
-    pub node_targets: Vec<crate::NodeTargetDescriptor>,
+    pub node_targets: Vec<crate::NodeTarget>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -43,20 +43,6 @@ pub struct WorkflowManifest {
     pub entry: String,
     pub sources: BTreeMap<String, String>,
     pub descriptor: RunnerDescriptor,
-}
-
-impl std::ops::Deref for WorkflowManifest {
-    type Target = RunnerDescriptor;
-
-    fn deref(&self) -> &Self::Target {
-        &self.descriptor
-    }
-}
-
-impl std::ops::DerefMut for WorkflowManifest {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.descriptor
-    }
 }
 
 /// Failures describing authoritative compiled graph facts without preparing providers.
@@ -160,7 +146,7 @@ impl WorkflowManifest {
     }
 
     fn interface_for(&self, description: &WorkflowDescription) -> WorkflowInterface {
-        let mut schema = self.input_schema.clone();
+        let mut schema = self.descriptor.input_schema.clone();
         if !self.definition.version.supports_startup_inputs() && description.execution.is_some() {
             // A newer child can require a newer observation schema, whose interface
             // describes every initial node. Preserve the old root's startup policy:
@@ -200,7 +186,7 @@ impl WorkflowManifest {
         &self,
         actual: &WorkflowInputSchema,
     ) -> Result<(), WorkflowManifestError> {
-        let expected = &self.input_schema;
+        let expected = &self.descriptor.input_schema;
         for node in expected.inputs.keys().chain(actual.inputs.keys()) {
             let path = pointer("", node);
             let (Some(expected), Some(actual)) =

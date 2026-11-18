@@ -175,9 +175,13 @@ impl RunOptions {
 
 fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, RunError> {
     let manifest = read_manifest(path).context(ManifestSnafu)?;
-    let arguments = options.workflow_arguments(&manifest.input_schema)?;
+    let arguments = options.workflow_arguments(&manifest.descriptor.input_schema)?;
     let description = manifest.description()?;
-    let needs_stdin = manifest.input_schema.stdin_owner(&arguments)?.is_some();
+    let needs_stdin = manifest
+        .descriptor
+        .input_schema
+        .stdin_owner(&arguments)?
+        .is_some();
     if needs_stdin {
         return option_error(
             "TUI execution cannot supply workflow stdin; provide source parameters or run the executable directly",
@@ -5827,6 +5831,7 @@ mod tests {
         );
         let mut manifest = read_manifest(&runner).unwrap();
         manifest
+            .descriptor
             .input_schema
             .inputs
             .get_mut("source/id")

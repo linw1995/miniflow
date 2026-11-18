@@ -189,8 +189,10 @@ fn typed_plans_fall_back_at_groups_and_isolated_nodes_accept_resolved_inputs() {
     ]);
     value["edges"].as_array_mut().unwrap().push(json!({"from_node":"unrelated_a", "from_output":"value", "to_node":"unrelated_b", "to_input":"input"}));
     let plan = compile_definition(&serde_json::from_value(value).unwrap(), &registry).unwrap();
-    let artifacts = plan.generate_runner_execution_plans(&registry).unwrap();
-    let report: mf_compiler::TypedPlan = serde_json::from_str(&artifacts.typed_plan_json).unwrap();
+    let artifacts = plan
+        .generate_artifacts(&registry, Default::default())
+        .unwrap();
+    let report = artifacts.typed_plan;
     assert!(
         report
             .connections
@@ -452,7 +454,8 @@ fn rejects_unproven_groups_before_execution_and_code_generation() {
             assert!(instantiate_compiled(&plan, &registry).is_err(), "{case}");
             #[cfg(feature = "codegen")]
             assert!(
-                plan.generate_runner_execution_plans(&registry).is_err(),
+                plan.generate_artifacts(&registry, Default::default())
+                    .is_err(),
                 "{case}"
             );
         }

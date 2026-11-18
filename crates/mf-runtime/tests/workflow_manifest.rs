@@ -109,11 +109,11 @@ fn node_inspection_has_no_execution_indices_and_validates_isolated_identity() {
     manifest
         .descriptor
         .node_targets
-        .push(mf_runtime::NodeTargetDescriptor {
+        .push(mf_runtime::NodeTarget {
             id: "root.a/~".into(),
             kind: mf_runtime::NodeTargetKind::Task,
             worker_limit: None,
-            inputs: manifest.input_schema.clone(),
+            inputs: manifest.descriptor.input_schema.clone(),
             outputs: Default::default(),
             context: Default::default(),
             original_workflow_id: original.clone(),
@@ -253,7 +253,7 @@ fn limits_the_combined_serialized_payload() {
 #[test]
 fn reports_exact_interface_drift_before_accepting_prepared_schemas() {
     let manifest = sample();
-    let schema = manifest.input_schema.clone();
+    let schema = manifest.descriptor.input_schema.clone();
     manifest.validate_prepared_schema(&schema).unwrap();
     for component in [
         "node",

@@ -4,7 +4,7 @@ use std::ffi::OsString;
 
 fn target() -> NodeTarget {
     let id = mf_telemetry::identity::WorkflowId::from_definition(&json!({}), &[]).unwrap();
-    serde_json::from_value::<mf_runtime::NodeTargetDescriptor>(json!({
+    serde_json::from_value::<NodeTarget>(json!({
         "id":"copy.part", "kind":"Task", "outputs":{}, "context":{},
         "original_workflow_id":id,
         "description":{"version":"2026-09-29", "workflow_id":id, "nodes":[{"id":"copy.part", "kind":"test.task"}], "data_edges":[], "control_edges":[], "execution_order":["copy.part"]},
@@ -12,7 +12,7 @@ fn target() -> NodeTarget {
             "text":{"type":"string", "required":true}, "count":{"type":"int", "required":false},
             "label":{"type":{"nullable":"string"}, "required":false}
         }}, "stdin":{}}
-    })).unwrap().bind_to(0)
+    })).unwrap()
 }
 fn parse(
     args: &[&str],

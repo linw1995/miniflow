@@ -1046,7 +1046,7 @@ fn register_runner(
         .expect("executable Flow interface");
     let contract = ChatContract::from_manifest(manifest)?;
     let definition = manifest.definition.clone();
-    let inputs = manifest.input_schema.clone();
+    let inputs = manifest.descriptor.input_schema.clone();
     let outputs: Vec<_> = ConversationResult::ports()
         .into_iter()
         .filter_map(|mut port| {

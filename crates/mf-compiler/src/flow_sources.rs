@@ -78,52 +78,25 @@ pub struct ResolvedWorkflow {
     pub children: BTreeMap<DefinitionId, BTreeMap<String, Self>>,
 }
 
-/// Build-product handoff: authored UTF-8 resources and a package-relative entry.
-/// It contains neither receiver callbacks nor a partially resolved workflow.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// Authored UTF-8 resources and a package-relative entry, emitted as native Rust.
+#[derive(Clone, Debug)]
 pub struct FlowSourceBundle {
-    #[serde(serialize_with = "serialize_embedded_path")]
     pub entry: PathBuf,
-    #[serde(serialize_with = "serialize_embedded_sources")]
     pub sources: BTreeMap<PathBuf, String>,
 }
 
-fn portable_embedded_path(path: &Path) -> Result<String, &'static str> {
-    path.components()
-        .map(|component| match component {
-            Component::Prefix(_) | Component::RootDir => {
-                Err("embedded Flow source path must be relative to the manifest directory")
-            }
-            component => component
-                .as_os_str()
-                .to_str()
-                .ok_or("embedded Flow source path must be valid UTF-8"),
+pub fn portable_embedded_path(path: &Path) -> Result<String, FlowResolutionError> {
+    let normalized = normalize_embedded_path(path)?;
+    normalized
+        .components()
+        .map(|component| {
+            component.as_os_str().to_str().context(InvalidSnafu {
+                reference: path.display().to_string(),
+                message: "embedded Flow source path must be valid UTF-8",
+            })
         })
         .collect::<Result<Vec<_>, _>>()
         .map(|components| components.join("/"))
-}
-
-fn serialize_embedded_path<S: serde::Serializer>(
-    path: &Path,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    let path = portable_embedded_path(path).map_err(serde::ser::Error::custom)?;
-    serializer.serialize_str(&path)
-}
-
-fn serialize_embedded_sources<S: serde::Serializer>(
-    sources: &BTreeMap<PathBuf, String>,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    use serde::ser::SerializeMap;
-
-    let mut map = serializer.serialize_map(Some(sources.len()))?;
-    for (path, source) in sources {
-        let path = portable_embedded_path(path).map_err(serde::ser::Error::custom)?;
-        map.serialize_entry(&path, source)?;
-    }
-    map.end()
 }
 
 impl FlowSourceBundle {
