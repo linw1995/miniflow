@@ -3,15 +3,88 @@ use crate::{
     PreparedSubgraph, WorkflowArguments, WorkflowRunError,
 };
 use serde_json::Value;
-use snafu::{ResultExt, Snafu, ensure};
-use std::{collections::BTreeSet, fmt, sync::Arc};
+use snafu::{OptionExt, ResultExt, Snafu, ensure};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    sync::Arc,
+};
 
 /// An immutable, process-local handle to a Flow.
 ///
-/// Clones share preparation, never invocation state or the producer's context. Handles
-/// have identity equality and deliberately have no serialization implementation.
+/// Clones share preparation and explicitly configured values, never invocation state
+/// or the producer's context. Handles have identity equality and no serialization.
 #[derive(Clone)]
-pub struct FlowValue(Arc<PreparedSubgraph>, InvocationBoundary);
+pub struct FlowValue(
+    Arc<PreparedSubgraph>,
+    InvocationBoundary,
+    Arc<WorkflowArguments>,
+);
+
+/// Prepared startup templates resolved only when a producer publishes its Flow.
+/// Only their resulting values survive; the producer's context is never retained.
+pub struct FlowInputConfiguration {
+    flow: FlowValue,
+    templates: BTreeMap<String, crate::ConfigTemplate>,
+}
+
+#[derive(Debug, Snafu)]
+pub enum FlowInputConfigurationError {
+    #[snafu(transparent)]
+    Input { source: crate::WorkflowInputError },
+    #[snafu(display("Flow input `{input}` configuration: {source}"))]
+    Template {
+        input: String,
+        source: crate::ConfigTemplateError,
+    },
+}
+
+impl From<FlowInputConfigurationError> for NodeBuildError {
+    fn from(source: FlowInputConfigurationError) -> Self {
+        Box::<dyn std::error::Error + Send + Sync>::from(source).into()
+    }
+}
+impl From<FlowInputConfigurationError> for crate::NodeExecutionError {
+    fn from(source: FlowInputConfigurationError) -> Self {
+        Box::<dyn std::error::Error + Send + Sync>::from(source).into()
+    }
+}
+
+impl FlowInputConfiguration {
+    pub fn references(&self) -> Vec<crate::ContextReference> {
+        self.templates
+            .iter()
+            .flat_map(|(input, template)| template.references(&format!("inputs.{input}")))
+            .collect()
+    }
+
+    pub fn properties(&self) -> Value {
+        self.flow.properties_for(self.templates.keys())
+    }
+
+    pub fn resolve(
+        &self,
+        context: &ExecutionContext,
+    ) -> Result<FlowValue, FlowInputConfigurationError> {
+        let arguments = self
+            .templates
+            .iter()
+            .map(|(input, template)| {
+                let value = template.resolve(context).context(TemplateSnafu { input })?;
+                Ok((input.clone(), value))
+            })
+            .collect::<Result<_, FlowInputConfigurationError>>()?;
+        Ok(self.flow.bind_inputs(WorkflowArguments(arguments))?)
+    }
+}
+
+impl fmt::Debug for FlowInputConfiguration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FlowInputConfiguration")
+            .finish_non_exhaustive()
+    }
+}
 
 #[derive(Clone, Copy)]
 enum InvocationBoundary {
@@ -86,7 +159,11 @@ impl FlowValue {
                 name: port.name.as_ref(),
             })?;
         }
-        Ok(Self(Arc::new(body), InvocationBoundary::Local))
+        Ok(Self(
+            Arc::new(body),
+            InvocationBoundary::Local,
+            Arc::default(),
+        ))
     }
 
     /// Wraps a manifest-backed executor observed independently, such as a
@@ -168,7 +245,127 @@ impl FlowValue {
     /// Flow. Derivation reads only the prepared interface; it never executes the
     /// body or serializes its nodes.
     pub fn properties(&self) -> Value {
-        self.0.properties()
+        self.properties_for(std::iter::empty())
+    }
+
+    fn properties_for<'a>(&'a self, names: impl Iterator<Item = &'a String>) -> Value {
+        let configured: BTreeSet<_> = self.2.0.keys().chain(names).collect();
+        let mut properties = self.0.properties();
+        if let Some(startup) = properties["startup"].as_str().map(str::to_owned) {
+            let mut hidden = BTreeSet::new();
+            for parameter in properties["parameters"].as_array_mut().unwrap() {
+                let name = parameter["name"].as_str().unwrap().to_owned();
+                if configured.contains(&crate::output_id(&startup, &name)) {
+                    parameter["configured"] = true.into();
+                    hidden.insert(name);
+                }
+            }
+            properties["allowed"]
+                .as_object_mut()
+                .unwrap()
+                .retain(|name, _| !hidden.contains(name));
+            properties["required"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|name| !hidden.contains(name.as_str().unwrap()));
+        }
+        properties
+    }
+
+    /// Prepares the same context templates used by execution-time node configuration.
+    /// Input names and literal types are checked without resolving context or sources.
+    pub fn configure_inputs(
+        &self,
+        inputs: BTreeMap<String, Value>,
+    ) -> Result<FlowInputConfiguration, FlowInputConfigurationError> {
+        let mut templates = BTreeMap::new();
+        for (name, value) in inputs {
+            let name = self.0.inputs.qualify_name(&name)?;
+            let input =
+                self.0
+                    .inputs
+                    .parameter(&name)
+                    .context(crate::workflow_inputs::InvalidSnafu {
+                        path: crate::workflow_inputs::pointer("", &name),
+                        message: "unknown workflow input",
+                    })?;
+            ensure!(
+                !self.2.0.contains_key(&name) && !templates.contains_key(&name),
+                crate::workflow_inputs::InvalidSnafu {
+                    path: crate::workflow_inputs::pointer("", &name),
+                    message: "workflow input is already configured",
+                }
+            );
+            let template =
+                crate::ConfigTemplate::parse(value).context(TemplateSnafu { input: &name })?;
+            if let Some(value) = template.literal() {
+                input.value_type.validate_shared(value).context(
+                    crate::workflow_inputs::TypeMismatchSnafu {
+                        path: crate::workflow_inputs::pointer("", &name),
+                    },
+                )?;
+            }
+            templates.insert(name, template);
+        }
+        Ok(FlowInputConfiguration {
+            flow: self.clone(),
+            templates,
+        })
+    }
+
+    /// Immutably binds a subset of startup inputs, preserving native values and markers.
+    pub fn bind_inputs(
+        &self,
+        mut arguments: WorkflowArguments,
+    ) -> Result<Self, crate::WorkflowInputError> {
+        let count = arguments.0.len();
+        arguments.qualify_inputs(&self.0.inputs)?;
+        ensure!(
+            count == arguments.0.len(),
+            crate::workflow_inputs::InvalidSnafu {
+                path: "",
+                message: "workflow input has duplicate aliases",
+            }
+        );
+        self.0.inputs.validate_values(&arguments)?;
+        self.reject_configured_inputs(&arguments)?;
+        if arguments.0.is_empty() {
+            return Ok(self.clone());
+        }
+        self.0.inputs.mark_secrets(&mut arguments);
+        let mut bound = self.2.as_ref().clone();
+        bound.0.extend(arguments.0);
+        Ok(Self(self.0.clone(), self.1, Arc::new(bound)))
+    }
+
+    /// Combines caller arguments with configured inputs without allowing overrides.
+    /// Static dispatch uses this before invoking its frozen copy of the same body.
+    pub fn invocation_arguments(
+        &self,
+        mut arguments: WorkflowArguments,
+    ) -> Result<WorkflowArguments, crate::WorkflowInputError> {
+        arguments.qualify_inputs(&self.0.inputs)?;
+        self.reject_configured_inputs(&arguments)?;
+        let mut merged = self.2.as_ref().clone();
+        merged.0.extend(arguments.0);
+        self.0.inputs.mark_secrets(&mut merged);
+        Ok(merged)
+    }
+
+    fn reject_configured_inputs(
+        &self,
+        arguments: &WorkflowArguments,
+    ) -> Result<(), crate::WorkflowInputError> {
+        for name in arguments.0.keys() {
+            ensure!(
+                !self.2.0.contains_key(name),
+                crate::workflow_inputs::InvalidSnafu {
+                    path: crate::workflow_inputs::pointer("", name),
+                    message: "configured workflow input cannot be overridden",
+                }
+            );
+        }
+        Ok(())
     }
 
     /// Uses Call's qualified `node.port` names and effective requiredness.
@@ -190,6 +387,7 @@ impl FlowValue {
                 })
             })
             .collect();
+        ports.retain(|port| !self.2.0.contains_key(port.name.as_ref()));
         ports.sort_by(|left, right| left.name.cmp(&right.name));
         ports
     }
@@ -245,11 +443,7 @@ impl FlowValue {
                 message: "Flow invocation requires an independent body; an implicit scope frame is unavailable",
             }
         );
-        let mut arguments = arguments;
-        // Dynamic callers supply flat startup names; runtime invocation keeps one
-        // canonical `node.port` key space for secrets, defaults, and observations.
-        arguments.qualify_inputs(&self.0.inputs)?;
-        self.0.inputs.mark_secrets(&mut arguments);
+        let arguments = self.invocation_arguments(arguments)?;
         if matches!(self.1, InvocationBoundary::External) {
             return context.run_external_flow(id, arguments, |child| {
                 let mut emitter =
@@ -307,7 +501,7 @@ impl fmt::Debug for FlowValue {
 
 impl PartialEq for FlowValue {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        Arc::ptr_eq(&self.0, &other.0) && Arc::ptr_eq(&self.2, &other.2)
     }
 }
 
@@ -316,7 +510,7 @@ impl Eq for FlowValue {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{InputBinding, ValueType, WorkflowInput, WorkflowInputSchema};
+    use crate::{InputBinding, ValueRef, ValueType, WorkflowInput, WorkflowInputSchema};
     use serde_json::json;
     use std::collections::BTreeMap;
 
@@ -331,6 +525,223 @@ mod tests {
             panic!("expected shared Flow contract error, got {error}");
         };
         source.downcast_ref().unwrap()
+    }
+
+    fn configurable() -> FlowValue {
+        let schema = serde_json::from_value(json!({"inputs":{"params":{
+            "token":{"type":"string","required":true,"binding":{"secret":true}},
+            "scope":{"type":"string","required":true},
+            "query":{"type":"string","required":true},
+            "count":{"type":"uint","required":false,"binding":{"default":5}},
+            "callback":{"type":"flow","required":false}
+        }},"stdin":{}}))
+        .unwrap();
+        FlowValue::new(
+            PreparedSubgraph::new(
+                vec![],
+                vec![PortSpec::new("arguments", ValueType::Object, true)],
+                |context| {
+                    Ok(crate::FlowOutputs::from([(
+                        "arguments".into(),
+                        ValueRef::object(
+                            context
+                                .workflow_arguments()
+                                .0
+                                .iter()
+                                .map(|(name, value)| (name.as_str().into(), value.clone())),
+                        ),
+                    )]))
+                },
+            )
+            .with_input_schema(schema),
+        )
+        .unwrap()
+    }
+
+    fn producer_context(token: ValueRef) -> ExecutionContext {
+        let source = crate::FlowNode {
+            definition_id: "source".into(),
+            node: (),
+            metadata: NodePorts {
+                inputs: vec![],
+                outputs: vec![PortSpec::new("token", ValueType::String, true)],
+            }
+            .into(),
+            output_keys: Default::default(),
+        };
+        ExecutionContext::for_message(
+            &source,
+            crate::Outputs::from([("token".into(), token)]).into(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn configured_inputs_use_producer_templates_without_capturing_context() {
+        let flow = configurable();
+        let configuration = flow
+            .configure_inputs(BTreeMap::from([
+                (
+                    "token".into(),
+                    json!({"$template":"Bearer {{ source.token }}"}),
+                ),
+                ("params.scope".into(), json!("fixed-scope")),
+            ]))
+            .unwrap();
+        assert_eq!(
+            configuration.references(),
+            vec![crate::ContextReference::new(
+                "source.token",
+                "inputs.params.token"
+            )]
+        );
+        let properties = configuration.properties();
+        assert!(properties["allowed"].get("token").is_none());
+        assert!(properties["allowed"].get("scope").is_none());
+        assert!(properties["allowed"].get("query").is_some());
+        assert!(properties["allowed"].get("count").is_some());
+        assert_eq!(properties["required"], json!(["query"]));
+        let secret = ValueRef::from("synthetic-first-key").into_secret();
+        let context = producer_context(secret);
+        let configured = configuration.resolve(&context).unwrap();
+        drop(context);
+        assert_eq!(configured.properties(), properties);
+        assert_eq!(
+            configured
+                .input_ports()
+                .iter()
+                .map(|port| port.name.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["params.callback", "params.count", "params.query"]
+        );
+        let outputs = configured
+            .invoke(
+                "invoke",
+                WorkflowArguments(crate::Inputs::from([("query".into(), "search".into())])),
+                &mut ExecutionContext::default(),
+            )
+            .unwrap();
+        assert_eq!(outputs["arguments"]["params.scope"], json!("fixed-scope"));
+        assert_eq!(
+            outputs["arguments"]["params.token"].as_str(),
+            Some("Bearer synthetic-first-key")
+        );
+        assert!(outputs["arguments"]["params.token"].is_secret());
+        assert!(!outputs["arguments"]["params.query"].contains_secret());
+        assert!(!properties.to_string().contains("synthetic-first-key"));
+        assert_eq!(
+            format!("{configuration:?}"),
+            "FlowInputConfiguration { .. }"
+        );
+        let other = configuration
+            .resolve(&producer_context("synthetic-second-key".into()))
+            .unwrap();
+        assert_ne!(configured, other);
+        assert_eq!(
+            other.invocation_arguments(Default::default()).unwrap().0["params.token"].as_str(),
+            Some("Bearer synthetic-second-key")
+        );
+        assert!(
+            other.invocation_arguments(Default::default()).unwrap().0["params.token"].is_secret()
+        );
+    }
+
+    #[test]
+    fn native_partial_bindings_preserve_values_and_reject_every_override_alias() {
+        let flow = configurable();
+        let callback: ValueRef = FlowValue::new(body()).unwrap().into();
+        let bound = flow
+            .bind_inputs(WorkflowArguments(crate::Inputs::from([
+                ("scope".into(), "fixed".into()),
+                ("callback".into(), callback.clone()),
+            ])))
+            .unwrap();
+        assert_ne!(flow, bound);
+        assert_eq!(bound, bound.bind_inputs(Default::default()).unwrap());
+        let arguments = bound.invocation_arguments(Default::default()).unwrap();
+        assert!(arguments.0["params.callback"].ptr_eq(&callback));
+        for name in ["scope", "params.scope"] {
+            let override_args =
+                WorkflowArguments(crate::Inputs::from([(name.into(), "override".into())]));
+            assert!(bound.invocation_arguments(override_args.clone()).is_err());
+            assert!(bound.bind_inputs(override_args).is_err());
+            assert!(
+                bound
+                    .configure_inputs(BTreeMap::from([(name.into(), json!("override"))]))
+                    .is_err()
+            );
+        }
+        for arguments in [
+            crate::Inputs::from([("unknown".into(), 1.into())]),
+            crate::Inputs::from([("count".into(), "not-a-number".into())]),
+            crate::Inputs::from([
+                ("scope".into(), "one".into()),
+                ("params.scope".into(), "two".into()),
+            ]),
+        ] {
+            assert!(flow.bind_inputs(WorkflowArguments(arguments)).is_err());
+        }
+        assert!(flow.properties()["allowed"].get("scope").is_some());
+        assert!(bound.properties()["allowed"].get("scope").is_none());
+        assert!(bound.properties()["parameters"].as_array().unwrap().iter().any(|parameter| parameter["name"]=="callback" && parameter["configured"]==true));
+    }
+
+    #[test]
+    fn invalid_flow_configuration_fails_before_invocation_and_retains_typed_sources() {
+        let flow = configurable();
+        for fields in [
+            json!({"unknown":true}),
+            json!({"scope":42}),
+            json!({"scope":{"$ref":""}}),
+            json!({"scope":"one","params.scope":"two"}),
+        ] {
+            let error = flow
+                .configure_inputs(serde_json::from_value(fields).unwrap())
+                .unwrap_err();
+            let _: NodeBuildError = error.into();
+        }
+        for template in [
+            json!({"$ref":"missing.output"}),
+            json!({"$ref":"source.token","path":"/missing"}),
+        ] {
+            let configuration = flow
+                .configure_inputs(BTreeMap::from([("scope".into(), template)]))
+                .unwrap();
+            let error = configuration
+                .resolve(&producer_context("synthetic-key".into()))
+                .unwrap_err();
+            assert!(matches!(
+                &error,
+                FlowInputConfigurationError::Template { .. }
+            ));
+            assert!(!format!("{error:?}").contains("synthetic-key"));
+            let _: crate::NodeExecutionError = error.into();
+        }
+        let wrong_type = flow
+            .configure_inputs(BTreeMap::from([(
+                "count".into(),
+                json!({"$ref":"source.token"}),
+            )]))
+            .unwrap();
+        assert!(matches!(
+            wrong_type.resolve(&producer_context("string".into())),
+            Err(FlowInputConfigurationError::Input { .. })
+        ));
+        let ambiguous = FlowValue::new(body().with_input_schema(serde_json::from_value(json!({"inputs":{
+            "a":{"text":{"type":"string","required":false}},"b":{"text":{"type":"string","required":false}}
+        },"stdin":{}})).unwrap())).unwrap();
+        assert!(
+            ambiguous
+                .configure_inputs(BTreeMap::from([("text".into(), json!("value"))]))
+                .is_err()
+        );
+        let configured = ambiguous
+            .bind_inputs(WorkflowArguments(crate::Inputs::from([(
+                "a.text".into(),
+                "value".into(),
+            )])))
+            .unwrap();
+        assert_eq!(configured.properties()["callable"], false);
     }
 
     #[test]

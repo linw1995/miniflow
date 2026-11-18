@@ -79,7 +79,7 @@ the actual observation graph, workflow identity, execution mode, and prepared in
 Both artifacts use the same validated preparation,
 including configured input types and conditional stdin requirements. The manifest is generated before linking during
 the existing runner build; it does not require a second compilation. Its wire format is documented in
-[observability](observability.md#embedded-manifest-format). The generated-project layout version is `2026-11-14`;
+[observability](observability.md#embedded-manifest-format). The generated-project layout version is `2026-11-18`;
 explicit build directories owned by an older layout must be recreated at a compatible location.
 The runner links the manifest into a dedicated ELF or Mach-O section and needs no manifest sidecar after installation.
 Runtime helpers read graph and interface views from the descriptor; generated runners use them for observation and inspection.

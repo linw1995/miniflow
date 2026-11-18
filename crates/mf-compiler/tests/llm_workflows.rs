@@ -663,7 +663,7 @@ fn composed_conversation_compiles_without_application_nodes() {
     let plan = compile_definition(&definition, &registry).unwrap();
     let manifest = plan.manifest(&registry).unwrap();
     let arguments = mf_runtime::resolve_workflow_inputs(
-        &manifest.input_schema,
+        &manifest.descriptor.input_schema,
         &arguments(&json!({
             "params.messages":[{"role":"user","content":"Hello"}],
             "params.api_key":"synthetic-key",
@@ -671,7 +671,11 @@ fn composed_conversation_compiles_without_application_nodes() {
         })),
         |_| None,
     ).unwrap();
-    manifest.input_schema.validate(&arguments).unwrap();
+    manifest
+        .descriptor
+        .input_schema
+        .validate(&arguments)
+        .unwrap();
     assert_eq!(
         serde_json::to_value(&arguments).unwrap()["params.messages"],
         json!([{"role":"user","content":"Hello"}])

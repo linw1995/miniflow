@@ -2,8 +2,8 @@
 mod controlled;
 extern crate mfn_core as _;
 use mf_compiler::{
-    CompiledWorkflow, Inputs, NodeExecutionError, NodeRegistration, NodeRegistry, PortSpec,
-    ValueType, WorkflowDefinition, compile_definition, instantiate_stream, plan_definition,
+    Inputs, NodeExecutionError, NodeRegistration, NodeRegistry, PortSpec, ValueType,
+    WorkflowDefinition, compile_definition, instantiate_stream, plan_definition,
 };
 use mf_runtime::{EventContext, EventEffects, EventNode, NodeEvent};
 use serde_json::{Value, json};
@@ -75,7 +75,6 @@ fn prepare(value: Value) -> Result<mf_runtime::PreparedStream, mf_compiler::Work
     let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry)?;
-    let plan = CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
     instantiate_stream(&plan, &registry)
 }
 fn output_channels(plan: &mf_runtime::StreamPlan) -> Vec<usize> {
@@ -152,15 +151,19 @@ fn prepares_typed_input_and_new_message_domains_without_execution() {
         ("2026-09-29", 4, "requires workflow schema 2026-10-03"),
         ("2026-10-03", 0, "stream limits must be positive"),
     ] {
-        let mut value: serde_json::Value = serde_json::from_str(&plan.to_json().unwrap()).unwrap();
-        value["graph"]["definition"]["version"] = json!(version);
-        value["graph"]["definition"]["execution"]["limits"]["workers"] = json!(workers);
-        let definition = serde_json::from_value(value["graph"]["definition"].clone()).unwrap();
+        let mut definition = plan.graph.definition.clone();
+        definition.version = match version {
+            "2026-09-29" => mf_runtime::WorkflowDefinitionVersion::V2026_09_29,
+            _ => mf_runtime::WorkflowDefinitionVersion::V2026_10_03,
+        };
+        definition.execution.as_mut().unwrap().limits.workers = workers;
         let error = compile_definition(&definition, &registry)
             .unwrap_err()
             .to_string();
         assert!(error.contains(expected), "{error}");
-        let error = CompiledWorkflow::from_json(&value.to_string())
+        let mut invalid = plan.clone();
+        invalid.graph.definition = definition.clone();
+        let error = mf_compiler::describe_compiled(&invalid)
             .unwrap_err()
             .to_string();
         assert!(error.contains(expected), "{error}");

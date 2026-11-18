@@ -1,6 +1,6 @@
 use crate::{
     DefinitionId, EdgeDefinition, FlowConnection, FlowDependency, FlowNode, FlowOutput,
-    NodeBuildError, NodeRegistry, ValueType, WorkflowOutputDefinition, output_id,
+    NodeBuildError, NodeRegistry, WorkflowOutputDefinition, output_id,
 };
 use mf_runtime::{
     ExecutionDomain, ExecutionDomains, NodeExecution, NodeId, StdinRequirement, WorkflowInput,
@@ -1756,19 +1756,19 @@ pub fn prepare_stream(
 mod tests {
     #[test]
     fn router_assignment_constructor_parses_generated_bindings() {
-        let node = super::prepared_router_assign_from_json(
+        let node = mf_runtime::prepared_router_assign(
             "write",
             "choose",
-            r#"["first","second"]"#,
-            r#"["first"]"#,
-        )
-        .unwrap();
+            vec!["first".into(), "second".into()],
+            vec!["first".into()],
+        );
         assert_eq!(node.definition_id.as_str(), "write");
         assert_eq!(node.metadata.ports.inputs[0].name, "value");
     }
 
     use super::*;
     use crate::NodeExecutionError;
+    use mf_runtime::ValueType;
     use mf_runtime::{FlowOutputs, Inputs, Outputs, RuntimeOptions, TaskNode};
     use serde_json::json;
     use std::num::NonZeroUsize;
@@ -1842,13 +1842,9 @@ mod tests {
     }
 
     #[test]
-    fn scope_source_json_preserves_named_values_and_adds_implicit_index() {
+    fn scope_source_preserves_named_values_and_adds_implicit_index() {
         let types = BTreeMap::from([("item".to_owned(), ValueType::String)]);
-        let source = prepared_scope_source_from_json(
-            "custom-input",
-            &serde_json::to_string(&types).unwrap(),
-        )
-        .unwrap();
+        let source = mf_runtime::prepared_scope_source("custom-input", &types);
         assert_eq!(source.definition_id.as_str(), "custom-input");
         assert!(source.metadata.ports.inputs.is_empty());
         assert_eq!(source.metadata.ports.outputs.len(), 2);
@@ -1868,22 +1864,6 @@ mod tests {
                 .iter()
                 .any(|port| port.name == "index")
         );
-    }
-
-    #[test]
-    fn scope_source_json_preserves_parse_error_source() {
-        let error = prepared_scope_source_from_json("custom-input", "[]")
-            .err()
-            .unwrap();
-        let WorkflowBuildError::InvalidEmbeddedConfig {
-            definition_id,
-            source,
-        } = error
-        else {
-            panic!("expected the embedded configuration error");
-        };
-        assert_eq!(definition_id.as_str(), "custom-input");
-        assert!(source.is_data());
     }
 
     struct EmptyNode;

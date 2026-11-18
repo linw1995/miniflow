@@ -153,10 +153,10 @@ extracts declared top-level child values during source resolution; ordinary JSON
 Absent or null optional children produce no graph entry. The resolved tree is handed directly to
 `plan_resolved_workflow`, so planning retains the selected receiver's child decisions.
 For an already resolved inline definition, `plan_resolved_definition(&definition, &registry)` is an
-authoring convenience that selects children using that registry. Do not use it to replan saved artifacts.
+authoring convenience that selects children using that registry. Do not use it to replan compiled graphs.
 Registered plain factories extract no children; an unavailable registration is not a registered plain kind.
 
-Offline descriptions, generated code, and saved-plan preparation traverse this explicit child graph.
+Offline descriptions, generated code, and compiled-plan preparation traverse this explicit child graph.
 They never rediscover children by inspecting configuration keys or order paths. Preparation checks
 provider availability and actual compiled-child binding keys at the receiving boundary. Required,
 default, and ordinary-field validation remains the receiver decoder's responsibility; complete
@@ -171,13 +171,13 @@ those views never deserialize the redundant raw child body. Factories receive th
 configuration alongside authoritative prepared children. Node-owned errors retain their typed sources
 under generic compiler node or child-scope context.
 
-Manifest payload version `2026-11-14` contains the root `definition`, resource `entry` and `sources`,
+Manifest payload version `2026-11-18` contains the root `definition`, resource `entry` and `sources`,
 and a public `descriptor` with observation `description` and prepared `input_schema`. It does not
 serialize compiler graphs or execution layouts. Native `CompiledWorkflow` and `CompiledGraph` do not
-implement Serde. Explicit `to_json()` and `from_json()` APIs use a compiler-owned saved-plan DTO with
-a `graph` wrapper; they are not the standalone build handoff. Generated projects use `workflow-plan.rs`,
-and frozen embedded modules construct native Rust graph data rather than deserializing compiler IR.
-Framing remains version 1. Older manifest payloads are rejected rather than inferred or adapted.
+implement Serde, and there is no saved-compiled-plan protocol. Generated projects use `workflow-plan.rs`
+only as a build-time native graph handoff; runtime preparation uses generated fixed bindings. Dynamic
+host embedding resolves its native resource bundle at preparation time. Framing remains version 1.
+Older manifest payloads are rejected rather than inferred or adapted.
 
 `manifest(&registry) -> Result<WorkflowManifest, PlanError>` derives the current configured interface
 from the host registry. Inspection prepares separate nodes without executing them. There is no
@@ -211,9 +211,7 @@ before generating the runner project. Standalone startup does not re-read files,
 resolve sources, validate graphs, or repeat type inference. Generated Rust binds provider instances to compiler-resolved
 contracts, child interfaces, and fixed execution layouts. Typed fast paths and dynamic fallback share the same instances.
 `mf-compiler` is a build dependency, not a standalone runtime dependency. Deleting authoring files after compilation remains supported. This differs from
-an embedded module's explicit host `plan(registry)` entry point. The separate
-`CompiledWorkflow::generate_embedded_artifacts` API also retains its already-frozen, zero-argument
-`plan()` entry point rather than adopting resource-bundle resolution.
+an embedded module's explicit host `plan(registry)` entry point.
 
 ## Repository example
 

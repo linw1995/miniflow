@@ -92,7 +92,7 @@ fn generates_layouts_and_configured_interfaces_from_one_preparation() {
             *manifest
         );
         let before = PREPARATIONS.load(Ordering::SeqCst);
-        assert_eq!(plan.manifest(&registry).unwrap(), manifest);
+        assert_eq!(plan.manifest(&registry).unwrap(), *manifest);
         assert_eq!(PREPARATIONS.load(Ordering::SeqCst), before + 1);
         let mut expected = plan.graph.definition.clone();
         expected.execution = stream.then(mf_runtime::StreamExecution::default);

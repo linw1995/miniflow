@@ -45,6 +45,18 @@ pub struct ToolCallEvent {
     pub call: ToolCall,
 }
 
+/// A raw argument fragment or an identity hint from the primary Chat Completions choice.
+/// Hint-only records have an empty argument string and do not change accumulated arguments.
+/// Neither kind of preview is a tool call ready for dispatch.
+#[derive(Clone, Debug, PartialEq, Eq, NodeValue)]
+pub struct ToolCallDelta {
+    pub model_call_id: String,
+    pub index: u64,
+    pub arguments: String,
+    pub id: Option<String>,
+    pub name: Option<String>,
+}
+
 impl ToolCall {
     pub fn from_provider(call: rig::ToolCall) -> Result<Self, LlmExecutionError> {
         let id = call.id.wire().into_owned();

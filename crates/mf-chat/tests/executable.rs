@@ -42,8 +42,9 @@ fn add_provider_input(manifest: &mut WorkflowManifest, name: &str) {
             kind: manifest.definition.nodes.last().unwrap().kind.clone(),
         },
     );
-    let port = manifest.input_schema.inputs["params"][name].clone();
+    let port = manifest.descriptor.input_schema.inputs["params"][name].clone();
     manifest
+        .descriptor
         .input_schema
         .inputs
         .insert("provider".into(), [(name.into(), port)].into());
@@ -54,6 +55,7 @@ fn builtin_titles_reuse_unique_resolved_provider_inputs_and_preserve_secrets() {
     let mut manifest = manifest();
     add_provider_input(&mut manifest, "api_key");
     manifest
+        .descriptor
         .input_schema
         .inputs
         .get_mut("params")
@@ -88,6 +90,7 @@ fn builtin_titles_skip_missing_ambiguous_wrongly_typed_or_empty_provider_inputs(
             match variant {
                 "missing" => {
                     manifest
+                        .descriptor
                         .input_schema
                         .inputs
                         .get_mut("params")
@@ -99,6 +102,7 @@ fn builtin_titles_skip_missing_ambiguous_wrongly_typed_or_empty_provider_inputs(
                 }
                 "type" => {
                     let port = manifest
+                        .descriptor
                         .input_schema
                         .inputs
                         .get_mut("params")
@@ -220,7 +224,11 @@ fn conversation_inputs_are_bound_separately_from_parameters() {
         }],
     };
     let arguments = contract.arguments(input, &parameters).unwrap();
-    manifest.input_schema.validate(&arguments).unwrap();
+    manifest
+        .descriptor
+        .input_schema
+        .validate(&arguments)
+        .unwrap();
     assert_eq!(
         serde_json::to_value(&arguments).unwrap()["params.messages"],
         json!([{"role":"user","content":"hello"}])
@@ -297,6 +305,7 @@ fn preflight_checks_transport_and_external_ports() {
     let original = manifest();
     let mut wrong_type = original.clone();
     wrong_type
+        .descriptor
         .input_schema
         .inputs
         .get_mut("params")
@@ -306,6 +315,7 @@ fn preflight_checks_transport_and_external_ports() {
         .value_type = mf_runtime::ValueType::Boolean;
     let mut missing = original.clone();
     missing
+        .descriptor
         .input_schema
         .inputs
         .get_mut("params")
@@ -315,12 +325,13 @@ fn preflight_checks_transport_and_external_ports() {
     let mut source = ambiguous.definition.nodes[0].clone();
     source.id = "other".into();
     ambiguous.definition.nodes.push(source);
-    ambiguous.input_schema.inputs.insert(
+    ambiguous.descriptor.input_schema.inputs.insert(
         "other".into(),
-        original.input_schema.inputs["params"].clone(),
+        original.descriptor.input_schema.inputs["params"].clone(),
     );
     let mut stdin = original.clone();
     stdin
+        .descriptor
         .input_schema
         .stdin
         .insert("params".into(), mf_runtime::StdinRequirement::Always);
@@ -623,7 +634,11 @@ fn application_context_is_bound_by_the_common_contract_and_optional_titles_are_p
     let arguments = contract
         .arguments(started.request.clone(), &parameters(&contract))
         .unwrap();
-    manifest.input_schema.validate(&arguments).unwrap();
+    manifest
+        .descriptor
+        .input_schema
+        .validate(&arguments)
+        .unwrap();
     let context = serde_json::to_value(&arguments).unwrap()["params.context"].clone();
     assert_eq!(
         context["title"],

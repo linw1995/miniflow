@@ -154,6 +154,24 @@ impl CallNode {
         inputs: Inputs,
         context: &mut ExecutionContext,
     ) -> Result<NodeResult, NodeExecutionError> {
+        self.execute_packed_configured(inputs, context, None)
+    }
+
+    pub fn execute_packed_with_flow(
+        &self,
+        inputs: Inputs,
+        context: &mut ExecutionContext,
+        flow: &mf_runtime::FlowValue,
+    ) -> Result<NodeResult, NodeExecutionError> {
+        self.execute_packed_configured(inputs, context, Some(flow))
+    }
+
+    fn execute_packed_configured(
+        &self,
+        inputs: Inputs,
+        context: &mut ExecutionContext,
+        flow: Option<&mf_runtime::FlowValue>,
+    ) -> Result<NodeResult, NodeExecutionError> {
         if let Some(error) = context.cancellation().failure() {
             return Err(error.into());
         }
@@ -166,6 +184,9 @@ impl CallNode {
                 .collect(),
         );
         let outputs = (|| {
+            if let Some(flow) = flow {
+                arguments = flow.invocation_arguments(arguments)?;
+            }
             arguments.qualify_inputs(&self.body.inputs)?;
             self.body.inputs.mark_secrets(&mut arguments);
             self.invoke(arguments, context, &mut mf_runtime::DiscardSink)
@@ -210,7 +231,9 @@ fn is_business_failure(error: &mf_runtime::WorkflowRunError) -> bool {
         return false;
     };
     match source {
-        NodeExecutionError::ExecutionFailed { .. } => true,
+        NodeExecutionError::ExecutionFailed { .. } | NodeExecutionError::BusinessFailed { .. } => {
+            true
+        }
         NodeExecutionError::PluginFailed { source } => {
             if let Some(error) = source.downcast_ref::<WorkflowRunError>() {
                 return is_business_failure(error);
@@ -334,7 +357,14 @@ mod tests {
         }
         for nested in [false, true] {
             for kind in [
-                "business", "context", "stream", "worker", "contract", "encode", "plugin",
+                "business",
+                "typed_business",
+                "context",
+                "stream",
+                "worker",
+                "contract",
+                "encode",
+                "plugin",
             ] {
                 let inner = PreparedSubgraph::new(vec![], vec![], move |_| {
                     let source = match kind {
@@ -342,6 +372,11 @@ mod tests {
                             message: "domain failure with private data",
                         }
                         .build(),
+                        "typed_business" => mf_runtime::NodeBusinessFailedSnafu.into_error(Box::<
+                            dyn std::error::Error + Send + Sync,
+                        >::from(
+                            std::io::Error::other("domain failure with private data"),
+                        )),
                         "context" => {
                             return Err(WorkflowRunError::Context {
                                 definition_id: "inner".into(),
@@ -407,7 +442,7 @@ mod tests {
                     inner
                 };
                 let result = packed(body, &mut ExecutionContext::default());
-                if kind == "business" {
+                if matches!(kind, "business" | "typed_business") {
                     let result = result.unwrap().outputs.remove("result").unwrap();
                     assert!(result["error"].as_str().unwrap().contains("domain failure"));
                     assert_eq!(
@@ -432,15 +467,28 @@ mod tests {
 
     #[test]
     fn packed_calls_never_recover_cancellation_even_after_body_completion() {
-        let body = PreparedSubgraph::new(vec![], vec![], |state| {
-            state
-                .cancellation()
-                .cancel(mf_runtime::StreamError::InputFailure {
-                    message: "cancelled".into(),
-                });
-            Ok(Default::default())
-        });
-        assert!(packed(body, &mut ExecutionContext::default()).is_err());
+        for business in [false, true] {
+            let body = PreparedSubgraph::new(vec![], vec![], move |state| {
+                state
+                    .cancellation()
+                    .cancel(mf_runtime::StreamError::InputFailure {
+                        message: "cancelled".into(),
+                    });
+                if business {
+                    Err(mf_runtime::NodeBusinessFailedSnafu.into_error(Box::<
+                        dyn std::error::Error + Send + Sync,
+                    >::from(
+                        std::io::Error::other("operation failed after cancellation"),
+                    )))
+                    .context(mf_runtime::NodeExecutionSnafu {
+                        definition_id: "operation",
+                    })
+                } else {
+                    Ok(Default::default())
+                }
+            });
+            assert!(packed(body, &mut ExecutionContext::default()).is_err());
+        }
         let mut context = ExecutionContext::default();
         context
             .cancellation()

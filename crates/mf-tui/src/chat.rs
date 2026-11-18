@@ -435,7 +435,7 @@ impl Controller {
             |name| std::env::var_os(name),
         )?;
         let invocation = Invocation::new(&session.id);
-        if self.launch.contract.answer_stream {
+        if self.launch.contract.has_previews() {
             self.preview.lock().unwrap().begin(invocation.clone());
         }
         let captured = Arc::new(Mutex::new(None));
@@ -470,7 +470,7 @@ impl Controller {
             retry_of,
             result_alternatives: Some(self.launch.contract.alternatives),
         };
-        let preview_consumer = self.launch.contract.answer_stream.then(|| {
+        let preview_consumer = self.launch.contract.has_previews().then(|| {
             let outer_cancellation = cancellation.clone();
             let preview = self.preview.clone();
             let closed = self.closed.clone();
@@ -623,7 +623,7 @@ impl mf_chat::ConversationBackend for ExternalBackend {
         invocation: &Invocation,
         request: mf_chat::ConversationInputs,
         context: &mut mf_runtime::ExecutionContext,
-        preview: Option<&mut dyn FnMut(mf_chat::TextDelta) -> Result<(), mf_chat::ChatError>>,
+        preview: Option<&mut dyn FnMut(mf_chat::PreviewDelta) -> Result<(), mf_chat::ChatError>>,
         _: Option<&mf_telemetry::observation::Observer>,
     ) -> Result<mf_chat::ConversationResult, mf_chat::ChatError> {
         emit(
@@ -703,7 +703,9 @@ impl ExternalBackend {
         &self,
         request: mf_chat::ConversationInputs,
         context: &mut mf_runtime::ExecutionContext,
-        mut preview: Option<&mut dyn FnMut(mf_chat::TextDelta) -> Result<(), mf_chat::ChatError>>,
+        mut preview: Option<
+            &mut dyn FnMut(mf_chat::PreviewDelta) -> Result<(), mf_chat::ChatError>,
+        >,
     ) -> Result<(LocalOutcome, Option<mf_chat::ChatError>), ChatRunError> {
         let arguments = self.launch.contract.arguments(request, &self.parameters)?;
         let mut decoder = mf_chat::contract::ConversationOutputDecoder::new(&self.launch.contract);

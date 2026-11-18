@@ -7,7 +7,8 @@ use crate::{
     manifest::{ManifestReadError, read_manifest},
     receiver::{LoopbackReceiver, ObservationReader, ReceiverError},
     state::{
-        IterationItemObservation, LoopPassObservation, NodeObservation, NodeStatus, StateSnapshot,
+        IterationItemObservation, IterationNodeObservation, LoopPassObservation, NodeObservation,
+        NodeStatus, StateSnapshot,
     },
     traces::{TraceSnapshot, TraceView, TraceViewSnapshot},
 };
@@ -21,7 +22,10 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use mf_runtime::{MAX_WORKFLOW_INPUT_BYTES, WorkflowArguments, WorkflowInputError};
-use mf_telemetry::{description::WorkflowDescription, identity::RunId, iteration::ItemIdentity};
+use mf_telemetry::{
+    description::WorkflowDescription, event::ScopePathEntry, identity::RunId,
+    iteration::ItemIdentity,
+};
 use nix::{
     fcntl::{FcntlArg, OFlag, fcntl},
     sys::signal::Signal,
@@ -602,7 +606,8 @@ impl LocalRun {
                 })?;
             stdout
         };
-        self.receiver.finish();
+        self.receiver
+            .finish_with_interruption(self.interrupted_at.is_some());
         let outcome = LocalOutcome {
             status,
             interrupted: self.interrupted_at.is_some(),
@@ -1444,19 +1449,23 @@ fn running_display_nodes(layout: &GraphLayout, observations: &[NodeObservation])
         .iter()
         .flat_map(|display| {
             let path = layout.node_path(*display);
-            (1..=path.len()).map(|depth| &path[..depth])
+            (0..path.len()).map(move |depth| {
+                (
+                    &path[..depth],
+                    ScopePathEntry::binding_owner(&path[depth])
+                        .unwrap_or_else(|| path[depth].clone()),
+                )
+            })
         })
         .collect();
     running
-        .iter()
-        .copied()
+        .into_iter()
         .filter(|display| {
-            if !layout.is_expanded_body(*display) {
-                return true;
-            }
-            let mut path = layout.node_path(*display).to_vec();
-            path.push(layout.nodes()[*display].id.clone());
-            !active_bodies.contains(path.as_slice())
+            !layout.is_expanded_body(*display)
+                || !active_bodies.contains(&(
+                    layout.node_path(*display),
+                    layout.nodes()[*display].id.clone(),
+                ))
         })
         .collect()
 }
@@ -1519,69 +1528,312 @@ fn pip_areas(count: usize, area: Rect, reserved_height: u16) -> (Vec<Rect>, usiz
     (areas, count - visible)
 }
 
-type ExecutionPip<'a> = (usize, Option<&'a IterationItemObservation>, String);
+struct ExecutionPip<'a> {
+    display: usize,
+    title: String,
+    source: PipSource<'a>,
+}
+
+enum PipSource<'a> {
+    Static,
+    Iteration {
+        item: &'a IterationItemObservation,
+        observed: &'a IterationNodeObservation,
+    },
+    Call {
+        path: Vec<String>,
+        nodes: Arc<[NodeObservation]>,
+    },
+}
+
+impl ExecutionPip<'_> {
+    fn observations(
+        &self,
+        layout: &GraphLayout,
+        observations: &[NodeObservation],
+    ) -> Option<Vec<NodeObservation>> {
+        if matches!(self.source, PipSource::Static) {
+            return None;
+        }
+        let mut nodes = observations.to_vec();
+        for (source, target) in nodes.iter_mut().enumerate() {
+            let path = layout.source_path(source);
+            let described = &layout.all_nodes()[source];
+            match &self.source {
+                PipSource::Iteration { item, observed }
+                    if path == observed.path
+                        && observed.runtime_path.iter().any(ScopePathEntry::is_flow) =>
+                {
+                    *target = item
+                        .nodes
+                        .iter()
+                        .find(|node| {
+                            node.path == path
+                                && node.runtime_path == observed.runtime_path
+                                && node.node.id == described.id
+                        })
+                        .map_or_else(
+                            || NodeObservation::pending(&described.id, &described.kind),
+                            |node| node.node.clone(),
+                        );
+                }
+                PipSource::Iteration { item, .. } if path.starts_with(&item.iteration_path) => {
+                    *target = item
+                        .display_nodes(path, [(described.id.as_str(), described.kind.as_str())])
+                        .remove(0);
+                }
+                PipSource::Call { path: scope, nodes } if path == scope => {
+                    *target = nodes
+                        .iter()
+                        .find(|node| node.id == described.id)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            NodeObservation::pending(&described.id, &described.kind)
+                        });
+                }
+                _ => {}
+            }
+        }
+        Some(nodes)
+    }
+}
+
+fn visible_pip_node(layout: &GraphLayout, path: &[String], id: &str) -> Option<usize> {
+    let mut full = path.to_vec();
+    full.push(id.to_owned());
+    while let Some(id) = full.pop() {
+        if let Some(display) = layout.display_index_for_scoped_node(&full, &id) {
+            return Some(display);
+        }
+    }
+    None
+}
+
+fn cover_pip_ancestors(
+    layout: &GraphLayout,
+    description: &WorkflowDescription,
+    definition: &[String],
+    runtime: &[ScopePathEntry],
+    covered: &mut BTreeSet<usize>,
+) {
+    let mut path = definition.to_vec();
+    for entry in runtime {
+        if let Some(display) = layout.display_index_for_scoped_node(&path, entry.node_id()) {
+            covered.insert(display);
+        }
+        // Beyond a Flow jump, static definitions can also have independent callers.
+        if entry.is_flow() {
+            break;
+        }
+        let Ok(next) = description.scope_definition_path_from(&path, std::slice::from_ref(entry))
+        else {
+            break;
+        };
+        path = next;
+    }
+}
+
+fn iteration_runtime_path(
+    item: &IterationItemObservation,
+    observed: &IterationNodeObservation,
+) -> Vec<ScopePathEntry> {
+    if observed.runtime_path.is_empty() {
+        observed.path[item.iteration_path.len()..]
+            .iter()
+            .map(|id| ScopePathEntry::Call {
+                call_id: id.clone(),
+            })
+            .collect()
+    } else {
+        observed.runtime_path.clone()
+    }
+}
+
+fn runtime_scope_owner(entry: &ScopePathEntry) -> String {
+    if entry.is_flow() {
+        entry.node_id().to_owned()
+    } else {
+        ScopePathEntry::binding_owner(entry.node_id()).unwrap_or_else(|| entry.node_id().to_owned())
+    }
+}
 
 fn execution_pips<'a>(
     layout: &GraphLayout,
     observations: &[NodeObservation],
-    iterations: Option<&'a crate::state::IterationSnapshot>,
+    description: &WorkflowDescription,
+    snapshot: &'a StateSnapshot,
 ) -> Vec<ExecutionPip<'a>> {
-    let active: Vec<_> = iterations
-        .into_iter()
-        .flat_map(|snapshot| &snapshot.items)
-        .filter(|item| !item.closed && !item.interrupted)
+    let active: Vec<_> = snapshot
+        .iterations
+        .items
+        .iter()
+        .filter(|item| !item.closed && !item.interrupted && item.outcome.is_none())
         .flat_map(|item| {
             item.nodes
                 .iter()
                 .filter(|node| node.node.status == NodeStatus::Running)
-                .map(move |node| (item, node))
+                .map(move |node| (item, node, iteration_runtime_path(item, node)))
         })
         .collect();
+    // Definition paths can jump across the graph. Only runtime ancestry identifies
+    // which running invokers are replaced by a deeper PiP in the same invocation.
     let ancestors: BTreeSet<_> = active
         .iter()
-        .flat_map(|(item, node)| {
-            (1..=node.path.len())
-                .map(move |depth| (item.identity.clone(), node.path[..depth].to_vec()))
+        .flat_map(|(item, _, runtime)| {
+            runtime.iter().enumerate().map(move |(depth, entry)| {
+                (
+                    item.identity.clone(),
+                    runtime[..depth].to_vec(),
+                    runtime_scope_owner(entry),
+                )
+            })
         })
         .collect();
     let mut covered = BTreeSet::new();
     let mut views = Vec::new();
     let mut seen = BTreeSet::new();
-    for (item, observed) in active {
-        let mut full = observed.path.clone();
-        full.push(observed.node.id.clone());
-        if ancestors.contains(&(item.identity.clone(), full.clone())) {
+    let mut call_ancestors = BTreeSet::new();
+    for (item, observed, runtime) in &active {
+        if ancestors.contains(&(
+            item.identity.clone(),
+            runtime.clone(),
+            observed.node.id.clone(),
+        )) {
             continue;
         }
-        for depth in 0..full.len() {
-            if let Some(display) =
-                layout.display_index_for_scoped_node(&full[..depth], &full[depth])
-            {
+        cover_pip_ancestors(layout, description, &[], &item.parent_path, &mut covered);
+        let (owner, parent) = item
+            .iteration_path
+            .split_last()
+            .expect("iteration has an owner");
+        let static_parent = !item.parent_path.iter().any(ScopePathEntry::is_flow);
+        if static_parent {
+            if let Some(display) = layout.display_index_for_scoped_node(parent, owner) {
                 covered.insert(display);
             }
+            cover_pip_ancestors(
+                layout,
+                description,
+                &item.iteration_path,
+                runtime,
+                &mut covered,
+            );
         }
-        let mut visible = full;
-        let display = loop {
-            let Some(id) = visible.pop() else {
-                break None;
-            };
-            if let Some(display) = layout.display_index_for_scoped_node(&visible, &id) {
-                break Some(display);
-            }
-        };
-        if let Some(display) = display
-            && seen.insert((item.identity.clone(), display))
-        {
-            views.push((
-                display,
-                Some(item),
-                format!(
-                    "{} · item {} · call {}",
-                    display_text(&observed.node.id).replace('\n', " "),
-                    item.identity.index.get(),
-                    item.identity.invocation.get()
-                ),
+        for (depth, entry) in item.parent_path.iter().enumerate() {
+            call_ancestors.insert((
+                item.parent_stream_invocation,
+                item.parent_path[..depth].to_vec(),
+                runtime_scope_owner(entry),
             ));
+        }
+        call_ancestors.insert((
+            item.parent_stream_invocation,
+            item.parent_path.clone(),
+            ScopePathEntry::binding_owner(owner).unwrap_or_else(|| owner.clone()),
+        ));
+        if let Some(display) = visible_pip_node(layout, &observed.path, &observed.node.id) {
+            if static_parent && !runtime.iter().any(ScopePathEntry::is_flow) {
+                covered.insert(display);
+            }
+            if seen.insert((item.identity.clone(), runtime.clone(), display)) {
+                views.push(ExecutionPip {
+                    display,
+                    title: format!(
+                        "{} · item {} · call {}{}",
+                        display_text(&observed.node.id).replace('\n', " "),
+                        item.identity.index.get(),
+                        item.identity.invocation.get(),
+                        runtime
+                            .iter()
+                            .rev()
+                            .find_map(|entry| match entry {
+                                ScopePathEntry::Flow {
+                                    call_id,
+                                    definition,
+                                } => Some(format!(
+                                    " · {} → {}",
+                                    display_text(call_id).replace('\n', " "),
+                                    display_text(&definition.path.join(" / ")).replace('\n', " ")
+                                )),
+                                _ => None,
+                            })
+                            .unwrap_or_default()
+                    ),
+                    source: PipSource::Iteration { item, observed },
+                });
+            }
+        }
+    }
+    let calls: Vec<_> = snapshot
+        .loop_passes
+        .iter()
+        .filter(|pass| !pass.interrupted && pass.outcome.is_none())
+        .filter(|pass| pass.path.iter().any(ScopePathEntry::is_flow))
+        .filter_map(|pass| {
+            let path = description.scope_definition_path(&pass.path).ok()?;
+            let body = description.body(&path)?;
+            let kinds: BTreeMap<_, _> = body
+                .nodes
+                .iter()
+                .map(|node| (node.id.as_str(), node.kind.as_str()))
+                .collect();
+            let nodes = pass.display_nodes(
+                body.execution_order
+                    .iter()
+                    .map(|id| (id.as_str(), kinds[id.as_str()])),
+            );
+            nodes
+                .iter()
+                .any(|node| node.status == NodeStatus::Running)
+                .then_some((pass, path, Arc::<[NodeObservation]>::from(nodes)))
+        })
+        .collect();
+    for (pass, _, _) in &calls {
+        for (depth, entry) in pass.path.iter().enumerate() {
+            call_ancestors.insert((
+                pass.stream_invocation,
+                pass.path[..depth].to_vec(),
+                runtime_scope_owner(entry),
+            ));
+        }
+    }
+    for (pass, path, nodes) in calls {
+        for node in nodes
+            .iter()
+            .filter(|node| node.status == NodeStatus::Running)
+        {
+            if call_ancestors.contains(&(
+                pass.stream_invocation,
+                pass.path.clone(),
+                node.id.clone(),
+            )) {
+                continue;
+            }
+            if let Some(display) = visible_pip_node(layout, &path, &node.id) {
+                cover_pip_ancestors(layout, description, &[], &pass.path, &mut covered);
+                let title = pass
+                    .path
+                    .iter()
+                    .map(|entry| match entry {
+                        ScopePathEntry::Flow {
+                            call_id,
+                            definition,
+                        } => format!("{call_id} → {}", definition.path.join(" / ")),
+                        _ => entry.node_id().to_owned(),
+                    })
+                    .chain(std::iter::once(node.id.clone()))
+                    .map(|id| display_text(&id).replace('\n', " "))
+                    .collect::<Vec<_>>()
+                    .join(" / ");
+                views.push(ExecutionPip {
+                    display,
+                    title,
+                    source: PipSource::Call {
+                        path: path.clone(),
+                        nodes: nodes.clone(),
+                    },
+                });
+            }
         }
     }
     for display in running_display_nodes(layout, observations) {
@@ -1596,7 +1848,11 @@ fn execution_pips<'a>(
             .map(|id| display_text(id).replace('\n', " "))
             .collect::<Vec<_>>()
             .join(" / ");
-        views.push((display, None, title));
+        views.push(ExecutionPip {
+            display,
+            title,
+            source: PipSource::Static,
+        });
     }
     views
 }
@@ -1608,9 +1864,8 @@ fn draw_parallel_pips(
     observations: &[NodeObservation],
     receiver: &ObservationReader,
     elapsed_ns: u64,
-    iterations: Option<&crate::state::IterationSnapshot>,
+    views: Vec<ExecutionPip<'_>>,
 ) {
-    let views = execution_pips(layout, observations, iterations);
     let placement = parallel_pip_areas(views.len(), area);
     draw_pips(
         frame,
@@ -1634,7 +1889,10 @@ fn draw_pips(
 ) {
     let (areas, overflow) = placement;
     let visible = areas.len();
-    for (position, ((display, item, title), rect)) in views.into_iter().zip(areas).enumerate() {
+    for (position, (view, rect)) in views.into_iter().zip(areas).enumerate() {
+        let ExecutionPip {
+            display, ref title, ..
+        } = view;
         let node = &layout.nodes()[display];
         let mut block = Block::default()
             .title(format!(" Running: {title} "))
@@ -1647,22 +1905,8 @@ fn draw_pips(
         frame.render_widget(Clear, rect);
         frame.render_widget(block, rect);
         let offset = centered_offset(node.rect, (inner.width, inner.height));
-        let mut item_nodes;
-        let nodes = if let Some(item) = item {
-            item_nodes = observations.to_vec();
-            for (source, target) in item_nodes.iter_mut().enumerate() {
-                let path = layout.source_path(source);
-                if path.starts_with(&item.iteration_path) {
-                    let described = &layout.all_nodes()[source];
-                    *target = item
-                        .display_nodes(path, [(described.id.as_str(), described.kind.as_str())])
-                        .remove(0);
-                }
-            }
-            item_nodes.as_slice()
-        } else {
-            observations
-        };
+        let scoped_nodes = view.observations(layout, observations);
+        let nodes = scoped_nodes.as_deref().unwrap_or(observations);
         frame.render_widget(
             GraphView::new(layout)
                 .reader(receiver)
@@ -1781,9 +2025,8 @@ fn draw(
             &view_state.history_offsets(),
             &view_state.iteration_items,
         );
-        view_state.mouse_overlays = parallel_pip_areas(
-            execution_pips(pip_layout, &pip_nodes, Some(&snapshot.iterations)).len(), graph,
-        ).0;
+        let pip_views = execution_pips(pip_layout, &pip_nodes, description, snapshot);
+        view_state.mouse_overlays = parallel_pip_areas(pip_views.len(), graph).0;
         view_state.mouse_overlays.extend(minimap_area);
         draw_parallel_pips(
             frame,
@@ -1792,7 +2035,7 @@ fn draw(
             &pip_nodes,
             receiver,
             elapsed.as_nanos().min(u64::MAX as u128) as u64,
-            Some(&snapshot.iterations),
+            pip_views,
         );
         if let Some(details) = details {
             view_state.details_height = usize::from(details.height.saturating_sub(2));
@@ -3198,11 +3441,11 @@ impl ObservationView {
             snapshot,
             &BTreeMap::new(),
         );
-        let pip_views = execution_pips(&self.pip_layout, &pip_nodes, Some(&snapshot.iterations));
+        let pip_views = execution_pips(&self.pip_layout, &pip_nodes, &self.description, snapshot);
         // The chat overview is always folded, so a single running body node still needs its own PiP.
         let nested = pip_views
             .iter()
-            .any(|(display, _, _)| !self.pip_layout.node_path(*display).is_empty());
+            .any(|view| !self.pip_layout.node_path(view.display).is_empty());
         let placement = if nested {
             pip_areas(pip_views.len(), graph, graph.height / 2)
         } else {
@@ -3451,7 +3694,8 @@ mod tests {
     fn render_parallel_pips_for_layout(
         layout: &GraphLayout,
         observations: &[NodeObservation],
-        iterations: Option<&crate::state::IterationSnapshot>,
+        description: &WorkflowDescription,
+        snapshot: &StateSnapshot,
         receiver: &ObservationReader,
         width: u16,
         height: u16,
@@ -3467,7 +3711,7 @@ mod tests {
                     observations,
                     receiver,
                     1_000_000_000,
-                    iterations,
+                    execution_pips(layout, observations, description, snapshot),
                 );
             })
             .unwrap();
@@ -3490,7 +3734,15 @@ mod tests {
         height: u16,
     ) -> String {
         let layout = GraphLayout::with_view(description, ConnectionView::Execution).unwrap();
-        render_parallel_pips_for_layout(&layout, &snapshot.nodes, None, receiver, width, height)
+        render_parallel_pips_for_layout(
+            &layout,
+            &snapshot.nodes,
+            description,
+            snapshot,
+            receiver,
+            width,
+            height,
+        )
     }
 
     fn render_chat_execution(view: &ObservationView, snapshot: &StateSnapshot) -> String {
@@ -3698,7 +3950,7 @@ mod tests {
                     &nodes,
                     &reader,
                     1_000_000,
-                    Some(&snapshot.iterations),
+                    execution_pips(&view.root, &nodes, &description, &snapshot),
                 )
             })
             .unwrap();
@@ -3780,7 +4032,7 @@ mod tests {
                     &nodes,
                     &reader,
                     1_000_000,
-                    Some(&snapshot.iterations),
+                    execution_pips(&view.root, &nodes, &description, &snapshot),
                 )
             })
             .unwrap();
@@ -3880,7 +4132,7 @@ mod tests {
                     &nodes,
                     &reader,
                     1_000_000,
-                    Some(&snapshot.iterations),
+                    execution_pips(&view.root, &nodes, &description, &snapshot),
                 )
             })
             .unwrap();
@@ -4065,7 +4317,8 @@ mod tests {
         let text = render_parallel_pips_for_layout(
             &view.pip_layout,
             &observations,
-            None,
+            &view.description,
+            &snapshot,
             &receiver.reader(),
             128,
             64,
@@ -4113,7 +4366,8 @@ mod tests {
         let text = render_parallel_pips_for_layout(
             &view.pip_layout,
             &observations,
-            None,
+            &view.description,
+            &snapshot,
             &reader,
             128,
             64,
@@ -5019,7 +5273,7 @@ mod tests {
                     &observations,
                     &reader,
                     1_000_000_000,
-                    None,
+                    execution_pips(&view.root, &observations, &description, &snapshot),
                 )
             })
             .unwrap();
@@ -6392,6 +6646,16 @@ mod tests {
                 path: parent.clone(),
                 elapsed_ns: count(1),
             },
+            LifecycleKind::NodeStarted {
+                node: NodeIdentity {
+                    id: "invoke".into(),
+                    kind: "workflow.call".into(),
+                    path: parent.clone(),
+                },
+                position: count(1),
+                selected_inputs: vec![],
+                elapsed_ns: count(2),
+            },
             LifecycleKind::CallStarted {
                 path: path("B"),
                 elapsed_ns: count(2),
@@ -6412,6 +6676,16 @@ mod tests {
             call_id: "nested".into(),
         });
         events.extend([
+            LifecycleKind::NodeStarted {
+                node: NodeIdentity {
+                    id: "nested".into(),
+                    kind: "workflow.call".into(),
+                    path: path("B"),
+                },
+                position: count(1),
+                selected_inputs: vec![],
+                elapsed_ns: count(4),
+            },
             LifecycleKind::CallStarted {
                 path: nested.clone(),
                 elapsed_ns: count(4),
@@ -6486,6 +6760,98 @@ mod tests {
                 .count(),
             2
         );
+        let pips = execution_pips(&view.pip_layout, &nodes, &description, &snapshot);
+        assert_eq!(pips.len(), 3);
+        for pip in &pips {
+            let projected = pip.observations(&view.pip_layout, &nodes).unwrap();
+            let source = view.pip_layout.sources(pip.display)[0];
+            assert_eq!(projected[source].status, NodeStatus::Running);
+            assert!(projected[source].kind.starts_with("fixture."));
+        }
+        let text = render_chat_execution(&view, &snapshot);
+        assert_eq!(text.matches(" Running: ").count(), 3, "{text}");
+        assert!(text.contains("invoke → B / nested / leaf"), "{text}");
+        assert!(text.contains("invoke → C / leaf"), "{text}");
+        let mut compact = snapshot.clone();
+        for pass in &mut compact.loop_passes {
+            let path = description.scope_definition_path(&pass.path).unwrap();
+            let body = description.body(&path).unwrap();
+            pass.compact_statuses = body
+                .execution_order
+                .iter()
+                .map(|id| {
+                    pass.nodes
+                        .iter()
+                        .find(|node| &node.id == id)
+                        .map(|node| node.status)
+                })
+                .collect();
+            pass.nodes.clear();
+        }
+        assert_eq!(
+            execution_pips(&view.pip_layout, &nodes, &description, &compact).len(),
+            3
+        );
+        for pass in &mut compact.loop_passes {
+            pass.interrupted = true;
+        }
+        let nodes = inline_observations(&view.pip_layout, &description, &compact, &BTreeMap::new());
+        assert!(execution_pips(&view.pip_layout, &nodes, &description, &compact).is_empty());
+    }
+
+    #[test]
+    fn dynamic_pips_do_not_hide_independent_static_callers_of_the_same_definition() {
+        use mf_telemetry::event::FlowOrigin;
+
+        let description = edge_flow_fixture();
+        let mut snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
+            .unwrap()
+            .snapshot();
+        let mut leaf = NodeObservation::pending("leaf", "fixture.B");
+        leaf.status = NodeStatus::Running;
+        let mut invoker = NodeObservation::pending("invoke", "workflow.call");
+        invoker.status = NodeStatus::Running;
+        let parent = vec![ScopePathEntry::Call {
+            call_id: "A".into(),
+        }];
+        let mut dynamic = parent.clone();
+        dynamic.push(ScopePathEntry::Flow {
+            call_id: "invoke".into(),
+            definition: FlowOrigin {
+                workflow_id: description.workflow_id.clone(),
+                path: vec!["B".into()],
+            },
+        });
+        for (path, nodes) in [
+            (
+                vec![ScopePathEntry::Call {
+                    call_id: "B".into(),
+                }],
+                vec![leaf.clone()],
+            ),
+            (parent, vec![invoker]),
+            (dynamic, vec![leaf]),
+        ] {
+            snapshot.loop_passes.push(LoopPassObservation {
+                path,
+                nodes,
+                started: true,
+                outcome: None,
+                interrupted: false,
+                stream_invocation: None,
+                compact_statuses: vec![],
+            });
+        }
+        let view = ObservationView::new(&description).unwrap();
+        let nodes =
+            inline_observations(&view.pip_layout, &description, &snapshot, &BTreeMap::new());
+        let pips = execution_pips(&view.pip_layout, &nodes, &description, &snapshot);
+        assert_eq!(pips.len(), 2);
+        assert_eq!(pips[0].display, pips[1].display);
+        assert!(pips.iter().any(|pip| pip.title == "B / leaf"));
+        assert!(pips.iter().any(|pip| pip.title == "A / invoke → B / leaf"));
+        let chat = render_chat_execution(&view, &snapshot);
+        assert_eq!(chat.matches(" Running: ").count(), 2, "{chat}");
     }
 
     #[test]
@@ -6588,6 +6954,252 @@ mod tests {
                 })
                 .is_err()
         );
+    }
+
+    #[test]
+    fn named_tool_pips_replace_waiting_routers_with_the_deepest_running_node() {
+        use crate::state::{IterationEvent, IterationRecord};
+        use mf_telemetry::{event::NodeIdentity, iteration::IterationContext};
+
+        let route = ScopePathEntry::binding_key("execute", "calculator");
+        let description: WorkflowDescription = serde_json::from_value(serde_json::json!({
+            "version":"2026-11-09", "workflow_id":format!("sha256:{}", "d".repeat(64)),
+            "execution":{"mode":"single"},
+            "nodes":[{"id":"dispatch", "kind":"builtin.iteration"}],
+            "execution_order":["dispatch"], "data_edges":[], "control_edges":[],
+            "loop_bodies":[
+                {"path":["dispatch"], "source":"%iteration", "nodes":[{"id":"%iteration", "kind":"%iteration"}, {"id":"execute", "kind":"builtin.router"}],
+                 "execution_order":["%iteration", "execute"], "data_edges":[], "control_edges":[]},
+                {"path":["dispatch", route], "nodes":[{"id":"calculate", "kind":"builtin.code"}],
+                 "execution_order":["calculate"], "data_edges":[], "control_edges":[]}
+            ]
+        })).unwrap();
+        let mut session =
+            crate::state::SessionState::new(description.clone(), RunId::new()).unwrap();
+        for index in 0..2 {
+            for (offset, body_path, node) in [
+                (
+                    1,
+                    vec!["dispatch".into()],
+                    NodeIdentity {
+                        id: "execute".into(),
+                        kind: "builtin.router".into(),
+                        path: vec![],
+                    },
+                ),
+                (
+                    2,
+                    vec!["dispatch".into(), route.clone()],
+                    NodeIdentity {
+                        id: "calculate".into(),
+                        kind: "builtin.code".into(),
+                        path: vec![ScopePathEntry::Call {
+                            call_id: route.clone(),
+                        }],
+                    },
+                ),
+            ] {
+                session
+                    .apply_iteration(IterationRecord {
+                        context: IterationContext {
+                            invocation: Count::try_from(1).unwrap(),
+                            index: Count::try_from(index).unwrap(),
+                            sequence: Count::try_from(index * 2 + offset).unwrap(),
+                            elapsed_ns: Count::try_from(index * 2 + offset).unwrap(),
+                            iteration_path: vec!["dispatch".into()],
+                            body_path,
+                            parent_path: vec![],
+                            parent_stream_invocation: None,
+                        },
+                        event: IterationEvent::NodeStarted {
+                            node,
+                            selected_inputs: vec![],
+                        },
+                        correlation: None,
+                    })
+                    .unwrap();
+            }
+        }
+        let mut snapshot = session.snapshot();
+        snapshot.nodes[0].status = NodeStatus::Running;
+        let view = ObservationView::new(&description).unwrap();
+        let nodes =
+            inline_observations(&view.pip_layout, &description, &snapshot, &BTreeMap::new());
+        let pips = execution_pips(&view.pip_layout, &nodes, &description, &snapshot);
+        assert_eq!(pips.len(), 2);
+        for pip in &pips {
+            assert_eq!(view.pip_layout.nodes()[pip.display].id, "calculate");
+            let projected = pip.observations(&view.pip_layout, &nodes).unwrap();
+            assert_eq!(
+                projected[view.pip_layout.sources(pip.display)[0]].status,
+                NodeStatus::Running
+            );
+        }
+        let chat = render_chat_execution(&view, &snapshot);
+        assert_eq!(chat.matches(" Running: ").count(), 2, "{chat}");
+        assert!(chat.contains(" Running: calculate · item 0"), "{chat}");
+        assert!(chat.contains(" Running: calculate · item 1"), "{chat}");
+        assert!(!chat.contains(" Running: execute "), "{chat}");
+    }
+
+    #[test]
+    fn dynamic_tool_pips_follow_runtime_scopes_without_mixing_parallel_invocations() {
+        use crate::state::{IterationEvent, IterationRecord};
+        use mf_telemetry::{
+            event::{FlowOrigin, NodeIdentity},
+            iteration::IterationContext,
+        };
+
+        let mut description = edge_flow_fixture();
+        let body = description
+            .loop_bodies
+            .iter_mut()
+            .find(|body| body.path == ["A", "each"])
+            .unwrap();
+        body.nodes.push(NodeDescription {
+            id: "other".into(),
+            kind: "workflow.call".into(),
+        });
+        body.execution_order.push("other".into());
+        let mut session =
+            crate::state::SessionState::new(description.clone(), RunId::new()).unwrap();
+        let mut sequence = 0_i64;
+        let mut start = |index, body_path: Vec<String>, runtime, id: &str, kind: &str| {
+            sequence += 1;
+            session
+                .apply_iteration(IterationRecord {
+                    context: IterationContext {
+                        invocation: Count::try_from(1).unwrap(),
+                        index: Count::try_from(index).unwrap(),
+                        sequence: Count::try_from(sequence).unwrap(),
+                        elapsed_ns: Count::try_from(sequence).unwrap(),
+                        iteration_path: vec!["A".into(), "each".into()],
+                        body_path,
+                        parent_path: vec![ScopePathEntry::Call {
+                            call_id: "A".into(),
+                        }],
+                        parent_stream_invocation: None,
+                    },
+                    event: IterationEvent::NodeStarted {
+                        node: NodeIdentity {
+                            id: id.into(),
+                            kind: kind.into(),
+                            path: runtime,
+                        },
+                        selected_inputs: vec![],
+                    },
+                    correlation: Some((vec![1; 16], vec![sequence as u8; 8])),
+                })
+                .unwrap();
+        };
+        let flow = |id: &str| ScopePathEntry::Flow {
+            call_id: id.into(),
+            definition: FlowOrigin {
+                workflow_id: description.workflow_id.clone(),
+                path: vec!["B".into()],
+            },
+        };
+        for invoker in ["invoke", "other"] {
+            start(
+                0,
+                vec!["A".into(), "each".into()],
+                vec![],
+                invoker,
+                "workflow.call",
+            );
+            start(
+                0,
+                vec!["B".into()],
+                vec![flow(invoker)],
+                "leaf",
+                "fixture.B",
+            );
+        }
+        start(
+            1,
+            vec!["A".into(), "each".into()],
+            vec![],
+            "invoke",
+            "workflow.call",
+        );
+        start(
+            1,
+            vec!["B".into()],
+            vec![flow("invoke")],
+            "nested",
+            "workflow.call",
+        );
+        start(
+            1,
+            vec!["B".into(), "nested".into()],
+            vec![
+                flow("invoke"),
+                ScopePathEntry::Call {
+                    call_id: "nested".into(),
+                },
+            ],
+            "leaf",
+            "fixture.nested",
+        );
+
+        let snapshot = session.snapshot();
+        let mut view = ObservationView::new(&description).unwrap();
+        view.fold_body(vec!["A".into()], false).unwrap();
+        let nodes =
+            inline_observations(&view.pip_layout, &description, &snapshot, &BTreeMap::new());
+        let pips = execution_pips(&view.pip_layout, &nodes, &description, &snapshot);
+        assert_eq!(pips.len(), 3);
+        assert_eq!(
+            pips.iter()
+                .filter(|pip| pip.title.contains("item 0"))
+                .count(),
+            2
+        );
+        let mut correlations = BTreeSet::new();
+        for pip in &pips {
+            assert_eq!(view.pip_layout.nodes()[pip.display].id, "leaf");
+            let projected = pip.observations(&view.pip_layout, &nodes).unwrap();
+            let source = view.pip_layout.sources(pip.display)[0];
+            assert_eq!(projected[source].status, NodeStatus::Running);
+            assert!(correlations.insert(projected[source].correlation.clone().unwrap()));
+        }
+        assert_eq!(
+            pips.iter()
+                .filter(|pip| pip.title.contains("invoke → B"))
+                .count(),
+            2
+        );
+        assert_eq!(
+            pips.iter()
+                .filter(|pip| pip.title.contains("other → B"))
+                .count(),
+            1
+        );
+        let receiver = LoopbackReceiver::bind(description.clone(), RunId::new()).unwrap();
+        let text = render_parallel_pips_for_layout(
+            &view.pip_layout,
+            &nodes,
+            &description,
+            &snapshot,
+            &receiver.reader(),
+            128,
+            64,
+        );
+        assert_eq!(text.matches(" Running: ").count(), 3, "{text}");
+        let chat = render_chat_execution(&view, &snapshot);
+        assert_eq!(chat.matches(" Running: ").count(), 3, "{chat}");
+        assert!(!chat.contains(" Running: invoke "), "{chat}");
+        let mut finished = snapshot.clone();
+        finished.iterations.items[0].closed = true;
+        finished.iterations.items[1].interrupted = true;
+        let nodes =
+            inline_observations(&view.pip_layout, &description, &finished, &BTreeMap::new());
+        assert!(execution_pips(&view.pip_layout, &nodes, &description, &finished).is_empty());
+        finished.iterations.items[1].interrupted = false;
+        finished.iterations.items[1].outcome = Some(mf_telemetry::event::Outcome::Succeeded);
+        let nodes =
+            inline_observations(&view.pip_layout, &description, &finished, &BTreeMap::new());
+        assert!(execution_pips(&view.pip_layout, &nodes, &description, &finished).is_empty());
     }
 
     #[test]
@@ -6696,6 +7308,7 @@ mod tests {
             observed[view.root.sources(unused_display)[0]].status,
             NodeStatus::Pending
         );
+        snapshot.nodes[0].status = NodeStatus::Running;
         let mut calculate = NodeObservation::pending("calculate", "builtin.code");
         calculate.status = NodeStatus::Running;
         snapshot.loop_passes.push(LoopPassObservation {
@@ -6718,5 +7331,15 @@ mod tests {
             observed[view.root.sources(unused_display)[0]].status,
             NodeStatus::Pending
         );
+        assert_eq!(
+            running_display_nodes(&view.root, &observed),
+            vec![selected_display]
+        );
+        let pips = execution_pips(&view.pip_layout, &observed, &description, &snapshot);
+        assert_eq!(pips.len(), 1);
+        assert_eq!(pips[0].display, selected_display);
+        let chat = render_chat_execution(&view, &snapshot);
+        assert_eq!(chat.matches(" Running: ").count(), 1, "{chat}");
+        assert!(!chat.contains(" Running: execute "), "{chat}");
     }
 }

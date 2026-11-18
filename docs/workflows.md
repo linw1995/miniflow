@@ -211,7 +211,7 @@ fixed configuration, use a Flow-valued edge as described below.
 Source loading calls the selected receiver's `flow_parameters` callback, resolves only the returned
 child values, and merges child dependencies for standalone compilation. Missing/null optional
 fields produce no executable scopes; required fields still fail provider decoding. Planning freezes the selected
-child tree as explicit `CompiledGraph.children`; saved plans do not rediscover children from JSON.
+child tree as explicit `CompiledGraph.children`; preparation does not rediscover children from JSON.
 Resolved child graphs are compiled into executable Flow objects and injected into those fields. JSON shape alone grants no executable
 authority; ordinary fields containing `definition` or `path` remain ordinary data.
 Missing required fields and malformed values fail configuration validation;
@@ -453,9 +453,9 @@ native capability (`value`) and its interface as plain JSON (`properties`), deri
 body: `callable`, `startup`, `parameters`, `allowed`, `required`, `plain`, `outputs`, `streams` and
 `stdin`. Nothing is inferred from the source JSON, re-declared in a tool record, or exposed as a
 separate projection node. `callable` is true only for a body with exactly one startup node, no stdin and
-no incremental outputs; such a body also publishes `allowed` (non-secret input names mapped to JSON
-Schema) and `required` (effective required names, already excluding inputs with an environment or
-default). `plain` reports the sole required string `content` output that encodes as plain text.
+no incremental outputs; such a body also publishes `allowed` (unconfigured, non-secret input names
+mapped to JSON Schema) and `required` (effective required names, already excluding configured inputs
+and inputs with an environment or default). `plain` reports the sole required string `content` output that encodes as plain text.
 
 `mfn-llm.agent` accepts a fixed `params.tools: Map(Flow)` plus `params.tool_properties: Map(Object)`
 holding, per business name, the caller-owned `description`, optional `parameters` documentation, and
@@ -482,18 +482,52 @@ required arguments become tool-result content. Argument names travel flat and ar
 validation failures are caller-data failures and become business results, while blank call IDs,
 cancellation and infrastructure failures still fail execution.
 
-Assertions cover tool structure; types and requiredness come from the prepared interface. Secret inputs
-must carry an environment or default source, cannot be supplied by model arguments, and are omitted from
-`allowed`. Literal defaults and environment names stay in the native Flow; the catalog exposes only
-effective requiredness and documented public inputs. Because a dynamic caller cannot enumerate
-unexpected keys, an unknown-argument report is coarser than a compiled adapter's single-key message;
-a missing required argument is still named.
+Assertions cover tool structure; types and requiredness come from the prepared interface. Configure
+Flow startup inputs directly on the producing `builtin.constant` with `config.inputs`. Values use the
+same execution-time `$ref` and `$template` expressions as node configuration:
+
+```json
+{
+  "id": "calculator",
+  "kind": "builtin.constant",
+  "config": {
+    "type": "flow",
+    "value": {"path": "agent-calculator/calculator.json"},
+    "inputs": {
+      "left": {"$ref": "params.fixed_left"}
+    }
+  }
+}
+```
+
+Declare `params.fixed_left` in the caller and add an explicit dependency from `params` to `calculator`;
+templates do not establish execution order.
+Names may be flat when unambiguous or qualified as `node.port`. Preparation validates names, aliases,
+template syntax, and literal types without reading context or environment. Each producer execution
+resolves templates against its own context and publishes an immutable Flow containing only the
+configured native values, not the context itself. Subsequent calls use fresh invocation state.
+
+Configured inputs are removed from `allowed` and `required`, even when public; `parameters` marks them
+with `configured: true` without disclosing values. Only remaining public inputs enter the model schema.
+The example above exposes only `operation` and `right`; omitting the `left` binding leaves it
+model-visible again. Parameter `default` and `env` declarations remain fallback sources, not immutable
+configuration. Tool documentation may describe configured public inputs, but their
+fields are omitted from the model schema. Unconfigured runtime-only public inputs remain invalid.
+
+Neither models nor ordinary callers can override configured inputs, including through qualified aliases.
+Normal Flow calls and frozen Router branches merge the same configured values before ordinary input
+validation. Secret markers stay on their values and do not taint unrelated calls. There is no separate
+Agent argument map or merge node. Configured values stay out of the model catalog and model-generated
+call records; model-visible tool results retain their normal business content. Literal credentials
+remain embedded in artifacts, so use context references to secret startup parameters for real keys.
+Because a dynamic caller cannot enumerate unexpected keys, an unknown-argument report is coarser than
+a compiled adapter's single-key message; a missing required argument is still named.
 
 Tool constants remain the caller-owned static declarations. The compiler follows their provenance
 across ordinary data edges and Call boundaries, then binds each executable definition directly beneath
 its authored router. Different call sites may bind the same callee source with different route sets.
-Runtime map entries only control enablement; replacing a handle cannot replace a compiled body.
-The router invokes its selected child through Call's shared implementation. Resolve external tool
+Runtime map entries carry the configured values for their selected capability but cannot replace a
+compiled body. The router invokes its selected child through Call's shared implementation. Resolve external tool
 sources in their original directory before composing when that directory differs from the composed
 workflow's directory. There is no runtime JSON catalog override or lexical `flow_ref` transport. Tool
 dispatch remains terminal-only; native dynamic Calls and existing observed-item nested-scope limits are
@@ -524,6 +558,45 @@ The calculator supports add/subtract/multiply/divide and plain-text numeric resu
 nix develop --command cargo run -p mf-cli --features development-support -- compile examples/chat-calculator-flow.json --output target/chat-calculator
 nix develop --command cargo run -p mf-cli --features development-support -- run target/chat-calculator --chat --params.model your-model
 ```
+
+The [DeepSeek web Agent](../examples/chat-deepseek-flow.json) composes the same Agent with
+[Search](../examples/agent-deepseek/search.json) and [Fetch](../examples/agent-deepseek/fetch.json)
+tool Flows. Independent searches can run in parallel; subsequent rounds can fetch a discovered URL
+before answering. Search returns structured results, and Fetch returns the page title and Markdown.
+The model sees only `query` and optional `count` for Search, or `url` for Fetch. Both wrappers keep
+credentials and the tool endpoint outside the model's argument schema. Each Flow constant configures
+those inputs from explicit root parameters with context templates before the unchanged Agent receives
+the tool maps.
+
+The example exposes distinct settings for each provider:
+
+| Root parameter | Purpose | Environment fallback / default |
+| --- | --- | --- |
+| `params.llm_model` | Chat model | `your-model` |
+| `params.llm_base_url` | Chat Completions prefix | `https://api.openai.com/v1` |
+| `params.llm_api_key` | Chat model credential | `OPENAI_API_KEY` |
+| `params.deepseek_base_url` | Search/Fetch prefix | `DEEPSEEK_BASE_URL` / `https://api.deepseek.com` |
+| `params.deepseek_api_key` | Search/Fetch credential | `DEEPSEEK_API_KEY` |
+
+Explicit arguments override environment fallbacks. The model and tool credentials are never implicitly
+shared, even when both services are provided by DeepSeek. Export the two keys in your shell, then run:
+
+```sh
+nix develop --command cargo run -p mf-cli --features development-support -- compile examples/chat-deepseek-flow.json --output target/chat-deepseek
+nix develop --command cargo run -p mf-cli --features development-support -- run target/chat-deepseek --chat --params.llm_model your-model --params.llm_base_url https://api.openai.com/v1 --params.deepseek_base_url https://api.deepseek.com
+```
+
+`params.llm_api_key` and `params.deepseek_api_key` can also be supplied explicitly, although environment
+fallbacks avoid putting credentials in shell history and process arguments. Tool wrappers receive both
+settings as ordinary private Call inputs and do not independently read credential or endpoint variables.
+Compilation requires neither credential and makes no provider requests.
+
+For PiP observation, request two independent searches followed by fetching their useful sources.
+The running tool path ends at `builtin.deepseek.search` or `builtin.deepseek.fetch` beneath the
+Agent Loop, dispatch Call, parallel Iteration, and Router. Actual network latency determines how
+long each node remains visible; this example does not insert artificial delays or force tool use.
+Search and Fetch requests may incur provider charges. Their failures and cancellation retain the
+existing tool-dispatch behavior; the example does not add hidden retries.
 
 The [context-replacement example](../examples/chat-context-flow.json) calls the same calculator Flow,
 then selects either its unchanged `append` result or a separate `replace_context` branch. With
@@ -587,7 +660,9 @@ and typed errors. It returns a `result` envelope containing `outputs` or a recov
 Arguments are conservatively private in snapshots, and business-error envelopes are private.
 Cancellation, observation/contract, resource, and output failures propagate rather than becoming
 business results. Recovery is fail-closed: explicit ordinary node execution failures, including known
-Call wrappers, are recoverable; unknown plugin errors are not assumed to be business failures.
+Call wrappers, are recoverable. Providers may also return a typed
+`NodeExecutionError::BusinessFailed` retaining their own domain-error source. Unknown plugin errors
+are not assumed to be business failures.
 Invocation drains incremental emissions terminally without exposing Router stream ports. Ordinary
 `workflow.call` syntax and topology are unchanged.
 
@@ -892,7 +967,8 @@ Nodes that support [configuration templates](#configuration-templates) can consu
 ### Configuration templates
 
 Providers explicitly enable templates for execution-time configuration fields. LLM and DeepSeek configuration
-support them; structural settings such as parameter declarations, node ports, and Loop bodies remain static.
+and Flow constants' `config.inputs` support them; structural settings such as parameter declarations,
+node ports, and Loop bodies remain static.
 
 | Configuration value | Meaning |
 | --- | --- |
@@ -1132,6 +1208,14 @@ and HTTP errors, malformed responses, deadlines, or cancellation fail the invoca
 node outputs. Retry policy belongs to the enclosing Flow or host, which can account for the API's per-request
 billing and status-specific retry guidance.
 
+Checked Search/Fetch input errors and non-success HTTP statuses retain typed provider sources through
+`NodeExecutionError::BusinessFailed`. A standalone node or ordinary Call still fails without outputs;
+packed Router/tool calls convert these explicit domain failures into tool-result errors. The Agent can
+then choose another query or URL and produce a terminal answer, with the failed call retained in its
+transcript. Configuration, credential lookup, runtime initialization, cancellation/deadline, and
+response-decoding failures are not reclassified as recoverable tool results. No HTTP retry is added;
+any further tool request must be explicitly issued by the model or caller Flow.
+
 ### LLM tool calls
 
 The existing `builtin.llm` node accepts optional `tools` and `tool_results` inputs, each defaulting to `[]`. Each execution
@@ -1148,6 +1232,7 @@ The public Rust contracts are exported by `mfn_llm`:
 | `ToolCall` | `id: String`, `name: String`, `arguments: ValueRef` | `tool_calls` output and assistant messages |
 | `ToolResult` | `tool_call_id: String`, `content: String` | `tool_results` input |
 | `ToolCallEvent` | `model_call_id: String`, `call: ToolCall` | `tool_call` stream output |
+| `ToolCallDelta` | `model_call_id: String`, `index: UInt`, `arguments: String`, optional `id` and `name` | `tool_call_delta` stream output |
 
 Each tool definition contains `name`, `description`, and `input_schema`. Names must be unique and
 contain 1-64 ASCII letters, digits, underscores, or hyphens. The schema must be an object with
@@ -1301,28 +1386,32 @@ Provider reasoning blocks are ignored, as in the original text-only node. Reason
 cross-provider continuation state are outside this contract. Application `metadata` remains separate
 and is not sent to the provider.
 
-The stream side exposes `delta` for text and `tool_call` for each completed tool call. The text payload
-remains `{text, model_call_id}`. A tool event contains `{model_call_id, call}`, where `call` has the same
-shape as one terminal `tool_calls` entry. Rig assembles arguments before publishing a completed call;
-raw argument fragments are not exposed. A tool event is still a preview of the overall request:
-later failure or truncation can invalidate the batch. Use terminal `outcome` to decide whether to dispatch.
+The stream exposes `delta` for text, `tool_call_delta` for raw argument fragments, and `tool_call`
+for each completed model-generated call. The text payload remains `{text, model_call_id}`. Raw
+fragments are forwarded from SSE before Rig assembles the call, keyed by model call and provider tool
+index within the primary choice. An ID or name sent without arguments is still forwarded as a hint,
+with an empty `arguments` string. The node does not parse or reconstruct fragments as JSON. A completed event
+still has `{model_call_id, call}`, where `call` matches one terminal `tool_calls` entry. Neither
+stream implies tool execution; a later failure or truncation can invalidate the batch. Use terminal
+`outcome` to decide whether to dispatch.
 
-Each emission produces one stream port and explicitly skips the other. Select these ports as optional
+Each emission produces one stream port and skips the other stream ports. Select them as optional
 workflow outputs when observing mixed text/tool responses, for example:
 
 ```json
 [
   {"name": "text_delta", "node": "model", "port": "delta", "optional": true},
   {"name": "tool_call", "node": "model", "port": "tool_call", "optional": true},
+  {"name": "tool_call_delta", "node": "model", "port": "tool_call_delta", "optional": true},
   {"name": "outcome", "node": "model", "port": "outcome"},
   {"name": "tool_calls", "node": "model", "port": "tool_calls"}
 ]
 ```
 
 Selecting a stream port enables native streaming execution. Ordinary downstream nodes connected to
-one stream port are skipped on emissions from the other port. Tool-only responses emit neither empty
-text deltas nor a first-text observation. Incomplete or malformed arguments do not produce a completed
-tool event. Usage, deadlines, cancellation, and error capture retain the same contracts as text calls.
+one stream port are skipped on emissions from the other port. Tool-only responses emit no empty text
+deltas; their first tool-call delta emits the request's single first-output observation. Incomplete
+or malformed arguments do not produce a completed tool event. Usage, deadlines, cancellation, and error capture retain the same contracts as text calls.
 Cancellation and publication failure remain execution failures even with error capture enabled.
 This interface supports text and function tools, not media inputs.
 

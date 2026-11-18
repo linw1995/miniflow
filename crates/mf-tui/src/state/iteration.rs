@@ -1,61 +1,13 @@
 //! Bounded iteration detail reduction, independent of outer lifecycle delivery.
 
 use super::*;
-use mf_telemetry::{
-    event::InputSelection,
-    iteration::{ItemIdentity, IterationContext},
-};
-use serde::Serialize;
+use mf_telemetry::iteration::{ItemIdentity, IterationContext};
+pub use mf_telemetry::iteration::{IterationEvent, IterationRecord};
 
 const MAX_ITEMS: usize = 64;
 const MAX_INVOCATIONS: usize = 64;
 const MAX_NODES: usize = 4096;
 const MAX_DETAIL_WITNESSES: usize = 1024;
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub enum IterationEvent {
-    InvocationFinished,
-    ItemStarted,
-    ItemFinished {
-        outcome: Outcome,
-        duration_ns: Option<Count>,
-    },
-    NodeStarted {
-        node: NodeIdentity,
-        selected_inputs: Vec<InputSelection>,
-    },
-    NodeFinished {
-        node: NodeIdentity,
-        outcome: Outcome,
-        duration_ns: Option<Count>,
-        produced_ports: Vec<String>,
-        skipped_ports: Vec<String>,
-        failure: Option<Failure>,
-    },
-    NodeSkipped {
-        node: NodeIdentity,
-        causes: Vec<SkipCause>,
-        skipped_ports: Vec<String>,
-    },
-}
-
-impl IterationEvent {
-    fn node(&self) -> Option<&NodeIdentity> {
-        match self {
-            Self::NodeStarted { node, .. }
-            | Self::NodeFinished { node, .. }
-            | Self::NodeSkipped { node, .. } => Some(node),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct IterationRecord {
-    pub context: IterationContext,
-    pub event: IterationEvent,
-    pub correlation: Option<crate::traces::SpanKey>,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IterationNodeObservation {
@@ -243,21 +195,12 @@ impl IterationState {
                 message: "iteration body scope is absent",
             })?;
         if let Some(node) = record.event.node() {
-            let relative_scope = if node.path.is_empty() {
+            let relative_scope =
                 context
-                    .body_path
-                    .strip_prefix(context.iteration_path.as_slice())
+                    .relative_scope(&node.path)
                     .context(InvalidIterationSnafu {
                         message: "iteration body is outside its owner",
-                    })?
-                    .iter()
-                    .map(|key| LoopPathEntry::Call {
-                        call_id: key.clone(),
-                    })
-                    .collect::<Vec<_>>()
-            } else {
-                node.path.clone()
-            };
+                    })?;
             let definition = description
                 .scope_definition_path_from(&context.iteration_path, &relative_scope)
                 .context(IterationSnafu)?;

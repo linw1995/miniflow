@@ -451,17 +451,18 @@ an owned field. Explicit skips and unexpectedly missing dependencies keep their 
 
 ### Build inspection and generated contracts
 
-Standard task projects use `generate_runner_artifacts` and `generate_runner_execution_plans`.
-The linked-provider build emits a preparation macro with the frozen layout items in `flow-plans.rs`,
-and records eligible segments and fallback reasons in `OUT_DIR/typed-fast-paths.json`.
-General-purpose artifact/plan generation keeps ordinary dynamic preparation and context inspection.
-The preparation macro is expanded only by standard runners, so custom runners do not compile unused
-monomorphized typed bodies or acquire resources for them.
+`generate_artifacts` emits one module with fixed bindings, immutable execution layouts, and task or
+stream preparation. It also returns native inspection and typed-plan data. `CodegenOptions::default()`
+enables eligible typed segments; `preserve_intermediate_outputs` retains values for custom-host context
+inspection. The linked-provider build records eligible segments and fallback reasons in
+`OUT_DIR/typed-fast-paths.json`. Both options use the same fixed layouts and provider instances; neither
+runs a compiler or inference at startup.
 
 Generated constructors receive the existing configured JSON. Target Rust compilation proves each
 constructor's field tuple types and exact port names against the build-time contract. Launch compares
-its complete resolved metadata before dispatch, covering target-specific interfaces, resources,
-derivations, context references, and generation flags. These build-time records are separate from the
+provider declarations before dispatch, then attaches the compiler-proved port types instead of rerunning
+derivations. Checks cover ports, bindings, stdin ownership, context references, and typed generation
+metadata. These build-time records are separate from the
 embedded inspection manifest. Provider changes regenerate them through Cargo's ordinary dependency tracking.
 
 ### Struct-defined inputs
@@ -651,7 +652,14 @@ Tuple/unit structs, enums, borrowed fields, optional collection elements, and ne
 
 `NodeOutputs`, `OutputField`, `OutputValue`, and `encode_output` also support manual output contracts.
 Declarations and encoders must agree on names, requiredness, and JSON types. `OutputEncodeError::pointer()`
-adds the escaped port name to nested failures and preserves the typed error source. Encoding shared
+adds the escaped port name to nested failures and preserves the typed error source. Providers can
+classify checked, recoverable domain failures with `NodeBusinessFailedSnafu` and a typed boxed source.
+Packed tool calls may encode these failures as business results; ordinary task execution still fails.
+Do not use this classification for cancellation, runtime/resource failures, output contracts, or
+unknown plugin errors. This keeps provider error types in their owning crates without teaching the
+runtime or Router about individual providers.
+
+Encoding shared
 `ValueRef` fields and collection descendants retains payload identity without an intermediate Serde tree.
 
 ### Typed task execution
@@ -1031,9 +1039,9 @@ the new `Stream` variant.
 
 ## In-memory streaming instances
 
-`WorkflowDefinition::from_json` and `CompiledWorkflow::from_json` validate execution settings after
-parsing. Direct Serde deserialization checks the document shape; compilation validates execution
-settings for definitions constructed or deserialized by the host.
+`WorkflowDefinition::from_json` validates execution settings after parsing. Direct Serde
+deserialization checks the document shape; compilation validates execution settings for definitions
+constructed or deserialized by the host.
 
 Schema `2026-10-03` and later infer streaming execution when the graph contains an Event/Stream node
 or consumes or selects a combined node's incremental port. Terminal-only combined nodes remain finite.

@@ -1,7 +1,9 @@
 use crate::{
-    ChatDatabase, ChatError, Completion, Invocation, ModelIdentity, UncommittedCompletion,
+    ChatDatabase, ChatError, Completion, Invocation, ModelIdentity, ToolExecutionMetrics,
+    UncommittedCompletion,
     error::*,
     nodes::{BeginTurnInputs, RecoveryInputs, RecoveryOutputs},
+    workflow::ConversationPresentation,
 };
 use mf_runtime::StreamCancellation;
 use mf_telemetry::observation::Observer;
@@ -68,11 +70,16 @@ pub struct ChatJob {
     receiver: Receiver<Result<Completion, ChatError>>,
     ready: Option<Result<Completion, ChatError>>,
     completed: Arc<AtomicBool>,
+    tool_metrics: ToolExecutionMetrics,
 }
 
 impl ChatJob {
     pub fn invocation(&self) -> &Invocation {
         &self.invocation
+    }
+
+    pub fn tool_metrics(&self) -> &ToolExecutionMetrics {
+        &self.tool_metrics
     }
 
     pub fn cancel(&self) {
@@ -281,12 +288,24 @@ impl ChatHost {
         let worker_completed = completed.clone();
         let job_invocation = invocation.clone();
         let job_cancellation = cancellation.clone();
+        let worker_cancellation = job_cancellation.clone();
+        let tool_metrics = ToolExecutionMetrics::default();
+        let worker_metrics = tool_metrics.clone();
         let worker = thread::Builder::new()
             .name(format!("mf-chat-{}", invocation.call_id))
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    inner.conversation(request, profile, job_cancellation, preview)
+                    inner.conversation(
+                        request,
+                        profile,
+                        job_cancellation,
+                        ConversationPresentation {
+                            preview,
+                            tools: Some(worker_metrics.clone()),
+                        },
+                    )
                 }));
+                worker_metrics.close(worker_cancellation.failure().is_some());
                 let result = match result {
                     Ok(result) => result,
                     Err(_) => {
@@ -343,6 +362,7 @@ impl ChatHost {
             receiver,
             ready: None,
             completed,
+            tool_metrics,
         })
     }
 
@@ -430,21 +450,21 @@ impl Inner {
         request: BeginTurnInputs,
         profile: crate::WorkflowProfile,
         cancellation: StreamCancellation,
-        preview: Option<crate::PreviewConsumer>,
+        presentation: ConversationPresentation,
     ) -> Result<Completion, ChatError> {
         let invocation = Invocation {
             session_id: request.session_id.clone(),
             turn_id: request.turn_id.clone(),
             call_id: request.call_id.clone(),
         };
-        let resolution = crate::workflow::run_conversation_with_preview(
+        let resolution = crate::workflow::run_observed_conversation(
             &self.database,
             request,
             profile.backend(),
             cancellation,
             self.config.automatic_titles,
             self.config.observer.as_ref(),
-            preview,
+            presentation,
         )?;
         match resolution.state {
             crate::contract::CompletionState::Committed(completion)

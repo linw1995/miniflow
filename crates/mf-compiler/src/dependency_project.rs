@@ -328,15 +328,7 @@ fn execute(arguments: mf_runtime::WorkflowArguments, verbose: u8, #[cfg(unix)] s
         #[cfg(feature = "telemetry")]
         let workflow_id = description.workflow_id.clone();
         let run_id = run_id();
-        let started = if description.version.supports_loops() {
-            observer.start_with_description(description, run_id)
-        } else {
-            let nodes = description.nodes.into_iter().map(|node| mf_runtime::NodeIdentity {
-                id: node.id, kind: node.kind, path: Vec::new(),
-            }).collect();
-            observer.start(description.workflow_id, run_id, nodes)
-        };
-        let observation = match started {
+        let observation = match observer.start_with_description(description, run_id) {
             Ok(observation) => Some(observation),
             Err(error) => { eprintln!("telemetry observation unavailable: {error}"); None }
         };

@@ -85,6 +85,7 @@ pub struct FlowSourceBundle {
     pub sources: BTreeMap<PathBuf, String>,
 }
 
+#[cfg(feature = "codegen")]
 pub fn portable_embedded_path(path: &Path) -> Result<String, FlowResolutionError> {
     let normalized = normalize_embedded_path(path)?;
     normalized
@@ -1572,8 +1573,6 @@ mod tests {
             "flows/unused/../leaf.json".into(),
             json!({"nodes":[]}).to_string(),
         );
-        let archive =
-            FlowSourceBundle::from_json(&serde_json::to_string(&archive).unwrap()).unwrap();
         let resolved = archive
             .resolve(&NodeRegistry::from_inventory().unwrap())
             .unwrap();
@@ -1619,8 +1618,9 @@ mod tests {
         assert_eq!(child_scope.children.len(), 1);
     }
 
+    #[cfg(feature = "codegen")]
     #[test]
-    fn embedded_archive_serializes_native_paths_as_portable_slash_identities() {
+    fn generated_archive_uses_portable_resource_paths() {
         let archive = FlowSourceBundle {
             entry: PathBuf::from("flows").join("root.json"),
             sources: BTreeMap::from([
@@ -1634,25 +1634,17 @@ mod tests {
                 ),
             ]),
         };
-        let value = serde_json::to_value(&archive).unwrap();
-        assert_eq!(
-            value,
-            json!({
-                "entry":"flows/root.json",
-                "sources":{
-                    "flows/root.json":"root source",
-                    "flows/nested/child.json":"child source"
-                }
-            })
-        );
-        let restored = FlowSourceBundle::from_json(&value.to_string()).unwrap();
-        assert_eq!(restored.entry, archive.entry);
-        assert_eq!(restored.sources, archive.sources);
+        let source = crate::plan::generate_embedded_source(&archive).unwrap();
+        assert!(source.contains("flows/root.json"));
+        assert!(source.contains("flows/nested/child.json"));
+        assert!(source.contains("root source"));
+        assert!(source.contains("child source"));
+        assert!(!source.contains("serde_json"));
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "codegen"))]
     #[test]
-    fn embedded_archive_serialization_rejects_non_utf8_paths() {
+    fn generated_archive_rejects_non_utf8_resource_paths() {
         use std::os::unix::ffi::OsStringExt;
 
         let invalid = PathBuf::from(std::ffi::OsString::from_vec(vec![0xff]));
@@ -1667,7 +1659,7 @@ mod tests {
             },
         ] {
             assert!(
-                serde_json::to_string(&archive)
+                crate::plan::generate_embedded_source(&archive)
                     .unwrap_err()
                     .to_string()
                     .contains("valid UTF-8")
@@ -1862,11 +1854,7 @@ mod tests {
     }
 
     #[test]
-    fn embedded_sources_preserve_typed_parse_errors_and_strict_archive_schema() {
-        assert!(
-            FlowSourceBundle::from_json(r#"{"entry":"root.json","sources":{},"contracts":{}}"#)
-                .is_err()
-        );
+    fn embedded_sources_preserve_typed_parse_errors() {
         let registry = NodeRegistry::from_inventory().unwrap();
         let mut archive = embedded_archive(
             "root.json",
@@ -2195,10 +2183,6 @@ mod tests {
             let plan = source_resolver().plan(&parent).unwrap();
             assert_eq!(plan.graph.relations, GraphRelations::default());
             assert!(plan.graph.children.is_empty());
-            assert_eq!(
-                crate::CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap(),
-                plan
-            );
             if !version.supports_nested_flows() {
                 parent.nodes[0].config = json!({"flow":"static"});
                 let error = source_resolver().resolve(&mut parent, None).unwrap_err();

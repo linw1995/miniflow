@@ -20,20 +20,19 @@ nix develop --command cargo test -p mf-compiler --test telemetry_boundary
 
 `Observer::new(&traces, &logs)` obtains workflow instruments from application-owned OTel providers without installing globals. `CompiledWorkflow::start_observation(&observer, run_id)` computes the canonical workflow identity, creates one run scope, and emits `mf.workflow.started`. Keep the providers alive for the entire run and flush/shut them down in the application after either success or handled failure.
 
-Use `execute_compiled(&plan, &registry, Some(observation))` to cover node construction, dependency resolution, invocation, publication, and output selection in memory. `Flow::execute_with_observation(Some(observation))` covers execution of nodes that have already been constructed; it cannot report construction that happened before the run. Existing `Flow::execute()` and generated `run_workflow()` remain unobserved entry points.
+Use `execute_compiled(&plan, &registry, Some(observation))` to cover node construction, dependency resolution, invocation, publication, and output selection in memory. `Flow::execute_with_observation(Some(observation))` covers execution of nodes that have already been constructed; it cannot report construction that happened before the run. Use `Flow::execute()` when observation is not needed.
 
-Source from `CompiledWorkflow::generate_artifacts()` provides `prepare_workflow(registry, observation)` to construct a validated Flow and
-`run_workflow_with_observation(&flow, Some(observation))` to execute it. Construction errors use
-`WorkflowBuildError`; execution errors use `WorkflowRunError`. For applications that need
-registry initialization inside the run, use `ExecutionContext::run(Some(observation), |state| ...)` and call generated
-`run_workflow_in_context(&flow, state)` or `Flow::execute_in_context(state)`. These low-level context entry points
-execute one matching plan per fresh scope; the surrounding scope owns the terminal event. An early error before a node
-is identified becomes a workflow preparation failure.
+Source from `CompiledWorkflow::generate_artifacts(&registry, options)` provides
+`prepare_workflow(registry, observation)` to bind a fixed layout. Binding errors use
+`mf_runtime::generated::BindError`; execution errors use `WorkflowRunError`. Execute with `FlowRuntime`
+and the ordinary input, observation, and context APIs. Initialize the registry inside
+`ExecutionContext::run` to observe preparation and execution in one scope. An early error before a
+node is identified becomes a workflow preparation failure.
 
-Standalone projects use `CompiledWorkflow::generate_runner_artifacts()` to emit only the entry points their runner calls:
-`prepare_workflow` and `run_workflow_in_context` for task workflows, or `prepare_stream` for streaming workflows.
-Binding errors use `mf_runtime::generated::BindError`; runner startup never compiles a graph.
-Custom runners that need the convenience functions above can use `generate_artifacts()` instead.
+`CodegenOptions::default()` enables eligible typed segments for standalone runners. Set
+`preserve_intermediate_outputs` for hosts that inspect intermediate values through execution contexts.
+Streaming workflows expose `prepare_stream`. Both modes use the same fixed binding backend and do
+not compile graphs at startup.
 
 The runnable example uses in-memory SDK exporters and performs no network export:
 
@@ -128,7 +127,7 @@ Graph-relative event validation checks workflow/node identity, position, sequenc
 
 ## Embedded manifest format
 
-Manifest payload version `2026-11-14` separates original definition resources from a public inspection projection.
+Manifest payload version `2026-11-18` separates original definition resources from a public inspection projection.
 `definition` retains the root declaration; `entry` and `sources` identify the captured UTF-8 definition resources.
 The `descriptor` contains the validated observation `description` and prepared `input_schema`, including workflow identity,
 actual execution mode, child observation scopes, provider-declared types, bindings, and conditional stdin ownership.
@@ -222,13 +221,14 @@ This logical fixture demonstrates successful node completion:
 
 ## Model request observations
 
-The `mf.observation` log scope carries `llm.request.started`, `llm.response.first_text`, and
+The `mf.observation` log scope carries `llm.request.started`, `llm.response.first_output`, and
 `llm.request.finished`. Each structured body identifies its `call_id`; request boundaries carry the model,
 node/scope attribution, and available call facts. Source timestamps and native trace/span correlation are retained
-unchanged by local collectors and OTel export. The first-text observation is emitted before downstream publication.
-These observations do not consume workflow lifecycle sequence numbers or change lifecycle schema versions.
+unchanged by local collectors and OTel export. The first-output observation is emitted before downstream publication
+of the first nonempty text or tool-call delta. These observations do not consume workflow lifecycle sequence numbers
+or change lifecycle schema versions.
 
-Application hosts derive request duration and first-text latency from corresponding event timestamps, then combine
+Application hosts derive request duration and first-output latency from corresponding event timestamps, then combine
 those windows with provider output-token counts. `mf_telemetry::events::collect` installs a local collector in
 the observation Context; `events::record` shares each source event with that collector and the active exporter.
 Existing observation contexts propagate collection across worker and nested invocations. Runtime execution
@@ -704,6 +704,11 @@ Running members of folded clusters and bodies remain visible in separate PiPs th
 expanded PiP layout; folding the main graph does not hide them. PiP titles include the body path to
 distinguish nodes with the same ID in different scopes. The compact chat Flow execution panel uses the
 same PiP grid alongside its folded root overview and keeps a single running nested Call node visible.
+PiPs follow the deepest active runtime scope, including named Router branches and dynamic calls through
+Flow-valued edges. Dynamic PiPs use the target's existing definition layout with invocation-local node
+states; they do not move the main graph's selection or mark the producer's static body as executing.
+Parallel items and invocations of the same definition retain separate PiPs, and active descendants
+replace their waiting invokers rather than adding duplicate parent panels.
 Declared node clusters show a labeled boundary and a wrapped annotation inside the graph and in Details.
 Cluster boundaries, member node borders, and labels share a stable color from a six-color palette.
 Node titles and status markers retain their execution-state colors. Annotations wrap at word boundaries;

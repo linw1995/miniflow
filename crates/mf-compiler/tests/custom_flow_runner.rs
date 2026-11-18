@@ -11,7 +11,7 @@ use mf_compiler::{
     CompileRequest, NodeRegistry, SupportPackages, WorkflowDefinition, compile_definition,
     compile_project, instantiate_compiled,
 };
-use mf_runtime::{FlowRuntime, WorkflowArguments, WorkflowManifest};
+use mf_runtime::{FlowRuntime, WorkflowArguments};
 use mf_telemetry::event::ScopePathEntry;
 use serde_json::{Value, json};
 use std::{fs, process::Command};
@@ -110,8 +110,10 @@ fn old_root_iteration_keeps_complete_typed_scope_orders_in_a_source_free_runner(
         .unwrap(),
         expected
     );
-    let generated = plan.generate_runner_execution_plans(&registry).unwrap();
-    let manifest = WorkflowManifest::from_bytes(&generated.manifest_bytes).unwrap();
+    let generated = plan
+        .generate_artifacts(&registry, Default::default())
+        .unwrap();
+    let manifest = generated.manifest;
     assert_eq!(manifest.definition, plan.graph.definition);
     assert_eq!(manifest.description().unwrap(), description);
     let source = root.path().join("flow.json");
@@ -206,8 +208,10 @@ fn source_free_generated_runner_executes_external_provider_flow_bindings() {
             .contains("unknown local Flow binding `first`"),
         "{error}"
     );
-    let generated = plan.generate_runner_execution_plans(&registry).unwrap();
-    let manifest = WorkflowManifest::from_bytes(&generated.manifest_bytes).unwrap();
+    let generated = plan
+        .generate_artifacts(&registry, Default::default())
+        .unwrap();
+    let manifest = generated.manifest;
     assert_eq!(
         manifest.node_definition("custom").unwrap().kind,
         provider::KIND

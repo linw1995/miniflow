@@ -593,13 +593,15 @@ fn an_embedded_run_closes_preparation_errors_and_restores_its_caller() {
         .unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
     let result = mf_runtime::ExecutionContext::run(Some(run), |state| {
-        mf_compiler::instantiate_node_with_metadata(&registry, "a", "fixture.context", "{")
-            .inspect_err(|error| state.preparation_failed("a", error))
-            .map(|_| ())
+        let result: Result<(), Box<dyn std::error::Error>> =
+            mf_runtime::generated::configuration(&registry, "a", "fixture.context", "{", &[])
+                .map(|_| ())
+                .map_err(|error| Box::new(error) as Box<dyn std::error::Error>);
+        result.inspect_err(|error| state.preparation_failed("a", error.as_ref()))
     });
     assert!(matches!(
         result,
-        Err(mf_compiler::WorkflowBuildError::InvalidEmbeddedConfig { .. })
+        Err(error) if error.downcast_ref::<mf_runtime::generated::BindError>().is_some()
     ));
     let records = harness.records();
     assert_eq!(records.len(), 3);
@@ -663,7 +665,6 @@ fn generated_execution_matches_memory_for_success_and_failures() {
             },
         )
         .unwrap();
-        common::link_compiler_for_custom_host(&project);
         let manifest = fs::read_to_string(project.join("Cargo.toml")).unwrap();
         fs::write(project.join("Cargo.toml"), format!(r#"{manifest}
 opentelemetry = {{ version = "0.33.0", default-features = false, features = ["logs", "trace"] }}
@@ -678,15 +679,14 @@ opentelemetry_sdk = {{ version = "0.33.0", default-features = false, features = 
 extern crate node_0 as _;
 mod workflow;
 mod observation_capture;
-include!("../workflow-plan.rs");
 fn main() {
-    let plan = compiled_workflow().unwrap();
+    let manifest = mf_runtime::WorkflowManifest::from_bytes(include_bytes!(concat!(env!("OUT_DIR"), "/workflow-manifest.bin"))).unwrap();
     let harness = observation_capture::Harness::new(true);
-    let observation = plan.start_observation(&harness.observer(), mf_telemetry::identity::RunId::new()).unwrap();
+    let observation = harness.observer().start_with_description(manifest.description().unwrap(), mf_telemetry::identity::RunId::new()).unwrap();
     let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
     let result = mf_runtime::ExecutionContext::run(Some(observation), |state| -> Result<_, Box<dyn std::error::Error>> {
         let flow = workflow::prepare_workflow(&registry, state.observation_mut())?;
-        Ok(workflow::run_workflow_in_context(&flow, state)?)
+        Ok(flow.execute_in_context(state)?)
     });
     println!("{}", serde_json::json!({"ok":result.is_ok(), "outputs":result.ok(), "records":harness.records(), "spans":harness.spans.get_finished_spans().unwrap().len()}));
 }

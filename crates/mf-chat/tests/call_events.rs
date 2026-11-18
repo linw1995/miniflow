@@ -16,14 +16,14 @@ impl ConversationBackend for Backend {
         invocation: &Invocation,
         _: ConversationInputs,
         _: &mut ExecutionContext,
-        _: Option<&mut dyn FnMut(mf_chat::TextDelta) -> Result<(), mf_chat::ChatError>>,
+        _: Option<&mut dyn FnMut(mf_chat::PreviewDelta) -> Result<(), mf_chat::ChatError>>,
         _: Option<&mf_telemetry::observation::Observer>,
     ) -> Result<ConversationResult, mf_chat::ChatError> {
         let mut usage: mf_chat::CallUsage = serde_json::from_value(json!({"call_id":format!("model-{}", invocation.call_id), "model":"fixture", "usage":{"output_tokens":100}})).unwrap();
         let start =
             mf_telemetry::events::record(mfn_llm::REQUEST_STARTED_EVENT, json!(&usage)).unwrap();
         let first = mf_telemetry::events::record(
-            mfn_llm::FIRST_TEXT_EVENT,
+            mfn_llm::FIRST_OUTPUT_EVENT,
             json!({"call_id":usage.call_id}),
         )
         .unwrap();

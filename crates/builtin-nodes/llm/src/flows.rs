@@ -78,7 +78,7 @@ mod tests {
         ] {
             assert!(!serialized.contains(synthetic), "{synthetic}");
         }
-        assert_eq!(definition.outputs.len(), 6);
+        assert_eq!(definition.outputs.len(), 7);
         assert!(
             definition
                 .nodes

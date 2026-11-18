@@ -189,13 +189,10 @@ fn generated_owned_values_preserve_contracts_and_installation() {
                 json!({"a.input":shared})
             };
         let plan = compile_definition(&definition, &registry).unwrap();
-        let report: mf_compiler::TypedPlan = serde_json::from_str(
-            &plan
-                .generate_runner_execution_plans(&registry)
-                .unwrap()
-                .typed_plan_json,
-        )
-        .unwrap();
+        let report = plan
+            .generate_artifacts(&registry, Default::default())
+            .unwrap()
+            .typed_plan;
         assert_eq!(report.segments.is_empty(), refined);
         if refined {
             assert!(
@@ -249,13 +246,10 @@ fn generated_owned_values_preserve_contracts_and_installation() {
     ] {
         definition = next;
         let plan = compile_definition(&definition, &registry).unwrap();
-        let report: mf_compiler::TypedPlan = serde_json::from_str(
-            &plan
-                .generate_runner_execution_plans(&registry)
-                .unwrap()
-                .typed_plan_json,
-        )
-        .unwrap();
+        let report = plan
+            .generate_artifacts(&registry, Default::default())
+            .unwrap()
+            .typed_plan;
         if has_segment {
             assert!(!report.segments.is_empty());
         }

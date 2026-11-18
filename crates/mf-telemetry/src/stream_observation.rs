@@ -246,6 +246,7 @@ impl StreamObservation {
             trace,
             self.0.description.event_schema_version(),
         ) {
+            emit_local(context, LocalRecord::Stream(&record));
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 self.0.backend.emit_lifecycle(&wire)
             }));
@@ -598,6 +599,40 @@ mod tests {
                 RunId::new(),
             )
             .unwrap()
+    }
+
+    #[test]
+    fn local_collection_reuses_existing_records_without_changing_export() {
+        let exported = Arc::new(AtomicUsize::new(0));
+        let collected = Arc::new(Mutex::new(Vec::new()));
+        let local = Arc::clone(&collected);
+        let _collect = collect(move |record| {
+            if let LocalRecord::Stream(record) = record {
+                local.lock().unwrap().push(record.clone());
+            }
+        });
+        let observation = observation(Arc::clone(&exported));
+        let mut callback = observation
+            .callback(
+                "%input",
+                Some(StreamMessage {
+                    domain: 0,
+                    sequence: 0,
+                }),
+                StreamTrigger::Input,
+            )
+            .unwrap();
+        callback.started();
+        callback.succeeded(0, Vec::new());
+        observation.finish(StreamCounts::default(), None);
+        let collected = collected.lock().unwrap();
+        assert_eq!(collected.len(), exported.load(Ordering::SeqCst));
+        assert_eq!(collected.len(), 4);
+        assert!(
+            collected
+                .iter()
+                .all(|record| record.run_id == observation.0.run_id)
+        );
     }
 
     #[test]

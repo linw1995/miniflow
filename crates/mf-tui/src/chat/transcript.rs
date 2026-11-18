@@ -82,6 +82,15 @@ impl Transcript {
         self.push(key);
     }
 
+    pub fn json(&mut self, key: String, source: &str) {
+        self.entries
+            .entry(key.clone())
+            .or_default()
+            .document
+            .json(source);
+        self.push(key);
+    }
+
     fn push(&mut self, key: String) {
         let entry = self.entries.get_mut(&key).unwrap();
         entry.seen = true;
@@ -89,6 +98,27 @@ impl Transcript {
         self.ends
             .push(self.ends.last().copied().unwrap_or_default() + height);
         self.order.push(key);
+    }
+
+    pub fn focus(&mut self, key: &str) -> bool {
+        let Some((position, _)) = self
+            .entries
+            .get(key)
+            .and_then(|entry| entry.document.row(0))
+        else {
+            return false;
+        };
+        self.anchor = Some((key.to_owned(), position));
+        self.requested_scroll = 1;
+        true
+    }
+
+    pub fn remap_anchor(&mut self, key_for: impl FnOnce(&str) -> Option<String>) {
+        if let Some((key, _)) = &mut self.anchor
+            && let Some(mapped) = key_for(key)
+        {
+            *key = mapped;
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -197,6 +227,39 @@ mod tests {
         (top..top + height)
             .filter_map(|row| transcript.row(row).map(|(_, _, line)| line.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn tool_focus_tolerates_not_yet_rendered_keys_and_anchors_existing_headers() {
+        let mut transcript = Transcript::default();
+        assert!(!transcript.focus("missing"));
+        transcript.begin(20);
+        transcript.literal(
+            "tool".into(),
+            "Tool result\none\ntwo\nthree",
+            Style::default(),
+        );
+        assert_eq!(transcript.top(2, 0), 2);
+        assert!(transcript.focus("tool"));
+        assert_eq!(transcript.top(2, 1), 0);
+        assert_eq!(screen(&transcript, 0, 1), ["Tool result"]);
+    }
+
+    #[test]
+    fn rekeyed_group_keeps_a_focused_header_at_the_top() {
+        let mut transcript = Transcript::default();
+        transcript.begin(24);
+        transcript.literal("prefix".into(), "earlier", Style::default());
+        transcript.literal("anonymous".into(), "Tool call [index 0]", Style::default());
+        transcript.literal("tail".into(), "one\ntwo\nthree", Style::default());
+        assert!(transcript.focus("anonymous"));
+        transcript.remap_anchor(|key| (key == "anonymous").then(|| "known".into()));
+        transcript.begin(24);
+        transcript.literal("prefix".into(), "earlier\nbefore", Style::default());
+        transcript.literal("known".into(), "Tool call [known]", Style::default());
+        transcript.literal("tail".into(), "one\ntwo\nthree\nfour", Style::default());
+        let top = transcript.top(2, 1);
+        assert_eq!(screen(&transcript, top, 1), ["Tool call [known]"]);
     }
 
     #[test]

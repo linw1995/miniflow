@@ -1,8 +1,8 @@
 extern crate mfn_core as _;
 
 use mf_compiler::{
-    CompiledWorkflow, NodeRegistry, WorkflowDefinition, compile_definition,
-    compile_resolved_definition, instantiate_compiled, plan_definition,
+    NodeRegistry, WorkflowDefinition, compile_definition, compile_resolved_definition,
+    instantiate_compiled, plan_definition,
 };
 use mf_runtime::{ITERATION_INPUT_ID, ITERATION_INPUT_KIND, LOOP_SOURCE_ID, ROOT_SOURCE_ID};
 use serde_json::{Value, json};
@@ -88,9 +88,7 @@ fn scope_reads_and_assignments_need_no_source_node_declaration() {
                 1,
                 "{source}: the compiler supplies exactly one internal source"
             );
-            // Stored source instructions stay valid; artifact replay is not authoring.
-            let restored = CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
-            let flow = instantiate_compiled(&restored, &registry).unwrap();
+            let flow = instantiate_compiled(&plan, &registry).unwrap();
             assert_eq!(
                 serde_json::to_value(flow.execute().unwrap()).unwrap(),
                 expected

@@ -206,12 +206,21 @@ fn typed_plans_fall_back_at_groups_and_isolated_nodes_accept_resolved_inputs() {
             .iter()
             .any(|edge| edge.target == "unrelated_b" && edge.fallback.is_none())
     );
-    let targets = artifacts.node_targets.clone();
+    let targets = artifacts.manifest.descriptor.node_targets.clone();
     let target = mf_runtime::NodeTarget::find(&targets, "consume").unwrap();
     let flow = instantiate_compiled(&plan, &registry).unwrap();
     let result = mf_runtime::FlowRuntime::default()
         .execute_target(
-            &target.bind_flow(&flow).unwrap(),
+            &target
+                .bind_flow(
+                    &flow,
+                    plan.graph
+                        .execution_order
+                        .iter()
+                        .position(|id| id.as_str() == target.id)
+                        .unwrap(),
+                )
+                .unwrap(),
             mf_runtime::WorkflowArguments::try_from(json!({"consume.input":7})).unwrap(),
             Default::default(),
         )

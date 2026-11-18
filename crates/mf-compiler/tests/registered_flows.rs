@@ -97,7 +97,7 @@ fn registered_calls_use_host_execution_without_loading_child_providers() {
         .unwrap(),
     );
     let plan = mf_compiler::plan_resolved_definition(&outside, &registry).unwrap();
-    let saved = mf_compiler::CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
+    let saved = plan.clone();
     assert_eq!(saved.graph.execution_order[0].as_str(), "a_before");
     // Constructing the earlier constant would fail on its missing value; instead
     // availability preflight must report the later unlinked provider first.
@@ -125,7 +125,14 @@ fn registered_host_calls_cannot_be_emitted_into_generated_runners() {
         )
         .unwrap();
     let plan = compile_resolved_definition(&caller(&body), &registry).unwrap();
-    let error = plan.generate_execution_plans(&registry).unwrap_err();
+    let error = plan
+        .generate_artifacts(
+            &registry,
+            mf_compiler::CodegenOptions {
+                preserve_intermediate_outputs: true,
+            },
+        )
+        .unwrap_err();
     assert!(
         error
             .to_string()
@@ -152,7 +159,7 @@ fn registered_calls_compare_nested_bindings_against_the_actual_compiled_tree() {
     );
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = mf_compiler::plan_resolved_definition(&caller(&body), &registry).unwrap();
-    let saved = mf_compiler::CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
+    let saved = plan.clone();
 
     for case in [
         "matching",

@@ -31,6 +31,27 @@ fn find_source<'a, T: Error + 'static>(error: &'a (dyn Error + 'static)) -> Opti
     None
 }
 
+fn instantiate_loop(
+    registry: &mf_compiler::NodeRegistry,
+    config: &serde_json::Value,
+    body: mf_runtime::PreparedSubgraph,
+) -> Result<mf_compiler::FlowNode, mf_runtime::generated::BindError> {
+    let config = config.to_string();
+    let (registration, config) = mf_runtime::generated::configuration(
+        registry,
+        "repeat",
+        mf_runtime::LOOP_KIND,
+        &config,
+        &["body"],
+    )?;
+    mf_runtime::generated::instantiate(
+        registration,
+        "repeat",
+        config,
+        [("body".into(), body)].into(),
+    )
+}
+
 fn prepared_loop_body() -> (Value, mf_runtime::PreparedSubgraph) {
     let body = json!({
         "version": "2026-10-28", "dependencies": {},
@@ -323,12 +344,10 @@ fn loop_variable_validation_matches_planner_and_runtime_construction() {
             "variables": variables,
             "body": body,
         });
-        let error = mf_compiler::instantiate_subgraphs_with_metadata(
+        let error = instantiate_loop(
             &NodeRegistry::from_inventory().unwrap(),
-            "repeat",
-            mf_runtime::LOOP_KIND,
-            &config.to_string(),
-            [("body".into(), prepared_body)].into(),
+            &config,
+            prepared_body,
         )
         .err()
         .unwrap()
@@ -340,14 +359,7 @@ fn loop_variable_validation_matches_planner_and_runtime_construction() {
     let mut complete_definition = definition()["nodes"][1]["config"].clone();
     complete_definition["body"] = body;
     let registry = NodeRegistry::from_inventory().unwrap();
-    let prepared = mf_compiler::instantiate_subgraphs_with_metadata(
-        &registry,
-        "repeat",
-        mf_runtime::LOOP_KIND,
-        &complete_definition.to_string(),
-        [("body".into(), prepared_body)].into(),
-    )
-    .unwrap();
+    let prepared = instantiate_loop(&registry, &complete_definition, prepared_body).unwrap();
     assert_eq!(prepared.metadata.ports.inputs[0].name, "count");
 
     // An empty prepared body is a Loop business-policy failure, not a lowering error.
@@ -355,16 +367,10 @@ fn loop_variable_validation_matches_planner_and_runtime_construction() {
     let mut authored = definition();
     authored["nodes"][1]["config"] = complete_definition.clone();
     plan_definition(&parse(authored)).unwrap();
-    let error = mf_compiler::instantiate_subgraphs_with_metadata(
+    let error = instantiate_loop(
         &registry,
-        "repeat",
-        mf_runtime::LOOP_KIND,
-        &complete_definition.to_string(),
-        [(
-            "body".into(),
-            mf_runtime::PreparedSubgraph::new(Vec::new(), Vec::new(), |_| Ok(Outputs::new())),
-        )]
-        .into(),
+        &complete_definition,
+        mf_runtime::PreparedSubgraph::new(Vec::new(), Vec::new(), |_| Ok(Outputs::new())),
     )
     .err()
     .unwrap();
@@ -883,7 +889,7 @@ fn body_outputs_commit_together_before_until_and_survive_saved_plans() {
     );
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&parse(value), &registry).unwrap();
-    let saved = mf_compiler::CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
+    let saved = plan.clone();
     saved.manifest(&registry).unwrap().validate().unwrap();
     assert_eq!(
         serde_json::to_value(
@@ -1141,7 +1147,7 @@ fn compiled_scope_relationships_execute_independently_of_instruction_labels() {
     body.relations.scope.as_mut().unwrap().input = renamed_input;
     assert_eq!(body.relations.scope.as_ref().unwrap().writes, frame.writes);
     assert_eq!(body.relations.scope.as_ref().unwrap().exits, frame.exits);
-    let saved = mf_compiler::CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
+    let saved = plan.clone();
     assert_eq!(
         instantiate_compiled(&saved, &registry)
             .unwrap()
@@ -1155,19 +1161,11 @@ fn compiled_scope_relationships_execute_independently_of_instruction_labels() {
     mf_compiler::describe_compiled(&saved).unwrap();
     #[cfg(feature = "codegen")]
     {
-        let execution = saved.generate_execution_plans(&registry).unwrap();
-        let generated = saved.generate_artifacts().unwrap();
-        for source in [&execution.rust_source, &generated.rust_source] {
-            assert!(source.contains("%actual-input"));
-        }
+        let generated = saved
+            .generate_artifacts(&registry, Default::default())
+            .unwrap();
+        assert!(generated.rust_source.contains("%actual-input"));
         assert!(generated.rust_source.contains("with_relations"));
-        let runner = saved.generate_runner_artifacts().unwrap();
-        assert!(
-            runner
-                .rust_source
-                .contains("mf_prepare_generated_workflow!")
-        );
-        assert!(!runner.rust_source.contains("CompiledWorkflow::from_json"));
     }
 
     // The identical label outside a relationship endpoint remains a provider node.
@@ -2046,14 +2044,6 @@ fn descriptions_reject_damaged_loop_relationships_with_typed_owners() {
         mf_runtime::FlowParameterError::Json { parameter, .. } if parameter == "body"
     ));
     assert!(find_source::<serde_json::Error>(&error).unwrap().is_data());
-    let mut malformed: serde_json::Value = serde_json::from_str(&valid.to_json().unwrap()).unwrap();
-    malformed["graph"]["children"]["repeat"]["body"]["definition"] = json!("not a workflow");
-    let error = mf_compiler::CompiledWorkflow::from_json(&malformed.to_string()).unwrap_err();
-    assert!(
-        matches!(&error, mf_compiler::PlanError::Parse { .. }),
-        "{error}"
-    );
-    assert!(error.source().unwrap().is::<serde_json::Error>());
 
     let mut old_version = parse(definition());
     old_version.version = WorkflowDefinitionVersion::V2026_09_26;

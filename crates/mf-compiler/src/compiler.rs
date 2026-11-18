@@ -2853,27 +2853,23 @@ mod tests {
                 plan.graph.definition.nodes[1].config,
                 definition.nodes[1].config
             );
-            let replay = CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
-            assert_eq!(replay, plan);
-            for plan in [&plan, &replay] {
-                let callable = mf_runtime::FlowValue::new(PreparedSubgraph::new(
-                    Vec::new(),
-                    vec![mf_runtime::PortSpec::new("answer", ValueType::Int64, true)],
-                    |_| Ok(mf_runtime::Outputs::from([("answer".into(), 42.into())])),
-                ))
-                .unwrap();
-                let outputs = execute_compiled_with_inputs(
-                    plan,
-                    &registry,
-                    mf_runtime::WorkflowArguments(mf_runtime::Inputs::from([(
-                        "formal.callback".into(),
-                        callable.into(),
-                    )])),
-                    None,
-                )
-                .unwrap();
-                assert_eq!(outputs["answer"].as_i64(), Some(42));
-            }
+            let callable = mf_runtime::FlowValue::new(PreparedSubgraph::new(
+                Vec::new(),
+                vec![mf_runtime::PortSpec::new("answer", ValueType::Int64, true)],
+                |_| Ok(mf_runtime::Outputs::from([("answer".into(), 42.into())])),
+            ))
+            .unwrap();
+            let outputs = execute_compiled_with_inputs(
+                &plan,
+                &registry,
+                mf_runtime::WorkflowArguments(mf_runtime::Inputs::from([(
+                    "formal.callback".into(),
+                    callable.into(),
+                )])),
+                None,
+            )
+            .unwrap();
+            assert_eq!(outputs["answer"].as_i64(), Some(42));
         }
     }
 

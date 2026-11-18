@@ -209,10 +209,26 @@ fn parameters_probe() {
 
     #[cfg(feature = "codegen")]
     {
-        let generated = plan.generate_execution_plans(&registry).unwrap();
-        let targets = generated.node_targets.clone();
+        let generated = plan
+            .generate_artifacts(
+                &registry,
+                mf_compiler::CodegenOptions {
+                    preserve_intermediate_outputs: true,
+                },
+            )
+            .unwrap();
+        let targets = generated.manifest.descriptor.node_targets.clone();
         let target = mf_runtime::NodeTarget::find(&targets, "params").unwrap();
-        let bound = target.bind_flow(&flow).unwrap();
+        let bound = target
+            .bind_flow(
+                &flow,
+                plan.graph
+                    .execution_order
+                    .iter()
+                    .position(|id| id.as_str() == target.id)
+                    .unwrap(),
+            )
+            .unwrap();
         let output = mf_runtime::FlowRuntime::default()
             .execute_target_in_context(
                 &bound,
@@ -233,7 +249,18 @@ fn parameters_probe() {
             .unwrap()
             .binding
             .secret = false;
-        assert!(changed.bind_flow(&flow).is_err());
+        assert!(
+            changed
+                .bind_flow(
+                    &flow,
+                    plan.graph
+                        .execution_order
+                        .iter()
+                        .position(|id| id.as_str() == target.id)
+                        .unwrap()
+                )
+                .is_err()
+        );
     }
 
     let mut stream_graph = graph.clone();

@@ -210,7 +210,8 @@ mod contract_drift {
             #[cfg(feature = "codegen")]
             {
                 assert!(
-                    plan.generate_runner_execution_plans(&registry).is_err(),
+                    plan.generate_artifacts(&registry, Default::default())
+                        .is_err(),
                     "{kind}"
                 );
                 assert_eq!(CHILD_CONSTRUCTIONS.load(Ordering::SeqCst), 0, "{kind}");
@@ -253,7 +254,9 @@ fn source_free_generated_runner_preserves_stream_forwarding_and_unsubscribed_ter
         }});
         let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
         let plan = compile_definition(&definition, &registry).unwrap();
-        let generated = plan.generate_runner_execution_plans(&registry).unwrap();
+        let generated = plan
+            .generate_artifacts(&registry, Default::default())
+            .unwrap();
         syn::parse_file(&generated.rust_source).unwrap();
         let output = root.path().join(format!("runner-{stream}"));
         fs::write(&source, serde_json::to_vec(&definition).unwrap()).unwrap();

@@ -538,16 +538,6 @@ fn loop_validation_preserves_variable_and_descriptor_sources() {
         matches!(find_source::<mf_runtime::TypeDescriptorError>(&error).unwrap(),
         mf_runtime::TypeDescriptorError::UnsupportedName { name } if name == "unknown")
     );
-
-    let error = mf_compiler::prepared_loop_source_from_json(r#"[{"name":"x","type":"unknown"}]"#)
-        .err()
-        .unwrap();
-    assert!(find_source::<mf_runtime::LoopVariableError>(&error).is_some());
-    assert!(find_source::<mf_runtime::TypeDescriptorError>(&error).is_some());
-    let error = mf_compiler::prepared_loop_assign_from_json("assign", "x", r#""unknown""#)
-        .err()
-        .unwrap();
-    assert!(find_source::<mf_runtime::TypeDescriptorError>(&error).is_some());
 }
 
 #[test]

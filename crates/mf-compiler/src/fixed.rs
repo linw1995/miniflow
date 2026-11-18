@@ -10,7 +10,7 @@ pub fn scope(
     graph: &CompiledGraph,
     name: &str,
     path: &[String],
-    constructors: &BTreeMap<DefinitionId, (TokenStream, TokenStream)>,
+    constructors: &BTreeMap<DefinitionId, TokenStream>,
     bind_flow: bool,
     error_override: Option<&TokenStream>,
 ) -> Result<(Vec<TokenStream>, Vec<syn::Ident>, syn::Ident), PlanError> {
@@ -34,7 +34,7 @@ pub fn scope(
         } else {
             quote! { if let Some(observation) = observation.as_deref_mut() { observation.preparation_failed_unattributed(format!("child scope {} node `{}`: {}", #path_json, #physical_id, error)); } }
         });
-        if let Some((constructor, _)) = constructors.get(id) {
+        if let Some(constructor) = constructors.get(id) {
             let handle = format_ident!("typed_root_{index}");
             preparation.push(quote! {
                 let #handle = #constructor.inspect_err(|error| { #report })?;

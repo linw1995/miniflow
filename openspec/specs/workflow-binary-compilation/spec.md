@@ -997,7 +997,7 @@ selected build options, successful elapsed time, and retained generated-project 
 
 ### Requirement: Separate definition resources from inspection projections
 
-Manifest `2026-11-14` SHALL retain original definition resources and a public inspection descriptor containing
+Manifest `2026-11-18` SHALL retain original definition resources and a public inspection descriptor containing
 observation descriptions, workflow identity, actual execution mode, and prepared startup inputs. It MUST NOT persist
 compiler graphs, execution relationships, scheduling layouts, or typed optimization evidence. Provider-declared types,
 bindings, and stdin constraints SHALL remain readable without invoking providers or executing the runner. Full static

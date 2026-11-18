@@ -31,6 +31,8 @@ struct FlowConfig {
     #[serde(rename = "type")]
     value_type: FlowType,
     value: PreparedSubgraph,
+    #[serde(default)]
+    inputs: BTreeMap<String, Value>,
 }
 
 fn is_flow(config: &Value) -> bool {
@@ -54,6 +56,7 @@ struct ConstantNode {
 struct FlowConstantNode {
     value: ValueRef,
     properties: ValueRef,
+    inputs: Option<mf_runtime::FlowInputConfiguration>,
 }
 
 #[derive(NodeValue)]
@@ -80,10 +83,14 @@ impl mf_runtime::TaskNode for FlowConstantNode {
     fn execute(
         &self,
         _inputs: mf_runtime::Inputs,
-        _ctx: &mut mf_runtime::ExecutionContext,
+        context: &mut mf_runtime::ExecutionContext,
     ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
+        let value = match &self.inputs {
+            Some(inputs) => inputs.resolve(context)?.into(),
+            None => self.value.clone(),
+        };
         Ok(mf_runtime::Outputs::from([
-            ("value".into(), self.value.clone()),
+            ("value".into(), value),
             ("properties".into(), self.properties.clone()),
         ])
         .into())
@@ -132,18 +139,24 @@ fn flow_factory(
     let FlowConfig {
         value_type: FlowType::Flow,
         value,
+        inputs,
     } = FlowConfig::from_config(config, flows)?;
     let value = FlowValue::new(value)?;
-    let properties: ValueRef = value.properties().into();
+    let configured = !inputs.is_empty();
+    let inputs = value.configure_inputs(inputs)?;
+    let context_references = inputs.references();
+    let properties: ValueRef = inputs.properties().into();
     let node = FlowConstantNode {
         value: value.into(),
         properties: properties.clone(),
+        inputs: configured.then_some(inputs),
     };
     // Native capabilities are never literal evidence: only their known type may
     // be serialized into compiler metadata. Keep the ordinary typed task adapter.
     PreparedNode::new(
         node,
         NodeMetadata {
+            context_references,
             output_derivations: vec![
                 OutputDerivation::known_type("value", ValueType::Flow),
                 OutputDerivation::literal("properties", properties),

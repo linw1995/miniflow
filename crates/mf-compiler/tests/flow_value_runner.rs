@@ -145,7 +145,6 @@ fn same_callee_receives_different_flow_values_over_edges_and_saved_plans_keep_or
         plan.graph.children[&"first".into()]["body"].definition,
         plan.graph.children[&"second".into()]["body"].definition,
     );
-    let plan = mf_compiler::CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
     root.close().unwrap();
 
     let description = mf_compiler::describe_compiled(&plan).unwrap();
@@ -201,6 +200,119 @@ fn same_callee_receives_different_flow_values_over_edges_and_saved_plans_keep_or
             },
         ];
         assert!(records.iter().any(|record| matches!(&record.event, Event::NodeStarted {node, ..} if node.id == "value" && node.path == expected_path)));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn configured_flow_calls_refresh_residual_signatures_and_run_without_sources() {
+    use mf_compiler::{
+        CompileRequest, RunnerOptions, SupportPackages, compile_project_with_options,
+    };
+    use mf_runtime::WorkflowArguments;
+    let root = tempfile::tempdir().unwrap();
+    let value = json!({
+        "version":"2026-10-28",
+        "dependencies":{"core":{"package":"mfn-core","path":common::crates_dir().join("builtin-nodes/core")}},
+        "nodes":[
+            {"id":"params","kind":"builtin.parameters","config":{"parameters":{"prefix":{"type":"string","secret":false}}}},
+            {"id":"configured","kind":"builtin.constant","config":{
+                "type":"flow", "inputs":{"prefix":{"$ref":"params.prefix"}},
+                "value":{"version":"2026-10-28","nodes":[
+                    {"id":"params","kind":"builtin.parameters","config":{"parameters":{
+                        "prefix":{"type":"string","secret":false},"text":{"type":"string","secret":false}
+                    }}},
+                    {"id":"result","kind":"builtin.object","config":{"fields":{"prefix":"string","text":"string"}},"inputs":{
+                        "prefix":{"from":{"node":"params","port":"prefix"}},
+                        "text":{"from":{"node":"params","port":"text"}}
+                    }}
+                ],"outputs":[{"name":"result","node":"result","port":"value"}]}
+            }},
+            {"id":"text","kind":"builtin.constant","config":{"value":"remaining argument"}},
+            {"id":"invoke","kind":"workflow.call","config":{
+                "inputs":[{"name":"params.text","value_type":"string","required":true}],
+                "outputs":[{"name":"result","value_type":{"map":"string"},"required":true}]
+            },"inputs":{
+                "flow":{"from":{"node":"configured","port":"value"}},
+                "params.text":{"from":{"node":"text","port":"value"}}
+            }}
+        ],
+        "edges":[{"from_node":"params","to_node":"configured"}],
+        "outputs":[{"name":"result","node":"invoke","port":"result"},{"name":"interface","node":"configured","port":"properties"}]
+    });
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let definition: WorkflowDefinition = serde_json::from_value(value.clone()).unwrap();
+    let plan = mf_compiler::compile_definition(&definition, &registry).unwrap();
+    let flow = mf_compiler::instantiate_compiled(&plan, &registry).unwrap();
+    for prefix in ["first", "second"] {
+        let output = flow
+            .execute_with_inputs(
+                WorkflowArguments::try_from(json!({"params.prefix":prefix})).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            output["result"],
+            json!({"prefix":prefix,"text":"remaining argument"})
+        );
+        assert_eq!(
+            output["interface"]["allowed"],
+            json!({"text":{"type":"string"}})
+        );
+    }
+    for invalid in [
+        {
+            let mut invalid = value.clone();
+            invalid["edges"] = json!([]);
+            invalid
+        },
+        {
+            let mut invalid = value.clone();
+            invalid["nodes"][1]["config"]["inputs"]["prefix"] = json!({"$ref":"params.missing"});
+            invalid
+        },
+    ] {
+        assert!(
+            mf_compiler::compile_definition(&serde_json::from_value(invalid).unwrap(), &registry)
+                .is_err()
+        );
+    }
+    let definition = root.path().join("flow.json");
+    write_json(&definition, &value);
+    let executable = root.path().join("runner");
+    let build = root.path().join("build");
+    compile_project_with_options(
+        &CompileRequest {
+            definition: &definition,
+            output: &executable,
+            locked: false,
+            build_dir: Some(&build),
+            support: &SupportPackages::Local {
+                crates_dir: common::crates_dir(),
+            },
+        },
+        &RunnerOptions { telemetry: true },
+    )
+    .unwrap();
+    fs::remove_file(definition).unwrap();
+    fs::remove_dir_all(build).unwrap();
+    for prefix in ["compiled-first", "compiled-second"] {
+        let output = std::process::Command::new(&executable)
+            .env_clear()
+            .env("PATH", "")
+            .args(["--params.prefix", prefix])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            output["result"],
+            json!({"prefix":prefix,"text":"remaining argument"})
+        );
+        assert_eq!(output["interface"]["required"], json!(["text"]));
     }
 }
 

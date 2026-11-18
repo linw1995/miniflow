@@ -33,7 +33,7 @@ impl Wake for CancelWorkflow {
     }
 }
 
-/// Invokes one backend and forwards optional text deltas into the conversation Flow.
+/// Invokes one backend and forwards optional model-output previews into the conversation Flow.
 pub trait ConversationBackend: Send + Sync {
     /// Exposes a finite embedded Flow and resolved parameters for `workflow.call` composition.
     /// Other backends retain the host-bound invocation adapter.
@@ -57,7 +57,7 @@ pub trait ConversationBackend: Send + Sync {
         invocation: &Invocation,
         request: ConversationInputs,
         context: &mut ExecutionContext,
-        preview: Option<&mut dyn FnMut(crate::TextDelta) -> Result<(), ChatError>>,
+        preview: Option<&mut dyn FnMut(crate::PreviewDelta) -> Result<(), ChatError>>,
         observer: Option<&Observer>,
     ) -> Result<ConversationResult, ChatError>;
 }
@@ -192,7 +192,8 @@ fn compile_call(
         })
         .collect();
     if definition.outputs.iter().any(|output| {
-        output.name == "answer" && !streams.contains(&(output.node.as_str(), output.port.as_ref()))
+        matches!(output.name.as_ref(), "answer" | "tool_call_delta")
+            && !streams.contains(&(output.node.as_str(), output.port.as_ref()))
     }) || definition
         .edges
         .iter()
@@ -237,7 +238,7 @@ fn compile_call_wrapper(
 
 struct ConversationSink<'a> {
     decoder: crate::contract::ConversationOutputDecoder,
-    preview: Option<&'a mut dyn FnMut(crate::TextDelta) -> Result<(), ChatError>>,
+    preview: Option<&'a mut dyn FnMut(crate::PreviewDelta) -> Result<(), ChatError>>,
 }
 
 impl mf_runtime::EmissionSink for ConversationSink<'_> {
@@ -272,7 +273,7 @@ impl ConversationBackend for EmbeddedBackend {
         _: &Invocation,
         request: ConversationInputs,
         context: &mut ExecutionContext,
-        preview: Option<&mut dyn FnMut(crate::TextDelta) -> Result<(), ChatError>>,
+        preview: Option<&mut dyn FnMut(crate::PreviewDelta) -> Result<(), ChatError>>,
         observer: Option<&Observer>,
     ) -> Result<ConversationResult, ChatError> {
         if let Some(error) = context.cancellation().failure() {
@@ -346,7 +347,7 @@ impl EmbeddedBackend {
         &self,
         request: ConversationInputs,
         context: &mut ExecutionContext,
-        mut preview: Option<&mut dyn FnMut(crate::TextDelta) -> Result<(), ChatError>>,
+        mut preview: Option<&mut dyn FnMut(crate::PreviewDelta) -> Result<(), ChatError>>,
         observer: Option<&Observer>,
     ) -> Result<ConversationResult, ChatError> {
         let arguments = self.contract.arguments(request, &self.parameters)?;
@@ -358,6 +359,7 @@ impl EmbeddedBackend {
             mf_runtime::StreamOptions {
                 arguments,
                 observation,
+                snapshots: context.snapshot_recorder().cloned(),
                 ..Default::default()
             },
         )?;
@@ -550,7 +552,7 @@ impl TypedStreamNode for InvokeWorkflow {
                 Ok(())
             };
             let preview = self.previews.then_some(
-                &mut consume as &mut dyn FnMut(crate::TextDelta) -> Result<(), ChatError>,
+                &mut consume as &mut dyn FnMut(crate::PreviewDelta) -> Result<(), ChatError>,
             );
             self.backend.invoke(
                 &input.invocation,
@@ -1019,7 +1021,7 @@ impl mf_runtime::TypedTaskNode for WorkflowPreview {
         })?;
         let preview = PreviewEvent {
             invocation,
-            delta: input.answer,
+            delta: input.answer.into(),
         };
         preview.validate()?;
         Ok(PreviewOutput { preview }.into())
@@ -1027,6 +1029,43 @@ impl mf_runtime::TypedTaskNode for WorkflowPreview {
 }
 
 register_task!("mf_chat.workflow.preview", WorkflowPreview::default());
+
+#[derive(NodeValue)]
+struct ToolCallPreviewInputs {
+    tool_call_delta: crate::ToolCallDelta,
+}
+
+#[derive(Default)]
+struct ToolCallPreview {
+    invocation: Option<Invocation>,
+}
+
+impl mf_runtime::TypedTaskNode for ToolCallPreview {
+    type Input = ToolCallPreviewInputs;
+    type Output = PreviewOutput;
+
+    fn execute(
+        &self,
+        input: Self::Input,
+        _: &mut ExecutionContext,
+    ) -> Result<TypedNodeResult<Self::Output>, mf_runtime::NodeExecutionError> {
+        let invocation = self.invocation.clone().context(InvalidSnafu {
+            field: "conversation preview",
+            reason: "must be bound by the application host",
+        })?;
+        let preview = PreviewEvent {
+            invocation,
+            delta: input.tool_call_delta.into(),
+        };
+        preview.validate()?;
+        Ok(PreviewOutput { preview }.into())
+    }
+}
+
+register_task!(
+    "mf_chat.workflow.tool_call_preview",
+    ToolCallPreview::default()
+);
 
 struct ConversationPlan {
     plan: CompiledWorkflow,
@@ -1060,18 +1099,35 @@ fn register_runner(
         .collect();
     let names: std::collections::BTreeSet<_> =
         outputs.iter().map(|port| port.name.to_string()).collect();
-    let streams = if contract.answer_stream {
-        WorkflowPreviewInputs::ports()
-    } else {
-        vec![]
-    };
+    let streams = contract
+        .preview_streams()
+        .map(|name| mf_runtime::PortSpec::new(name, mf_runtime::ValueType::Object, false))
+        .collect();
     let body =
         mf_runtime::PreparedSubgraph::streaming(vec![], outputs, streams, move |context, sink| {
             let result = (|| -> Result<mf_runtime::FlowOutputs, ChatError> {
                 let request = contract.conversation_inputs(context.workflow_arguments())?;
-                let mut preview = |answer| {
-                    let values = WorkflowPreviewInputs { answer }.into_values()?;
-                    sink.send(values.into())?;
+                let mut preview = |delta| {
+                    let values = match delta {
+                        crate::PreviewDelta::Text { delta } => {
+                            WorkflowPreviewInputs { answer: delta }.into_values()?
+                        }
+                        crate::PreviewDelta::ToolCall { delta } => ToolCallPreviewInputs {
+                            tool_call_delta: delta,
+                        }
+                        .into_values()?,
+                    };
+                    // Remote records contain populated ports only; other subscriptions must skip this wave.
+                    let skipped = contract
+                        .preview_streams()
+                        .filter(|name| !values.contains_key(*name))
+                        .map(str::to_owned)
+                        .collect();
+                    sink.send(mf_runtime::NodeResult {
+                        outputs: values,
+                        skipped,
+                        loop_summary: None,
+                    })?;
                     Ok(())
                 };
                 let result = backend.invoke(
@@ -1079,7 +1135,7 @@ fn register_runner(
                     request,
                     context,
                     contract
-                        .answer_stream
+                        .has_previews()
                         .then_some(&mut preview as &mut dyn FnMut(_) -> _),
                     Some(&observer),
                 )?;
@@ -1214,6 +1270,24 @@ fn compose_conversation(
             )
             .context(BackendBuildSnafu)?,
         ));
+    }
+    if contract.tool_call_delta_stream {
+        nodes.push(serde_json::json!({
+            "id":"tool_call_preview", "kind":"mf_chat.workflow.tool_call_preview",
+            "inputs":{"tool_call_delta":{"from":{"node":"workflow","port":"tool_call_delta"}}}
+        }));
+        bindings.push((
+            "tool_call_preview",
+            PreparedNode::typed_task(
+                ToolCallPreview {
+                    invocation: Some(invocation.clone()),
+                },
+                NodeMetadata::default(),
+            )
+            .context(BackendBuildSnafu)?,
+        ));
+    }
+    if contract.answer_stream {
         definition["outputs"]
             .as_array_mut()
             .expect("conversation outputs")
@@ -1221,11 +1295,16 @@ fn compose_conversation(
             .find(|output| output["name"] == "preview")
             .expect("conversation preview")["node"] = "preview".into();
     }
+    if contract.tool_call_delta_stream {
+        definition["outputs"].as_array_mut().expect("conversation outputs").push(serde_json::json!({
+            "name":"tool_call_preview", "node":"tool_call_preview", "port":"preview", "optional":true
+        }));
+    }
     for (index, port) in call_node
         .metadata
         .stream_outputs
         .iter()
-        .filter(|port| port.name != "answer")
+        .filter(|port| !matches!(port.name.as_ref(), "answer" | "tool_call_delta"))
         .enumerate()
     {
         definition["outputs"].as_array_mut().expect("conversation outputs")
@@ -1289,13 +1368,42 @@ pub fn run_conversation(
 
 pub fn run_conversation_with_preview(
     database: &ChatDatabase,
-    mut request: BeginTurnInputs,
+    request: BeginTurnInputs,
     backend: Arc<dyn ConversationBackend>,
     cancellation: StreamCancellation,
     automatic_titles: bool,
     observer: Option<&Observer>,
     preview: Option<PreviewConsumer>,
 ) -> Result<ReconciledCompletion, ChatError> {
+    run_observed_conversation(
+        database,
+        request,
+        backend,
+        cancellation,
+        automatic_titles,
+        observer,
+        ConversationPresentation {
+            preview,
+            tools: None,
+        },
+    )
+}
+
+pub(super) struct ConversationPresentation {
+    pub preview: Option<PreviewConsumer>,
+    pub tools: Option<crate::ToolExecutionMetrics>,
+}
+
+pub(super) fn run_observed_conversation(
+    database: &ChatDatabase,
+    mut request: BeginTurnInputs,
+    backend: Arc<dyn ConversationBackend>,
+    cancellation: StreamCancellation,
+    automatic_titles: bool,
+    observer: Option<&Observer>,
+    presentation: ConversationPresentation,
+) -> Result<ReconciledCompletion, ChatError> {
+    let ConversationPresentation { preview, tools } = presentation;
     ensure!(
         std::path::Path::new(&request.database_path) == database.path(),
         InvalidSnafu {
@@ -1312,6 +1420,17 @@ pub fn run_conversation_with_preview(
     let collected = calls.clone();
     let _events = mf_telemetry::events::collect(move |event| {
         let _ = collected.lock().unwrap().observe(event);
+    });
+    let _execution = tools.as_ref().map(|tools| {
+        let tools = tools.clone();
+        mf_telemetry::observation::collect(move |record| tools.observe(record, false))
+    });
+    let snapshots = tools.map(|tools| {
+        mf_runtime::SnapshotRecorder::new(move |event| {
+            if let Some(run) = mf_telemetry::observation::current_run_id() {
+                tools.observe_snapshot(run, &event.scope, &event.snapshot.inputs);
+            }
+        })
     });
     let title_parameters = automatic_titles
         .then(|| backend.builtin_title_parameters())
@@ -1425,6 +1544,7 @@ pub fn run_conversation_with_preview(
         let instance = flow.start_with_options(mf_runtime::StreamOptions {
             arguments,
             observation,
+            snapshots,
             ..Default::default()
         })?;
         let runtime_cancellation = instance.cancellation();
@@ -1434,7 +1554,10 @@ pub fn run_conversation_with_preview(
         let mut settlement = None;
         while let Some(delivery) = instance.receive()? {
             let mut outputs = delivery.output().outputs.clone();
-            if let Some(event) = outputs.remove("preview") {
+            let event = outputs
+                .remove("preview")
+                .or_else(|| outputs.remove("tool_call_preview"));
+            if let Some(event) = event {
                 let event = PreviewOutput::from_values([("preview".into(), event)].into())?.preview;
                 if let Some(consumer) = &preview {
                     consumer.send(event, delivery, &runtime_cancellation)?;
@@ -1582,9 +1705,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            !composed
-                .plan
-                .to_json()
+            !serde_json::to_string(&composed.plan.graph.definition)
                 .unwrap()
                 .contains("private-credential")
         );
@@ -1670,7 +1791,7 @@ mod tests {
             _: &Invocation,
             input: ConversationInputs,
             _: &mut ExecutionContext,
-            _: Option<&mut dyn FnMut(crate::TextDelta) -> Result<(), ChatError>>,
+            _: Option<&mut dyn FnMut(crate::PreviewDelta) -> Result<(), ChatError>>,
             _: Option<&Observer>,
         ) -> Result<ConversationResult, ChatError> {
             assert!(input.context.is_some());
@@ -1706,7 +1827,8 @@ mod tests {
             delta: crate::TextDelta {
                 text: "prefix".into(),
                 model_call_id: "model".into(),
-            },
+            }
+            .into(),
         };
         let effects = route
             .on_event(

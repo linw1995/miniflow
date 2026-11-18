@@ -23,22 +23,6 @@ pub fn crates_dir() -> PathBuf {
         .unwrap()
         .to_owned()
 }
-#[cfg(feature = "codegen")]
-pub fn link_compiler_for_custom_host(project: &Path) {
-    let path = project.join("Cargo.toml");
-    let manifest = std::fs::read_to_string(&path).unwrap();
-    let source = serde_json::to_string(crates_dir().join("mf-compiler").to_str().unwrap()).unwrap();
-    let dependency = format!("mf-compiler = {{ path = {source}, default-features = false }}\n");
-    std::fs::write(
-        path,
-        manifest.replacen(
-            "[dependencies]\n",
-            &format!("[dependencies]\n{dependency}"),
-            1,
-        ),
-    )
-    .unwrap();
-}
 
 pub fn fixture_definition() -> WorkflowDefinition {
     WorkflowDefinition::from_json(&serde_json::json!({

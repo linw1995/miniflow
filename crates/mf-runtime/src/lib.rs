@@ -74,7 +74,9 @@ pub use flow::{
 pub use flow_bindings::{FlowBindingSource, FlowBindings};
 pub use flow_invocation::{FlowEmission, FlowInvocation};
 pub use flow_properties::{interface_properties, value_schema};
-pub use flow_value::{FlowValue, FlowValueBuildError};
+pub use flow_value::{
+    FlowInputConfiguration, FlowInputConfigurationError, FlowValue, FlowValueBuildError,
+};
 #[cfg(feature = "async")]
 pub use future_execution::FutureExecutionError;
 #[doc(hidden)]
@@ -93,15 +95,15 @@ pub use mf_telemetry::event::{FlowOrigin, NodeIdentity, ScopePathEntry, SkipCaus
 pub use mf_telemetry::observation::RunObservation;
 pub use mf_telemetry::observation::StreamObservation;
 pub use node::{
-    ContextReference, ExecutionFailedSnafu as NodeExecutionFailedSnafu,
-    FactoryFailedSnafu as NodeFactoryFailedSnafu, Inputs,
-    InvalidSubgraphSnafu as NodeInvalidSubgraphSnafu, NodeBuildError, NodeConfig, NodeContract,
-    NodeExecution, NodeExecutionError, NodeFactory, NodeMetadata, NodePortContract, NodePorts,
-    NodeRegistration, NodeValue, NodeValues, OutputDerivation, OutputDerivationError, Outputs,
-    PluginFailedSnafu as NodePluginFailedSnafu, PortSpec, PreparedNode, SubgraphScope, TaskNode,
-    TypeCompatibility, TypeDepthError, TypeDescriptorError, TypeMismatch, TypeMismatchDetails,
-    TypedTaskNode, ValueType, deserialize_config, encode_typed_result, execute_typed_task,
-    output_id, port_names_match, verify_generated_metadata,
+    BusinessFailedSnafu as NodeBusinessFailedSnafu, ContextReference,
+    ExecutionFailedSnafu as NodeExecutionFailedSnafu, FactoryFailedSnafu as NodeFactoryFailedSnafu,
+    Inputs, InvalidSubgraphSnafu as NodeInvalidSubgraphSnafu, NodeBuildError, NodeConfig,
+    NodeContract, NodeExecution, NodeExecutionError, NodeFactory, NodeMetadata, NodePortContract,
+    NodePorts, NodeRegistration, NodeValue, NodeValues, OutputDerivation, OutputDerivationError,
+    Outputs, PluginFailedSnafu as NodePluginFailedSnafu, PortSpec, PreparedNode, SubgraphScope,
+    TaskNode, TypeCompatibility, TypeDepthError, TypeDescriptorError, TypeMismatch,
+    TypeMismatchDetails, TypedTaskNode, ValueType, deserialize_config, encode_typed_result,
+    execute_typed_task, output_id, port_names_match, verify_generated_metadata,
 };
 pub use node::{
     TypedConstructor, TypedGeneration, TypedGenerationError, TypedNodeValue, TypedPort,

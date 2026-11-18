@@ -101,21 +101,21 @@ runtime manifests from current host metadata. Planning SHALL authorize child fie
 the supplied registry, resolve sources from the packed resources and host builtin Flow registrations,
 and reuse shared compiler normalization without constructing nodes. Ordinary configuration SHALL remain
 opaque. Inspection SHALL prepare metadata without executing business operations. Embedding SHALL NOT
-freeze a build-time startup schema or emit executable manifest sections. Compiled plans and manifest
-payload version `2026-11-06` SHALL retain an explicit `graph` containing its definition, canonical
-execution order, and recursively compiled children keyed by receiving node ID and field name.
-Receiver callbacks SHALL select top-level child values during source resolution; ordinary JSON SHALL
-remain opaque and absent optional children SHALL have no graph entry. `ResolvedWorkflow` SHALL preserve the
-actual selected child tree for `plan_resolved_workflow`. Offline traversal SHALL use graph children,
-not infer roles from configuration keys or order paths. Saved-plan and generated preparation SHALL
-validate provider availability and actual compiled-child binding keys at the receiving boundary;
-required/default and ordinary-field validation SHALL remain receiver-decoder responsibilities.
-Neither saved plans nor manifests SHALL persist parameter-type schemas or separate loop orders.
-Manifests SHALL contain original definition resources and a public inspection descriptor, including observation
-and startup interfaces and isolated-node contracts without execution indices. Native compiler IR SHALL NOT
-implement Serde; explicit saved-plan APIs SHALL use a compiler-owned DTO with a `graph` wrapper. Generated
-build handoffs and frozen embedded modules SHALL construct native Rust graph data. Older manifest formats
-SHALL be rejected without inference or adaptation; framing SHALL remain version 1.
+freeze a build-time startup schema or emit executable manifest sections. Compiled plans SHALL retain
+an explicit in-memory graph with its definition, canonical execution order, and recursively compiled
+children keyed by receiving node ID and field name. Receiver callbacks SHALL select top-level child
+values during source resolution; ordinary JSON SHALL remain opaque and absent optional children SHALL
+have no graph entry. `ResolvedWorkflow` SHALL preserve the actual selected child tree for
+`plan_resolved_workflow`. Offline graph traversal SHALL use graph children, not infer roles from
+configuration keys or order paths. Preparation SHALL validate provider availability and compiled-child
+binding keys at the receiving boundary; required/default and ordinary-field validation SHALL remain
+receiver-decoder responsibilities.
+
+Manifests SHALL contain original definition resources and a public inspection descriptor, including
+observation and startup interfaces and isolated-node contracts without execution indices. Native
+compiler plans SHALL NOT implement Serde or expose a saved-plan protocol. Standalone build handoffs
+SHALL construct native Rust graph data, and embedded modules SHALL construct native resource bundles.
+Older manifest formats SHALL be rejected without inference or adaptation; framing SHALL remain version 1.
 
 #### Scenario: Use current node metadata
 

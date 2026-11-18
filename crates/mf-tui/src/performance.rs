@@ -57,14 +57,9 @@ pub fn card_lines(calls: &[CallUsage]) -> [String; 2] {
     let performance = summary.as_ref().map(|summary| &summary.performance);
     let count = calls.len();
     let prefix = if count > 1 { "Avg FTT" } else { "FTT" };
-    let coverage = performance
-        .filter(|_| count > 1)
-        .map_or(String::new(), |p| {
-            format!(" | {}/{} calls", p.first_token.reported_calls, count)
-        });
     [
         format!(
-            "{prefix} {}{coverage}",
+            "{prefix} {}",
             latency(performance.and_then(|p| p.first_token.mean_ms))
         ),
         format!(
@@ -90,7 +85,7 @@ pub fn footer(calls: &[CallUsage], width: u16) -> String {
 pub fn details(calls: &[CallUsage]) -> String {
     let [first, rates] = card_lines(calls);
     let mut text = format!(
-        "{first}\n{rates}\nFTT: request to first nonempty text delta.\nGen: output tokens / (request time - FTT).\nE2E: output tokens / request time.\nRates use provider output counts; unknown values are —.\nMultiple calls use mean FTT and weighted rates.\n"
+        "{first}\n{rates}\nFTT: request to the first nonempty text or tool-call delta.\nGen: output tokens / (request time - FTT).\nE2E: output tokens / request time.\nRates use provider output counts; unknown values are —.\nMultiple calls use mean FTT and weighted rates.\n"
     );
     if let Ok(summary) = UsageSummary::from_calls(calls) {
         text.push_str(&format!(
@@ -151,7 +146,7 @@ mod tests {
     }
 
     #[test]
-    fn summaries_weight_rates_and_report_partial_first_token_coverage() {
+    fn summaries_weight_rates_without_first_token_coverage_chrome() {
         let calls = vec![
             call("a", 2_000_000, Some(500_000), Some(100)),
             call("b", 4_000_000, Some(1_000_000), Some(100)),
@@ -159,7 +154,7 @@ mod tests {
         ];
         assert_eq!(
             card_lines(&calls),
-            ["Avg FTT 750ms | 2/3 calls", "Gen 44.4 | E2E 37.1 tok/s"]
+            ["Avg FTT 750ms", "Gen 44.4 | E2E 37.1 tok/s"]
         );
         assert!(!footer(&calls, 45).contains("E2E"));
         assert!(footer(&calls, 90).contains("E2E 37.1"));

@@ -67,11 +67,6 @@ pub enum PlanError {
     },
     #[snafu(transparent)]
     Construction { source: crate::WorkflowBuildError },
-    #[snafu(display("invalid streaming plan: {source}"))]
-    Stream {
-        #[snafu(source(from(crate::WorkflowCompileError, Box::new)))]
-        source: Box<crate::WorkflowCompileError>,
-    },
     #[snafu(
         display("could not serialize compiled workflow: {source}"),
         visibility(pub)
@@ -84,11 +79,6 @@ pub enum PlanError {
     #[cfg(feature = "codegen")]
     #[snafu(display("generated Rust code is invalid: {source}"), visibility(pub))]
     GeneratedSyntax { source: syn::Error },
-    #[snafu(display("invalid lowering configuration for node `{definition_id}`: {message}"))]
-    InvalidLoweringConfig {
-        definition_id: DefinitionId,
-        message: String,
-    },
 }
 
 #[cfg(feature = "codegen")]
@@ -726,9 +716,7 @@ fn typed_preparation_tokens(
             .iter()
             .map(|field| LitStr::new(&field.port.name, Span::call_site()))
             .collect();
-        let expected =
-            crate::literals::node_contract(&mf_runtime::NodeContract::from(&node.metadata));
-        constructors.insert(node.definition_id.clone(), (quote! {
+        constructors.insert(node.definition_id.clone(), quote! {
             (|| -> Result<_, mf_runtime::generated::BindError> {
                 let (_, config) = mf_runtime::generated::configuration(registry, #id, #kind, #config, &[])?;
                 let handle = ::#provider::#(#parts)::* (config).context(mf_runtime::generated::NodeSnafu {
@@ -745,7 +733,7 @@ fn typed_preparation_tokens(
                 verify_fields(&handle);
                 Ok(handle)
             })()
-        }, expected));
+        });
     }
     let (preparations, _, root) =
         crate::fixed::scope(&workflow.graph, "root", &[], &constructors, true, None)?;
@@ -1325,7 +1313,7 @@ mod tests {
             .unwrap();
         let manifest = &artifacts.manifest;
         assert!(manifest.descriptor.description.loop_bodies.is_empty());
-        let payload = serde_json::to_value(&manifest).unwrap();
+        let payload = serde_json::to_value(manifest).unwrap();
         assert!(payload.get("graph").is_none());
         assert_eq!(
             manifest.descriptor.input_schema.inputs["formal"]["callback"].value_type,

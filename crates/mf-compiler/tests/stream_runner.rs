@@ -1,9 +1,6 @@
 #![cfg(unix)]
 mod common;
-use mf_compiler::{
-    CompileRequest, RunnerOptions, SupportPackages, WorkflowDefinition,
-    compile_project_with_options, plan_definition,
-};
+use mf_compiler::{CompileRequest, RunnerOptions, SupportPackages, compile_project_with_options};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -116,15 +113,6 @@ fn generated_streams_preserve_protocol_boundaries_and_installation_guarantees() 
         )
     };
     compile(&definition, false).unwrap();
-    let planned: WorkflowDefinition = serde_json::from_value(definition.clone()).unwrap();
-    assert!(
-        plan_definition(&planned)
-            .unwrap()
-            .generate_artifacts()
-            .unwrap()
-            .rust_source
-            .contains("builtin.readline")
-    );
 
     fs::write(&trace, "").unwrap();
     assert_eq!(fs::read_to_string(&trace).unwrap(), "");

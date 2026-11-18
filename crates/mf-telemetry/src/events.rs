@@ -16,7 +16,6 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-
 pub const SCOPE: &str = "mf.observation";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

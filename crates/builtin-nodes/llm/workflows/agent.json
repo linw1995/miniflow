@@ -432,6 +432,10 @@
           ]
         },
         "stream_outputs": {
+          "tool_call_delta": {
+            "node": "turn",
+            "port": "tool_call_delta"
+          },
           "answer": {
             "node": "turn",
             "port": "answer"
@@ -533,6 +537,12 @@
   ],
   "edges": [],
   "outputs": [
+    {
+      "name": "tool_call_delta",
+      "node": "repeat",
+      "port": "tool_call_delta",
+      "optional": true
+    },
     {
       "name": "answer",
       "node": "repeat",
