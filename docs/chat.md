@@ -444,9 +444,10 @@ and partially reported subtotals are not complete totals. SQL aggregation detect
 
 `mfn_llm::CallUsage` contains provider call facts. `mf_chat::CallUsage` adds event-derived
 `timing.elapsed_us` and optional `timing.first_token_us` without changing their flat JSON shape.
-The LLM emits `llm.request.started`, `llm.response.first_text`, and `llm.request.finished`; observation
-stamps source Unix nanoseconds once. The first-text event precedes publication and backpressure;
-empty or metadata-only events do not count. The application correlates call IDs and derives
+The LLM emits `llm.request.started`, `llm.response.first_output`, and `llm.request.finished`; observation
+stamps source Unix nanoseconds once. The first-output event precedes publication and backpressure for the
+first nonempty text or tool-call delta; empty or metadata-only events do not count. The application
+correlates call IDs and derives
 microsecond differences. Executable chat receives the same events through OTLP before settlement.
 Missing, conflicting, or noncausal sequences stay unknown; receiver arrival time is not substituted.
 Raw standalone node outputs do not compute application timing.
@@ -462,7 +463,7 @@ paired-token rates. Each includes reported/missing coverage. Aggregation sums pa
 positive durations rather than averaging per-call rates. Monetary estimates need separate pricing.
 
 A turn displays one dim footer, for example `FTT 500ms · Gen 66.7 | E2E 50.0 tok/s`. Narrow views
-prioritize FTT and generation throughput. Multiple calls show mean FTT, coverage, and weighted rates;
+prioritize FTT and generation throughput. Multiple calls show mean FTT and weighted rates;
 unknown values stay `—`. Conversation and unlabeled calls contribute; other explicit purposes do not.
 Message pages attach required facts once per visible turn, including pages starting with a tool
 result. Rendering and reload never multiply charges by message count. Retained results keep the same
@@ -494,8 +495,19 @@ fails delivery; shutdown interrupts blocked publishers. A completed job does not
 output. A valid terminal result retained before final drain remains available for explicit save-only
 recovery if drain fails. Text prefixes alone never become database messages or usage facts.
 
-Terminal preview capture runs independently of drawing and inspection. It keeps at most 32 segments
-and 128 KiB of UTF-8 text with an explicit truncation notice while continuing to drain and validate.
+Tool-aware chatflows may select the shared Agent's optional `tool_call_delta` stream. Each event
+contains a raw `arguments` fragment, its `model_call_id`, and the provider tool `index`, with optional
+`id` and `name` hints. An identity-only event has an empty `arguments` string. A fragment need not be
+valid JSON on its own.
+`PreviewEvent.delta` distinguishes `PreviewDelta::Text` from `PreviewDelta::ToolCall`. Neither enters
+history or model context. The calculator, context-replacement, and DeepSeek examples explicitly
+select `tool_call_delta`. A chatflow can select it without exposing `answer`.
+
+Terminal preview capture runs independently of drawing and inspection. It keeps at most 32 text/tool
+entries and 128 KiB of UTF-8 data, including correlation metadata, with an explicit truncation notice
+while continuing to drain and validate. Each tool call retains at most 8 KiB of recent argument text
+within that shared budget. Older argument deltas are omitted from the provisional view, not from
+tool dispatch or persistence. The notice counts both fully and partially omitted deltas.
 A complete result replaces provisional segments with its display delta. Prefixes without a valid
 result stay visibly unfinished. Older invocation events cannot alter the active turn.
 
@@ -557,15 +569,36 @@ the resolved path without creating storage; unavailable user directories require
 `--chat` implies `--tui`, and both flags can be passed together.
 
 A new conversation is persisted only after its first submission. Resumed conversations keep their
-published context; original records remain visible after compaction. Every assistant message, call
-batch, and tool result has a separate message-scoped presentation key. A result page without its
-preceding call batch still shows the tool-call ID without inventing a name or relabeling it as user
-text. Tool arguments and results are inert literal data, never prompts, Markdown images, or commands.
+published context; original records remain visible after compaction. Each tool result is shown under
+its matching call on the current page, regardless of result arrival order. A page without the call
+still shows the result with its tool-call ID. Grouping changes only the display, not stored order.
+Tool arguments and results are inert literal data, never prompts, Markdown images, or commands.
+A tool call group automatically expands (`[-]`) when its argument preview first arrives. An open
+group displays retained argument fragments with incremental JSON syntax highlighting. A truncated
+header shows total argument size and the group identifies omitted deltas and bytes. The display
+does not require the fragment to parse as JSON. Each group automatically collapses (`[+]`) when the
+whole turn finishes and its authoritative transcript replaces the preview; the model may already
+be executing the next model round while the traced tool status updates. Manually expanding a
+settled group displays its complete canonical arguments. Reopening history shows groups collapsed
+and reads complete saved arguments from `messages`; delta history, fold state, and omission markers
+are not persisted. Live assistant blocks use model-call IDs and the same spacing between messages
+and tools as settled replies. The status on each tool header
+comes from existing snapshots and Flow or Iteration lifecycle records, matched by public call ID and
+exact runtime scope without Router-specific configuration. Native and compiled chats share the
+invocation-local projection and tolerate record reordering. An observed call without a matching
+preview appears under `Observed tools`. `ChatJob::tool_metrics()` exposes the in-process view by
+call ID. Missing observations and canonical tool results never imply a start or success.
+
+The fold marker leads the group header. Focus and expansion follow a group when a late ID makes it
+identifiable. Tool Flow completion updates the group's status in place but does not prematurely
+collapse the streaming group. Results appear inside the group when the turn settles; execution
+metrics are not saved.
 
 Assistant text supports Markdown in saved records, previews, and retained results: headings, emphasis,
 lists, tasks, quotes, links, tables, and code blocks. Headings show explicit levels `#1` through `#6`.
 Fenced blocks use their language for highlighting; unsupported languages, very long code lines, and
-highlighting errors fall back to plain code. HTML, prompts, diagnostics, and tool data stay literal.
+highlighting errors fall back to plain code. HTML, prompts, diagnostics, and tool results stay
+literal; JSON highlighting styles tool arguments without interpreting or reformatting them.
 Terminal controls are escaped without modifying stored content.
 
 Unchanged Markdown blocks and wrapped lines are cached. Resize reflows without repeating highlighting;
@@ -588,6 +621,8 @@ resources on session change, eviction, or exit.
 | Browse messages / return to editing | Esc / i |
 | Open commands | Ctrl+P |
 | Toggle execution panel | Ctrl+E |
+| Select next / previous tool group while browsing | j / k, or Tab / Shift+Tab |
+| Manually expand / collapse selected tool group | Space while browsing, or Ctrl+T |
 | New chat / switch saved chat | Ctrl+N / Ctrl+S |
 | Cancel current execution | Ctrl+C |
 | Quit after cleanup | Ctrl+Q |

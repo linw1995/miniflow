@@ -21,6 +21,7 @@ pub struct Reply {
     pub body_delay: Duration,
     pub fragments: Option<Vec<Vec<u8>>>,
     pub fragment_delay: Duration,
+    pub release_after_prefix: Option<Arc<AtomicBool>>,
 }
 
 impl Reply {
@@ -33,6 +34,7 @@ impl Reply {
             body_delay: Duration::ZERO,
             fragments: None,
             fragment_delay: Duration::ZERO,
+            release_after_prefix: None,
         }
     }
 
@@ -154,7 +156,16 @@ impl Server {
                 let _ = socket.write_all(headers.as_bytes());
                 thread::sleep(reply.body_delay);
                 if let Some(fragments) = reply.fragments {
-                    for fragment in fragments {
+                    for (index, fragment) in fragments.into_iter().enumerate() {
+                        if index == 1
+                            && let Some(release) = &reply.release_after_prefix
+                        {
+                            while !release.load(Ordering::Acquire)
+                                && !shutdown.load(Ordering::Relaxed)
+                            {
+                                thread::sleep(Duration::from_millis(1));
+                            }
+                        }
                         if socket.write_all(&fragment).is_err() {
                             break;
                         }

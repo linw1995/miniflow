@@ -616,7 +616,7 @@ fn save_only_retry_never_reinvokes_a_backend_for_either_result_status() {
             _: &mf_chat::Invocation,
             _: mf_chat::ConversationInputs,
             _: &mut mf_runtime::ExecutionContext,
-            _: Option<&mut dyn FnMut(mf_chat::TextDelta) -> Result<(), ChatError>>,
+            _: Option<&mut dyn FnMut(mf_chat::PreviewDelta) -> Result<(), ChatError>>,
             _: Option<&mf_telemetry::observation::Observer>,
         ) -> Result<ConversationResult, ChatError> {
             self.calls.fetch_add(1, Ordering::SeqCst);

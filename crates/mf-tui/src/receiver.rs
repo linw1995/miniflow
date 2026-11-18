@@ -19,6 +19,7 @@ use mf_telemetry::{
     INSTRUMENTATION_SCOPE,
     description::WorkflowDescription,
     identity::{RunId, WorkflowId},
+    observation::LocalRecord,
     wire::{TraceContext, WireRecord},
 };
 use opentelemetry_proto::tonic::{
@@ -83,7 +84,9 @@ struct Context {
     traces: Mutex<TraceStore>,
     logs: Mutex<LogStore>,
     calls: Mutex<mf_chat::CallEventCollector>,
+    tools: mf_chat::ToolExecutionMetrics,
     workflow_id: WorkflowId,
+    run: RunId,
     run_id: String,
 }
 
@@ -116,7 +119,9 @@ impl LoopbackReceiver {
             traces: Mutex::new(TraceStore::default()),
             logs: Mutex::new(LogStore::default()),
             calls: Mutex::new(mf_chat::CallEventCollector::default()),
+            tools: mf_chat::ToolExecutionMetrics::default(),
             workflow_id,
+            run: run_id,
             run_id: run_id.to_string(),
         });
         let (stop, stopped) = oneshot::channel();
@@ -165,7 +170,12 @@ impl LoopbackReceiver {
     }
 
     pub fn finish(&mut self) -> StateSnapshot {
+        self.finish_with_interruption(false)
+    }
+
+    pub fn finish_with_interruption(&mut self, interrupted: bool) -> StateSnapshot {
         self.stop();
+        self.context.tools.close(interrupted);
         self.context
             .snapshots
             .lock()
@@ -250,6 +260,10 @@ impl ObservationReader {
             .lock()
             .expect("call observations were not poisoned")
             .clone()
+    }
+
+    pub fn tool_metrics(&self) -> &mf_chat::ToolExecutionMetrics {
+        &self.context.tools
     }
 
     pub fn apply_call_timings(&self, usages: &mut [mf_chat::CallUsage]) {
@@ -429,7 +443,7 @@ fn response(status: StatusCode, body: &str) -> Response<Full<Bytes>> {
         .expect("static HTTP response is valid")
 }
 
-fn receive_call_event(record: LogRecord, context: &Context) -> Result<(), IngestError> {
+fn receive_observation_event(record: LogRecord, context: &Context) -> Result<(), IngestError> {
     if string_attribute(&record.attributes, "mf.run.id") != Some(context.run_id.as_str())
         || string_attribute(&record.attributes, "mf.workflow.id")
             != Some(context.workflow_id.as_str())
@@ -456,7 +470,7 @@ fn receive_call_event(record: LogRecord, context: &Context) -> Result<(), Ingest
     };
     let body = record.body.ok_or_else(|| {
         InvalidSnafu {
-            message: "missing model call event payload",
+            message: "missing observation event payload",
         }
         .build()
     })?;
@@ -551,7 +565,7 @@ fn receive_logs(bytes: &[u8], context: &Context) -> Result<(), IngestError> {
                     receive_iteration(record, context)
                         .inspect_err(|_| note_error(context, "invalid iteration detail record"))
                 } else if scope_name == Some(mf_telemetry::events::SCOPE) {
-                    receive_call_event(record, context)
+                    receive_observation_event(record, context)
                 } else if scope_name == Some(mf_telemetry::snapshot::SCOPE) {
                     receive_snapshot(record, context)
                 } else {
@@ -601,7 +615,11 @@ fn receive_snapshot(record: LogRecord, context: &Context) -> Result<(), IngestEr
         .snapshots
         .lock()
         .expect("snapshot capture was not poisoned")
-        .admit(record)?;
+        .admit_with(record, |scope, node| {
+            context
+                .tools
+                .observe_snapshot(context.run, scope, &node.inputs);
+        })?;
     Ok(())
 }
 
@@ -762,15 +780,21 @@ fn receive_iteration(record: LogRecord, context: &Context) -> Result<(), IngestE
         );
         Some((record.trace_id, record.span_id))
     };
-    context
+    let record = IterationRecord {
+        context: iteration,
+        event,
+        correlation,
+    };
+    let admission = context
         .state
         .lock()
         .expect("receiver state was not poisoned")
-        .apply_iteration(IterationRecord {
-            context: iteration,
-            event,
-            correlation,
-        })?;
+        .apply_iteration(record.clone())?;
+    observe_tools(
+        context,
+        LocalRecord::Iteration(context.run, &record),
+        admission,
+    );
     Ok(())
 }
 
@@ -870,18 +894,22 @@ fn receive_log(record: LogRecord, context: &Context) -> Result<(), IngestError> 
             )
         ) {
             let event = mf_telemetry::stream::StreamRecord::decode(&wire)?;
-            Ok(context
+            let admission = context
                 .state
                 .lock()
                 .expect("receiver state was not poisoned")
-                .apply_stream_observed(event, correlation)?)
+                .apply_stream_observed(event.clone(), correlation)?;
+            observe_tools(context, LocalRecord::Stream(&event), admission);
+            Ok(admission)
         } else {
             let event = wire.decode()?;
-            Ok(context
+            let admission = context
                 .state
                 .lock()
                 .expect("receiver state was not poisoned")
-                .apply_observed(event, correlation)?)
+                .apply_observed(event.clone(), correlation)?;
+            observe_tools(context, LocalRecord::Finite(&event), admission);
+            Ok(admission)
         }
     })()
     .inspect_err(|error| {
@@ -903,6 +931,14 @@ fn receive_log(record: LogRecord, context: &Context) -> Result<(), IngestError> 
     })?;
     let _ = admission;
     Ok(())
+}
+
+fn observe_tools(context: &Context, record: LocalRecord<'_>, admission: Admission) {
+    if admission != Admission::Duplicate {
+        context
+            .tools
+            .observe(record, admission == Admission::Conflict);
+    }
 }
 
 fn receive_traces(bytes: &[u8], context: &Context) -> Result<(), IngestError> {

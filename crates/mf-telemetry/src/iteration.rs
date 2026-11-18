@@ -1,7 +1,12 @@
 //! Correlation for iteration detail logs, independent of workflow lifecycle delivery.
 
-use crate::{ContractError, Count, event::LoopPathEntry, require};
+use crate::{
+    ContractError, Count,
+    event::{Failure, InputSelection, LoopPathEntry, NodeIdentity, Outcome, SkipCause},
+    require,
+};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 
 pub const SCOPE: &str = "mf.iteration";
 pub const CONTEXT_ATTRIBUTE: &str = "mf.iteration.context";
@@ -27,6 +32,51 @@ impl IterationDetailContext {
         detail.context.validate_for_body_scope(&detail.body_scope)?;
         Ok(detail)
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub enum IterationEvent {
+    InvocationFinished,
+    ItemStarted,
+    ItemFinished {
+        outcome: Outcome,
+        duration_ns: Option<Count>,
+    },
+    NodeStarted {
+        node: NodeIdentity,
+        selected_inputs: Vec<InputSelection>,
+    },
+    NodeFinished {
+        node: NodeIdentity,
+        outcome: Outcome,
+        duration_ns: Option<Count>,
+        produced_ports: Vec<String>,
+        skipped_ports: Vec<String>,
+        failure: Option<Failure>,
+    },
+    NodeSkipped {
+        node: NodeIdentity,
+        causes: Vec<SkipCause>,
+        skipped_ports: Vec<String>,
+    },
+}
+
+impl IterationEvent {
+    pub fn node(&self) -> Option<&NodeIdentity> {
+        match self {
+            Self::NodeStarted { node, .. }
+            | Self::NodeFinished { node, .. }
+            | Self::NodeSkipped { node, .. } => Some(node),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct IterationRecord {
+    pub context: IterationContext,
+    pub event: IterationEvent,
+    pub correlation: Option<(Vec<u8>, Vec<u8>)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -111,6 +161,28 @@ impl IterationContext {
             "iteration parent path disagrees with its scope",
         )?;
         Ok(())
+    }
+
+    /// Iteration detail records carry either the explicit runtime scope or the
+    /// static child keys relative to the item body.
+    pub fn relative_scope<'a>(
+        &self,
+        body_scope: &'a [LoopPathEntry],
+    ) -> Option<Cow<'a, [LoopPathEntry]>> {
+        if !body_scope.is_empty() {
+            return Some(Cow::Borrowed(body_scope));
+        }
+        let relative = self
+            .body_path
+            .strip_prefix(self.iteration_path.as_slice())?;
+        Some(Cow::Owned(
+            relative
+                .iter()
+                .map(|id| LoopPathEntry::Call {
+                    call_id: id.clone(),
+                })
+                .collect(),
+        ))
     }
 
     pub fn item(&self) -> ItemIdentity {

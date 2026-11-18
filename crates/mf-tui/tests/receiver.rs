@@ -224,7 +224,7 @@ fn graph_metrics_use_source_events_before_snapshots_and_keep_call_identity() {
     let mut call_events = vec![];
     for (name, timestamp, with_usage) in [
         ("llm.request.finished", 12_000_000_000, true),
-        ("llm.response.first_text", 10_500_000_000, false),
+        ("llm.response.first_output", 10_500_000_000, false),
         ("llm.request.started", 10_000_000_000, true),
     ] {
         let mut fields = vec![attribute("call_id", string("answer"))];

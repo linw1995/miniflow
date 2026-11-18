@@ -329,6 +329,12 @@
   ],
   "outputs": [
     {
+      "name": "tool_call_delta",
+      "node": "conversation",
+      "port": "tool_call_delta",
+      "optional": true
+    },
+    {
       "name": "append",
       "node": "normal",
       "port": "value",

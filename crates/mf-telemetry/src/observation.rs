@@ -8,7 +8,7 @@ use crate::{
         LoopPathEntry, LoopSummary, NodeIdentity, Outcome, SkipCause,
     },
     identity::{RunId, WorkflowId},
-    iteration::IterationContext,
+    iteration::{IterationContext, IterationEvent, IterationRecord},
     transport::EventSequence,
     wire::{TraceContext, WireRecord},
 };
@@ -41,7 +41,35 @@ type EmitLog = dyn Fn(&WireRecord) -> Result<(), ContractError> + Send + Sync;
 type EmitNestedLog = dyn Fn(NestedLog) + Send + Sync;
 type EmitEvent =
     dyn Fn(&'static str, &crate::events::EventRecord, &WorkflowId, RunId) + Send + Sync;
+type CollectRecord = Arc<dyn Fn(LocalRecord<'_>) + Send + Sync>;
 type FailureState = Option<(Option<String>, Failure)>;
+
+/// Existing execution records, before transport encoding or after receiver admission.
+#[derive(Clone, Copy)]
+pub enum LocalRecord<'a> {
+    Finite(&'a LifecycleEvent),
+    Stream(&'a crate::stream::StreamRecord),
+    Iteration(RunId, &'a IterationRecord),
+}
+
+/// Observe existing execution records in the current observation context and its descendants.
+/// The callback must not reenter observation or block execution.
+pub fn collect(collect: impl Fn(LocalRecord<'_>) + Send + Sync + 'static) -> ContextGuard {
+    Context::current()
+        .with_value::<CollectRecord>(Arc::new(collect))
+        .attach()
+}
+
+/// Run identity attached to the active observation, including inside a snapshot callback.
+pub fn current_run_id() -> Option<RunId> {
+    Context::current().get::<RunId>().copied()
+}
+
+fn emit_local(context: &Context, record: LocalRecord<'_>) {
+    if let Some(collect) = context.get::<CollectRecord>() {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| collect(record)));
+    }
+}
 
 struct NestedLog {
     name: &'static str,
@@ -177,7 +205,7 @@ impl Observer {
 
     fn event_context(&self, context: Context, workflow: WorkflowId, run: RunId) -> Context {
         let backend = self.0.clone();
-        crate::events::with_emitter(context, move |name, event| {
+        crate::events::with_emitter(context.with_value(run), move |name, event| {
             (backend.emit_event)(name, event, &workflow, run);
         })
     }
@@ -798,6 +826,7 @@ impl RunObservation {
         if let Ok(record) =
             WireRecord::from_event_with_schema(&event, timestamp, trace_context, schema)
         {
+            emit_local(context, LocalRecord::Finite(&event));
             let _ = self.backend.emit_lifecycle(&record);
         }
     }
@@ -918,7 +947,7 @@ impl IterationScope {
         index: i64,
         terminal: bool,
         attributes: &mut Vec<(String, AnyValue)>,
-    ) {
+    ) -> Option<IterationContext> {
         let mut counter = self
             .sequence
             .lock()
@@ -929,7 +958,7 @@ impl IterationScope {
             counter.reserve()
         };
         let Ok(sequence) = sequence else {
-            return;
+            return None;
         };
         let elapsed_ns = nanos(self.started.elapsed());
         drop(counter);
@@ -949,7 +978,7 @@ impl IterationScope {
             .any(LoopPathEntry::is_flow)
         {
             let detail = crate::iteration::IterationDetailContext {
-                context,
+                context: context.clone(),
                 body_scope: body_scope.to_vec(),
             };
             if let Ok(json) = serde_json::to_string(&detail) {
@@ -970,6 +999,7 @@ impl IterationScope {
                 AnyValue::String(json.into()),
             ));
         }
+        Some(context)
     }
 }
 
@@ -1031,7 +1061,8 @@ impl IterationObservation {
     fn emit_boundary(&self) {
         let mut attributes =
             nested_attributes(&self.workflow_id, self.run_id, &self.iteration_id, 0);
-        self.scope
+        let _ = self
+            .scope
             .attach(&self.scope.path, &[], 0, true, &mut attributes);
         (self.backend.emit_nested)(NestedLog {
             name: "mf.iteration.finished",
@@ -1153,7 +1184,8 @@ impl ItemObservation {
             &self.iteration_id,
             self.index,
         );
-        self.scope
+        let _ = self
+            .scope
             .attach(&self.scope.path, &[], self.index, false, &mut common);
         common.extend(attributes);
         (self.backend.emit_nested)(NestedLog {
@@ -1348,9 +1380,23 @@ impl BodyNodeObservation {
         self.context.clone().attach()
     }
 
+    fn observed_node(&self) -> NodeIdentity {
+        NodeIdentity {
+            path: self.body_scope.clone(),
+            ..self.node.clone()
+        }
+    }
+
     pub fn started(&mut self) {
         self.invoked = Some(Instant::now());
-        self.emit("mf.iteration.node.started", Vec::new());
+        self.emit(
+            "mf.iteration.node.started",
+            Vec::new(),
+            IterationEvent::NodeStarted {
+                node: self.observed_node(),
+                selected_inputs: self.selected_inputs.clone(),
+            },
+        );
     }
 
     pub fn succeeded(mut self, produced_ports: Vec<String>, skipped_ports: Vec<String>) {
@@ -1358,16 +1404,22 @@ impl BodyNodeObservation {
         self.context
             .span()
             .set_attribute(KeyValue::new("mf.outcome", "succeeded"));
+        let duration_ns = self.invoked.map(|started| nanos(started.elapsed()));
+        let event = IterationEvent::NodeFinished {
+            node: self.observed_node(),
+            outcome: Outcome::Succeeded,
+            duration_ns,
+            produced_ports: produced_ports.clone(),
+            skipped_ports: skipped_ports.clone(),
+            failure: None,
+        };
         let mut attributes = vec![("mf.outcome".into(), AnyValue::String("succeeded".into()))];
-        if let Some(started) = self.invoked {
-            attributes.push((
-                "mf.duration.ns".into(),
-                AnyValue::Int(nanos(started.elapsed()).get()),
-            ));
+        if let Some(duration) = duration_ns {
+            attributes.push(("mf.duration.ns".into(), AnyValue::Int(duration.get())));
         }
         attributes.push(("mf.produced.ports".into(), port_names(produced_ports)));
         attributes.push(("mf.skipped.ports".into(), port_names(skipped_ports)));
-        self.emit("mf.iteration.node.finished", attributes);
+        self.emit("mf.iteration.node.finished", attributes, event);
     }
 
     pub fn skipped(mut self, causes: Vec<SkipCause>, skipped_ports: Vec<String>) {
@@ -1375,6 +1427,11 @@ impl BodyNodeObservation {
         self.context
             .span()
             .set_attribute(KeyValue::new("mf.outcome", "skipped"));
+        let event = IterationEvent::NodeSkipped {
+            node: self.observed_node(),
+            causes: causes.clone(),
+            skipped_ports: skipped_ports.clone(),
+        };
         self.emit(
             "mf.iteration.node.skipped",
             vec![
@@ -1411,6 +1468,7 @@ impl BodyNodeObservation {
                     )),
                 ),
             ],
+            event,
         );
     }
 
@@ -1419,6 +1477,15 @@ impl BodyNodeObservation {
         let failure = Failure {
             phase,
             message: message.clone(),
+        };
+        let duration_ns = self.invoked.map(|started| nanos(started.elapsed()));
+        let event = IterationEvent::NodeFinished {
+            node: self.observed_node(),
+            outcome: Outcome::Failed,
+            duration_ns,
+            produced_ports: Vec::new(),
+            skipped_ports: Vec::new(),
+            failure: Some(failure.clone()),
         };
         mark_failed(&self.context, &failure);
         let mut attributes = vec![
@@ -1432,16 +1499,13 @@ impl BodyNodeObservation {
                 AnyValue::String(message.into()),
             ),
         ];
-        if let Some(started) = self.invoked {
-            attributes.push((
-                "mf.duration.ns".into(),
-                AnyValue::Int(nanos(started.elapsed()).get()),
-            ));
+        if let Some(duration) = duration_ns {
+            attributes.push(("mf.duration.ns".into(), AnyValue::Int(duration.get())));
         }
-        self.emit("mf.iteration.node.finished", attributes);
+        self.emit("mf.iteration.node.finished", attributes, event);
     }
 
-    fn emit(&self, name: &'static str, attributes: Vec<(String, AnyValue)>) {
+    fn emit(&self, name: &'static str, attributes: Vec<(String, AnyValue)>, event: IterationEvent) {
         let mut common = nested_attributes(
             &self.workflow_id,
             self.run_id,
@@ -1486,11 +1550,26 @@ impl BodyNodeObservation {
                 )),
             ));
         }
-        if self.scoped {
+        let context = if self.scoped {
             self.scope
-                .attach(&self.path, &self.body_scope, self.index, false, &mut common);
-        }
+                .attach(&self.path, &self.body_scope, self.index, false, &mut common)
+        } else {
+            None
+        };
         common.extend(attributes);
+        if let Some(context) = context {
+            emit_local(
+                &self.context,
+                LocalRecord::Iteration(
+                    self.run_id,
+                    &IterationRecord {
+                        context,
+                        event,
+                        correlation: None,
+                    },
+                ),
+            );
+        }
         (self.backend.emit_nested)(NestedLog {
             name,
             attributes: common,
@@ -1617,5 +1696,105 @@ mod flow_iteration_tests {
         assert_eq!(detail.context.iteration_path, ["each"]);
         assert_eq!(detail.context.index.get(), 3);
         assert_eq!(detail.context.parent_stream_invocation, Some(9));
+    }
+
+    #[test]
+    fn local_body_records_match_exported_runtime_paths_and_outcomes() {
+        use std::sync::atomic::AtomicUsize;
+
+        let exported = Arc::new(AtomicUsize::new(0));
+        let collected = Arc::new(Mutex::new(Vec::new()));
+        let local = Arc::clone(&collected);
+        let _collect = collect(move |record| {
+            if let LocalRecord::Iteration(_, record) = record {
+                local.lock().unwrap().push(record.clone());
+            }
+        });
+        let exported_nested = Arc::clone(&exported);
+        let backend = Arc::new(Backend {
+            iteration_invocations: Mutex::new(EventSequence::new()),
+            tracer: opentelemetry::global::tracer("iteration-local-test"),
+            diagnostics: None,
+            emit: Box::new(|_| Ok(())),
+            emit_event: Box::new(|_, _, _, _| {}),
+            emit_nested: Box::new(move |_| {
+                exported_nested.fetch_add(1, Ordering::SeqCst);
+            }),
+        });
+        let run = RunId::new();
+        let workflow = WorkflowId::try_from(format!("sha256:{}", "a".repeat(64))).unwrap();
+        let scope = Arc::new(IterationScope {
+            description: None,
+            invocation: Count::try_from(1).unwrap(),
+            path: vec!["each".into()],
+            parent_path: vec![],
+            parent_stream_invocation: None,
+            started: Instant::now(),
+            sequence: Mutex::new(EventSequence::new()),
+        });
+        let body_scope = vec![LoopPathEntry::Call {
+            call_id: "selected".into(),
+        }];
+        let node = || BodyNodeObservation {
+            scope: Arc::clone(&scope),
+            path: vec!["each".into(), "selected".into()],
+            body_scope: body_scope.clone(),
+            scoped: true,
+            selected_inputs: Vec::new(),
+            backend: Arc::clone(&backend),
+            workflow_id: workflow.clone(),
+            run_id: run,
+            iteration_id: "each".into(),
+            index: 0,
+            node: NodeIdentity {
+                id: "work".into(),
+                kind: "test".into(),
+                path: Vec::new(),
+            },
+            context: Context::current(),
+            invoked: None,
+            finished: false,
+        };
+        let mut succeeded = node();
+        succeeded.started();
+        succeeded.succeeded(vec!["result".into()], Vec::new());
+        let mut failed = node();
+        failed.started();
+        failed.failed(FailurePhase::Execution, "failed".into());
+        node().skipped(Vec::new(), Vec::new());
+
+        assert_eq!(exported.load(Ordering::SeqCst), 5);
+        let records = collected.lock().unwrap();
+        assert_eq!(records.len(), 5);
+        assert!(records.iter().all(|record| {
+            record.event.node().unwrap().path == body_scope
+                && record.context.body_path == ["each", "selected"]
+        }));
+        assert!(matches!(
+            records[0].event,
+            IterationEvent::NodeStarted { .. }
+        ));
+        assert!(matches!(
+            records[1].event,
+            IterationEvent::NodeFinished {
+                outcome: Outcome::Succeeded,
+                ..
+            }
+        ));
+        assert!(matches!(
+            records[2].event,
+            IterationEvent::NodeStarted { .. }
+        ));
+        assert!(matches!(
+            records[3].event,
+            IterationEvent::NodeFinished {
+                outcome: Outcome::Failed,
+                ..
+            }
+        ));
+        assert!(matches!(
+            records[4].event,
+            IterationEvent::NodeSkipped { .. }
+        ));
     }
 }

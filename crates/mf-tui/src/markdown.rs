@@ -190,9 +190,17 @@ impl Block {
 }
 
 #[derive(Default)]
+enum Source {
+    #[default]
+    Plain,
+    Markdown(String),
+    Literal(String, Style),
+    Json(Box<CodeCache>),
+}
+
+#[derive(Default)]
 pub struct Document {
-    source: Option<String>,
-    literal_style: Option<Style>,
+    source: Source,
     blocks: Vec<Block>,
     ends: Vec<usize>,
     #[cfg(test)]
@@ -201,11 +209,10 @@ pub struct Document {
 
 impl Document {
     pub fn update(&mut self, source: &str) {
-        if self.source.as_deref() == Some(source) && self.literal_style.is_none() {
+        if matches!(&self.source, Source::Markdown(previous) if previous == source) {
             return;
         }
-        self.source = Some(source.to_owned());
-        self.literal_style = None;
+        self.source = Source::Markdown(source.to_owned());
         #[cfg(test)]
         {
             self.parses += 1;
@@ -245,8 +252,7 @@ impl Document {
     }
 
     pub fn plain(&mut self, lines: Vec<Line<'static>>) {
-        self.source = None;
-        self.literal_style = None;
+        self.source = Source::Plain;
         self.blocks.resize_with(1, Block::default);
         let block = &mut self.blocks[0];
         block.source = 0..0;
@@ -263,7 +269,8 @@ impl Document {
     }
 
     pub fn literal(&mut self, source: &str, style: Style) {
-        if self.source.as_deref() == Some(source) && self.literal_style == Some(style) {
+        if matches!(&self.source, Source::Literal(previous, prev_style) if previous == source && *prev_style == style)
+        {
             return;
         }
         self.plain(
@@ -272,8 +279,23 @@ impl Document {
                 .map(|line| Line::styled(line.to_owned(), style))
                 .collect(),
         );
-        self.source = Some(source.to_owned());
-        self.literal_style = Some(style);
+        self.source = Source::Literal(source.to_owned(), style);
+    }
+
+    pub fn json(&mut self, source: &str) {
+        if matches!(&self.source, Source::Json(cache) if cache.source == source) {
+            return;
+        }
+        let mut cache = match std::mem::take(&mut self.source) {
+            Source::Json(cache) => cache,
+            _ => Box::default(),
+        };
+        let mut lines = cache.update("json", source);
+        if source.is_empty() || source.ends_with('\n') {
+            lines.push(Line::default());
+        }
+        self.plain(lines);
+        self.source = Source::Json(cache);
     }
 
     #[cfg(test)]
@@ -910,6 +932,62 @@ mod tests {
         document.update(sources[0]);
         let output = text(&mut document);
         assert!(output.contains("reference (https://example.com)"));
+    }
+
+    #[test]
+    fn json_appends_preserve_text_styles_and_incremental_highlighting() {
+        let source = "{\n  \"query\": \"🦀\",\n  \"enabled\": true,\n  \"limit\": 2\n}";
+        let mut document = Document::default();
+        for end in source
+            .char_indices()
+            .map(|(index, _)| index)
+            .chain([source.len()])
+        {
+            document.json(&source[..end]);
+            let mut fresh = Document::default();
+            fresh.json(&source[..end]);
+            assert_eq!(
+                rows(&mut document, 37),
+                rows(&mut fresh, 37),
+                "prefix {end}: {source:?}"
+            );
+        }
+        assert_eq!(text(&mut document), source);
+        let spans: Vec<_> = document
+            .blocks
+            .iter()
+            .flat_map(|block| &block.lines)
+            .flat_map(|line| &line.text.spans)
+            .collect();
+        assert!(
+            spans.iter().any(|span| span.content.contains("query")
+                && matches!(span.style.fg, Some(Color::Rgb(..))))
+        );
+        assert!(
+            spans.iter().any(|span| span.content.contains("true")
+                && matches!(span.style.fg, Some(Color::Rgb(..))))
+        );
+        let highlighted = |document: &Document| match &document.source {
+            Source::Json(cache) => cache.highlighted,
+            _ => panic!("expected JSON highlight cache"),
+        };
+        let before = highlighted(&document);
+        document.json(source);
+        rows(&mut document, 10);
+        assert_eq!(highlighted(&document), before);
+        // Growing only the final line reuses all committed lines, even after resize.
+        document.json(&format!("{source}\n"));
+        assert_eq!(highlighted(&document), before + 1);
+        assert_eq!(text(&mut document), format!("{source}\n"));
+
+        let malformed = "{\"value\": \"**literal** ![inert](image.png) \u{1b}";
+        document.json(malformed);
+        assert_eq!(text(&mut document), safe(malformed));
+        assert!(document.image(Position::default()).is_none());
+        document.update(malformed);
+        assert!(matches!(document.source, Source::Markdown(_)));
+        document.literal(malformed, Style::default());
+        assert_eq!(text(&mut document), safe(malformed));
     }
 
     #[test]

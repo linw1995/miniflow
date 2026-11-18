@@ -1,0 +1,55 @@
+# Design
+
+## Provider and conversation streams
+
+Rig buffers Chat Completions arguments before yielding its tool-call event. The existing SSE normalizer captures nonempty string fragments from the primary choice before that assembly. The synchronous publisher drains them on the same poll that reads the frame, including when Rig is still waiting for the rest of the call. This adds no second loader or provider request. Rig still owns validation and completed model output.
+
+`tool_call_delta` carries raw arguments, model-call identity, provider tool index, and optional wire ID/name hints. An identity-only record retains its hints with an empty argument string. The shared Agent forwards only this optional model-output port. ToolUses and `llm.tool_result` keep their ordinary execution contracts. The chat host accepts only declared previews, shares acknowledgement and cancellation with text previews, and admits terminal alternatives before preview validation.
+
+## Execution observations
+
+`mf-chat` projects execution from the existing records used by the execution panel. A snapshot containing
+public ToolCall `id` and `name` binds that identity to its run and exact runtime scope without retaining
+arguments. Ordinary Flow calls use their existing CallStarted/CallFinished boundaries. Inside Iteration,
+node records identify the unique direct child scope and its invoker from runtime ancestry, not receipt
+order or overlapping timestamps. A direct body failure remains failed even when the invoker packs a
+business-error result.
+
+Native chat subscribes to existing lifecycle and Iteration records plus a SnapshotRecorder. The compiled receiver feeds the same projection after decoding and admission, using the same Iteration path reconstruction as the execution panel. No Router configuration, dedicated execution event, exporter, model stream, storage schema, or dispatch step participates.
+
+Preview identity, scope binding, execution lifecycle, canonical transcript, and observation closure are
+independent inputs. The projection retains bounded pending evidence and joins by ID, scope, path, RunId,
+and original sequence rather than arrival order. A snapshot without an actual child execution is not
+listed; missing or conflicting evidence is unknown. Transcript results never establish success. Only
+explicit caller or runner interruption turns an unfinished started call into Interrupted; ordinary
+closure without a terminal remains unknown.
+
+## First output timing
+
+The first nonempty text or tool-call delta marks first output before publication or backpressure. Identity and name hints count as tool-call output. The existing request start and finish facts determine the model timing window; no raw delta or tool execution is included in accounting. The reply footer and graph card show FTT without a call coverage fraction.
+
+## Presentation
+
+The live cache groups arguments by invocation, model call, and index. Rendering and keyboard
+navigation use the same live tool group projection. Each group automatically expands when its
+arguments begin streaming and collapses when turn settlement replaces the preview. Its arguments
+and any result remain behind a leading `[+]` or `[-]` marker. Tool execution status does not control
+folding. Preview rows use the model-call identity to reproduce the
+same message and inter-tool spacing as settled batches. Unmatched observations use the same rule
+without guessing a message identity. Browse-mode j/k selects groups in display order, with
+Tab/Shift+Tab retained as aliases and arrow keys reserved for scrolling. Space or Ctrl+T toggles
+the selection. A late, unambiguous wire ID transfers focus, expansion, and
+scrolling to the canonical group key. Only a correlated execution observation updates the group
+status. Missing or ambiguous hints do not match by position or name.
+
+Authoritative messages replace previews without duplicating a call. If both are visible on the
+current history page, results appear under their matching calls within the same turn and assistant
+batch. A result-only page keeps the ID and the same fold key. Grouping does not reorder stored
+messages. Raw argument previews and canonical arguments share incremental JSON syntax highlighting.
+Incomplete or malformed fragments keep their exact text without waiting for JSON validation.
+Each call retains up to 8 KiB of recent argument text within the existing shared preview budget;
+older deltas are omitted with delta and byte counts. The tail limit applies only to live previews.
+Manually expanded canonical arguments and SQLite history display their complete saved values.
+Neither provisional delta history, fold state, nor omission markers are persisted. Full arguments
+remain in the authoritative messages and in actual dispatch. Arguments and results remain literal;
+assistant text keeps Markdown rendering.

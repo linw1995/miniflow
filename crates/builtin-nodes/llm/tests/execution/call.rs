@@ -325,7 +325,7 @@ fn streamed_tool(arguments: &str, finish_reason: &str) -> Reply {
 }
 
 #[test]
-fn tool_only_streams_publish_calls_without_text_or_first_text_observations() {
+fn tool_only_streams_publish_calls_and_measure_first_output() {
     let server = Server::start(vec![streamed_tool(r#"{"key":"a"}"#, "tool_calls")]);
     let output = invoke(
         &server,
@@ -338,12 +338,19 @@ fn tool_only_streams_publish_calls_without_text_or_first_text_observations() {
     assert_eq!(result["outputs"]["outcome"], "tool_calls");
     let deltas = result["deltas"].as_array().unwrap();
     assert!(deltas.iter().all(|delta| delta.get("delta").is_none()));
-    assert_eq!(deltas.len(), 1);
+    assert_eq!(deltas.len(), 2);
+    assert_eq!(deltas[0]["tool_call_delta"]["arguments"], r#"{"key":"a"}"#);
+    assert_eq!(deltas[0]["tool_call_delta"]["index"], 0);
+    assert_eq!(deltas[0]["tool_call_delta"]["id"], "one");
+    assert_eq!(deltas[0]["tool_call_delta"]["name"], "lookup");
+    assert!(deltas[0].get("tool_call").is_none() && deltas[1].get("tool_call_delta").is_none());
     assert_eq!(
-        deltas.last().unwrap()["tool_call"]["call"],
+        deltas[1]["tool_call"]["call"],
         result["outputs"]["tool_calls"][0]
     );
-    assert_eq!(result["events"].as_array().unwrap().len(), 2);
+    let events = result["events"].as_array().unwrap();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[1]["name"], mfn_llm::FIRST_OUTPUT_EVENT);
 }
 
 #[test]
@@ -377,7 +384,9 @@ fn invalid_or_truncated_tool_streams_do_not_publish_completed_calls() {
         assert_eq!(result["outputs"]["tool_calls"], json!([]));
         assert!(result["outputs"].get("message").is_none());
         let deltas = result["deltas"].as_array().unwrap();
-        assert!(deltas.is_empty(), "{output}");
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0]["tool_call_delta"]["arguments"], r#"{"key":"#);
+        assert!(deltas[0].get("tool_call").is_none(), "{output}");
     }
 }
 
@@ -392,7 +401,8 @@ fn tool_stream_delivery_failure_and_cancellation_remain_fatal() {
         let result = &output["results"][0];
         assert_eq!(result["ok"], false, "{output}");
         assert_eq!(result["deltas"].as_array().unwrap().len(), 1);
-        assert_eq!(result["deltas"][0]["tool_call"]["call"]["id"], "one");
+        assert!(result["deltas"][0].get("tool_call").is_none());
+        assert_eq!(result["deltas"][0]["tool_call_delta"]["arguments"], "{}");
         if option == "disconnect" {
             assert!(result["error"].as_str().unwrap().contains("publish"));
         } else {

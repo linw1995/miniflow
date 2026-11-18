@@ -1232,6 +1232,7 @@ The public Rust contracts are exported by `mfn_llm`:
 | `ToolCall` | `id: String`, `name: String`, `arguments: ValueRef` | `tool_calls` output and assistant messages |
 | `ToolResult` | `tool_call_id: String`, `content: String` | `tool_results` input |
 | `ToolCallEvent` | `model_call_id: String`, `call: ToolCall` | `tool_call` stream output |
+| `ToolCallDelta` | `model_call_id: String`, `index: UInt`, `arguments: String`, optional `id` and `name` | `tool_call_delta` stream output |
 
 Each tool definition contains `name`, `description`, and `input_schema`. Names must be unique and
 contain 1-64 ASCII letters, digits, underscores, or hyphens. The schema must be an object with
@@ -1385,28 +1386,32 @@ Provider reasoning blocks are ignored, as in the original text-only node. Reason
 cross-provider continuation state are outside this contract. Application `metadata` remains separate
 and is not sent to the provider.
 
-The stream side exposes `delta` for text and `tool_call` for each completed tool call. The text payload
-remains `{text, model_call_id}`. A tool event contains `{model_call_id, call}`, where `call` has the same
-shape as one terminal `tool_calls` entry. Rig assembles arguments before publishing a completed call;
-raw argument fragments are not exposed. A tool event is still a preview of the overall request:
-later failure or truncation can invalidate the batch. Use terminal `outcome` to decide whether to dispatch.
+The stream exposes `delta` for text, `tool_call_delta` for raw argument fragments, and `tool_call`
+for each completed model-generated call. The text payload remains `{text, model_call_id}`. Raw
+fragments are forwarded from SSE before Rig assembles the call, keyed by model call and provider tool
+index within the primary choice. An ID or name sent without arguments is still forwarded as a hint,
+with an empty `arguments` string. The node does not parse or reconstruct fragments as JSON. A completed event
+still has `{model_call_id, call}`, where `call` matches one terminal `tool_calls` entry. Neither
+stream implies tool execution; a later failure or truncation can invalidate the batch. Use terminal
+`outcome` to decide whether to dispatch.
 
-Each emission produces one stream port and explicitly skips the other. Select these ports as optional
+Each emission produces one stream port and skips the other stream ports. Select them as optional
 workflow outputs when observing mixed text/tool responses, for example:
 
 ```json
 [
   {"name": "text_delta", "node": "model", "port": "delta", "optional": true},
   {"name": "tool_call", "node": "model", "port": "tool_call", "optional": true},
+  {"name": "tool_call_delta", "node": "model", "port": "tool_call_delta", "optional": true},
   {"name": "outcome", "node": "model", "port": "outcome"},
   {"name": "tool_calls", "node": "model", "port": "tool_calls"}
 ]
 ```
 
 Selecting a stream port enables native streaming execution. Ordinary downstream nodes connected to
-one stream port are skipped on emissions from the other port. Tool-only responses emit neither empty
-text deltas nor a first-text observation. Incomplete or malformed arguments do not produce a completed
-tool event. Usage, deadlines, cancellation, and error capture retain the same contracts as text calls.
+one stream port are skipped on emissions from the other port. Tool-only responses emit no empty text
+deltas; their first tool-call delta emits the request's single first-output observation. Incomplete
+or malformed arguments do not produce a completed tool event. Usage, deadlines, cancellation, and error capture retain the same contracts as text calls.
 Cancellation and publication failure remain execution failures even with error capture enabled.
 This interface supports text and function tools, not media inputs.
 

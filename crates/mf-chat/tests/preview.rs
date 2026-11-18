@@ -21,17 +21,20 @@ impl ConversationBackend for Backend {
         _: &Invocation,
         _: ConversationInputs,
         context: &mut ExecutionContext,
-        preview: Option<&mut dyn FnMut(mf_chat::TextDelta) -> Result<(), ChatError>>,
+        preview: Option<&mut dyn FnMut(mf_chat::PreviewDelta) -> Result<(), ChatError>>,
         _: Option<&mf_telemetry::observation::Observer>,
     ) -> Result<ConversationResult, ChatError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         *self.cancellation.lock().unwrap() = Some(context.cancellation());
         if let Some(consume) = preview {
             for text in ["provisional", "-tail"] {
-                consume(mf_chat::TextDelta {
-                    text: text.into(),
-                    model_call_id: "model-call".into(),
-                })?;
+                consume(
+                    mf_chat::TextDelta {
+                        text: text.into(),
+                        model_call_id: "model-call".into(),
+                    }
+                    .into(),
+                )?;
             }
         }
         self.returned.store(true, Ordering::Release);
@@ -82,7 +85,9 @@ fn explicit_subscription_precedes_launch_and_completion_does_not_cancel_closed_o
         events.push(event);
     }
     assert_eq!(events.len(), 2);
-    assert_eq!(events[0].delta.text, "provisional");
+    assert!(
+        matches!(&events[0].delta, mf_chat::PreviewDelta::Text { delta } if delta.text == "provisional")
+    );
     assert_eq!(&events[0].invocation, job.invocation());
     let result = job.join().unwrap();
     assert_eq!(result.result.final_text(), Some("canonical"));
@@ -177,7 +182,7 @@ impl mf_runtime::TypedTaskStreamNode for Embedded {
         };
         mf_telemetry::events::record(mfn_llm::REQUEST_STARTED_EVENT, serde_json::json!(&usage));
         mf_telemetry::events::record(
-            mfn_llm::FIRST_TEXT_EVENT,
+            mfn_llm::FIRST_OUTPUT_EVENT,
             serde_json::json!({"call_id":call_id}),
         );
         emitter.send(Emission {
@@ -229,7 +234,10 @@ fn embedded_exports_preserve_user_identity_and_hide_colliding_application_contex
     let mut model_call = None;
     while let Ok(event) = receiver.recv() {
         assert_eq!(event.invocation.session_id, session.id);
-        model_call = Some(event.delta.model_call_id);
+        let mf_chat::PreviewDelta::Text { delta } = event.delta else {
+            panic!("expected text")
+        };
+        model_call = Some(delta.model_call_id);
         values += 1;
     }
     let completion = job.join().unwrap();
@@ -322,8 +330,11 @@ fn direct_embedded_invocation_reuses_the_call_stream_interface() {
         .unwrap();
     assert_eq!(result.final_text(), Some("isolated-final"));
     assert_eq!(deltas.len(), 1);
-    assert_eq!(deltas[0].text, "prefix");
-    assert_eq!(deltas[0].model_call_id, result.usages[0].call_id);
+    let mf_chat::PreviewDelta::Text { delta } = &deltas[0] else {
+        panic!("expected text")
+    };
+    assert_eq!(delta.text, "prefix");
+    assert_eq!(delta.model_call_id, result.usages[0].call_id);
 }
 
 #[test]
@@ -340,7 +351,9 @@ fn embedded_call_delivers_a_prefix_before_completion_and_shares_cancellation() {
         .unwrap();
     let (job, receiver) = host.submit_stream(&session.id, "wait").unwrap();
     let invocation = job.invocation().clone();
-    assert_eq!(receiver.recv().unwrap().delta.text, "prefix");
+    assert!(
+        matches!(receiver.recv().unwrap().delta, mf_chat::PreviewDelta::Text { delta } if delta.text == "prefix")
+    );
     job.cancel();
     assert!(job.join().is_err());
     assert_eq!(
@@ -414,7 +427,9 @@ fn embedded_native_stream_graphs_keep_their_coordinator() {
         .create_session("embedded", None, None)
         .unwrap();
     let (job, receiver) = host.submit_stream(&session.id, "legacy").unwrap();
-    assert_eq!(receiver.recv().unwrap().delta.text, "prefix");
+    assert!(
+        matches!(receiver.recv().unwrap().delta, mf_chat::PreviewDelta::Text { delta } if delta.text == "prefix")
+    );
     assert!(receiver.recv().is_err());
     assert_eq!(
         job.join().unwrap().result.final_text(),
@@ -516,7 +531,7 @@ impl ConversationBackend for RetryBackend {
         _: &Invocation,
         _: ConversationInputs,
         _: &mut ExecutionContext,
-        preview: Option<&mut dyn FnMut(mf_chat::TextDelta) -> Result<(), ChatError>>,
+        preview: Option<&mut dyn FnMut(mf_chat::PreviewDelta) -> Result<(), ChatError>>,
         _: Option<&mf_telemetry::observation::Observer>,
     ) -> Result<ConversationResult, ChatError> {
         if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -526,10 +541,13 @@ impl ConversationBackend for RetryBackend {
             .fail();
         }
         if let Some(consume) = preview {
-            consume(mf_chat::TextDelta {
-                text: "retried".into(),
-                model_call_id: "retry-model".into(),
-            })?;
+            consume(
+                mf_chat::TextDelta {
+                    text: "retried".into(),
+                    model_call_id: "retry-model".into(),
+                }
+                .into(),
+            )?;
         }
         Ok(ConversationResult::assistant("retried-final"))
     }
@@ -556,7 +574,9 @@ fn streaming_retries_use_new_invocations_and_preserve_failed_history() {
     assert_ne!(retry.invocation().turn_id, failed.turn_id);
     let event = receiver.recv().unwrap();
     assert_eq!(&event.invocation, retry.invocation());
-    assert_eq!(event.delta.text, "retried");
+    assert!(
+        matches!(event.delta, mf_chat::PreviewDelta::Text { delta } if delta.text == "retried")
+    );
     assert!(receiver.recv().is_err());
     assert_eq!(
         retry.join().unwrap().result.final_text(),

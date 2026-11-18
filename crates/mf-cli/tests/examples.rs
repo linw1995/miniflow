@@ -558,6 +558,34 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                 }
             );
             assert_eq!(server.as_ref().unwrap().requests()[0].body["stream"], true);
+            if matches!(
+                name,
+                "chat-calculator-flow.json" | "chat-context-flow.json" | "chat-deepseek-flow.json"
+            ) {
+                let expected = if name == "chat-deepseek-flow.json" {
+                    3
+                } else {
+                    2
+                };
+                let deltas: Vec<_> = records
+                    .iter()
+                    .filter_map(|record| record.get("tool_call_delta"))
+                    .collect();
+                assert_eq!(deltas.len(), expected, "{name}");
+                let mut parts = std::collections::BTreeSet::new();
+                for delta in deltas {
+                    assert!(parts.insert((
+                        delta["model_call_id"].as_str().unwrap(),
+                        delta["index"].as_u64().unwrap()
+                    )));
+                    assert!(delta["id"].as_str().is_some());
+                    assert!(
+                        serde_json::from_str::<Value>(delta["arguments"].as_str().unwrap())
+                            .unwrap()
+                            .is_object()
+                    );
+                }
+            }
             records
                 .into_iter()
                 .find(|record| {

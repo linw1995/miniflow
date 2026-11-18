@@ -1,6 +1,6 @@
 mod streaming;
 
-use crate::{LlmExecutionError, NormalizeResponseSnafu, UsageMetadataSnafu};
+use crate::{LlmExecutionError, NormalizeResponseSnafu, ToolCallDelta, UsageMetadataSnafu};
 use bytes::Bytes;
 use rig_core::{
     completion::Usage,
@@ -22,14 +22,34 @@ use std::{
 pub struct TerminalTransport {
     inner: ReqwestClient,
     usage: Arc<Mutex<Option<Usage>>>,
+    tool_arguments: Option<Arc<ToolArgumentDeltas>>,
+}
+
+struct ToolArgumentDeltas {
+    model_call_id: String,
+    pending: Mutex<Vec<ToolCallDelta>>,
 }
 
 impl TerminalTransport {
-    pub fn new(inner: ReqwestClient) -> Self {
+    pub fn new(inner: ReqwestClient, streaming_tool_call: Option<&str>) -> Self {
         Self {
             inner,
             usage: Arc::new(Mutex::new(None)),
+            tool_arguments: streaming_tool_call.map(|call| {
+                Arc::new(ToolArgumentDeltas {
+                    model_call_id: call.into(),
+                    pending: Mutex::default(),
+                })
+            }),
         }
+    }
+
+    pub fn take_tool_arguments(&self) -> Vec<ToolCallDelta> {
+        self.tool_arguments
+            .as_ref()
+            .map_or_else(Vec::new, |arguments| {
+                std::mem::take(&mut *arguments.pending.lock().unwrap())
+            })
     }
 
     pub fn usage(&self) -> Option<Usage> {
@@ -132,12 +152,13 @@ impl HttpClientExt for TerminalTransport {
     {
         let response = self.inner.send_streaming(request);
         let usage = self.usage.clone();
+        let tool_arguments = self.tool_arguments.clone();
         async move {
             let response = response.await?;
             if !response.status().is_success() {
                 return Ok(response);
             }
-            Ok(response.map(|body| streaming::normalize_stream(body, usage)))
+            Ok(response.map(|body| streaming::normalize_stream(body, usage, tool_arguments)))
         }
     }
 }

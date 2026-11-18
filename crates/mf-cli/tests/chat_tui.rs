@@ -211,9 +211,10 @@ fn calculator_call(id: &str, operation: &str, left: f64, right: f64) -> Reply {
     let mut reply = Reply::stream_text("");
     let arguments =
         serde_json::json!({"operation":operation,"left":left,"right":right}).to_string();
-    let chunk = serde_json::json!({"id":"response","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":id,"type":"function","function":{"name":"calculator","arguments":arguments}}]},"finish_reason":null}]});
+    let identity = serde_json::json!({"id":"response","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":id,"type":"function","function":{"name":"calculator","arguments":""}}]},"finish_reason":null}]});
+    let chunk = serde_json::json!({"id":"response","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":arguments}}]},"finish_reason":null}]});
     let finish = serde_json::json!({"id":"response","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}});
-    reply.body = format!("data: {chunk}\n\ndata: {finish}\n\ndata: [DONE]\n\n");
+    reply.body = format!("data: {identity}\n\ndata: {chunk}\n\ndata: {finish}\n\ndata: [DONE]\n\n");
     reply
 }
 
@@ -232,9 +233,14 @@ fn next_completion(
                 resolution,
                 status,
                 capture_error,
+                stderr,
                 ..
             }) => {
-                assert!(status.is_none_or(|status| status.success()));
+                assert!(
+                    status.is_none_or(|status| status.success()),
+                    "{status:?}: {stderr}; {:?}",
+                    resolution.as_ref().err()
+                );
                 assert!(capture_error.is_none(), "{capture_error:?}");
                 return resolution.unwrap();
             }
@@ -248,15 +254,23 @@ fn next_completion(
 
 #[test]
 fn compiled_context_replacement_keeps_tool_audit_and_save_only_retries_after_reopen() {
-    use mf_chat::{MessageUpdate, contract::CompletionState};
+    use mf_chat::{MessageUpdate, ToolExecutionPhase, contract::CompletionState};
     use mf_tui::{
-        chat::{ChatCommand, ChatController, ChatLaunch, ChatOptions},
+        chat::{ChatCommand, ChatController, ChatEvent, ChatLaunch, ChatOptions},
         run::RunOptions,
     };
     use serde_json::json;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let release = Arc::new(AtomicBool::new(false));
+    let mut answer = Reply::stream_text("First answer: 5");
+    answer.fragments = Some(vec![vec![], answer.body.as_bytes().to_vec()]);
+    answer.release_after_prefix = Some(release.clone());
     let server = Server::start(vec![
         calculator_call("first", "add", 2.0, 3.0),
-        Reply::stream_text("First answer: 5"),
+        answer,
         calculator_call("second", "multiply", 3.0, 4.0),
         Reply::stream_text("Second answer: 12"),
         Reply::text("Summary only: 5 and 12"),
@@ -291,6 +305,44 @@ fn compiled_context_replacement_keeps_tool_audit_and_save_only_retries_after_reo
                 prompt: format!("Question {turn}"),
             })
             .unwrap();
+        if turn == 0 {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut observation = None;
+            let mut arguments_seen = false;
+            loop {
+                assert!(
+                    Instant::now() < deadline,
+                    "no correlated tool preview and runner observation"
+                );
+                match controller.try_event() {
+                    Some(ChatEvent::Observing(run)) => observation = Some(run),
+                    Some(ChatEvent::Preview { preview, .. }) => {
+                        arguments_seen |= preview.segments.iter().any(|segment| {
+                            segment.tool.as_ref().is_some_and(|tool| {
+                                tool.id.as_deref() == Some("first")
+                                    && tool.name.as_deref() == Some("calculator")
+                            }) && segment.text.contains("\"operation\"")
+                        });
+                    }
+                    Some(ChatEvent::Finished { .. }) => panic!("settled before observation"),
+                    _ => thread::sleep(Duration::from_millis(2)),
+                }
+                let Some(run) = &observation else { continue };
+                let statuses = run.reader.tool_metrics().snapshot();
+                if arguments_seen
+                    && statuses
+                        .get("first")
+                        .is_some_and(|tool| tool.phase == Some(ToolExecutionPhase::Succeeded))
+                {
+                    assert_eq!(statuses.len(), 1);
+                    assert_eq!(statuses["first"].name, "calculator");
+                    assert!(statuses["first"].duration_ns.is_some());
+                    break;
+                }
+            }
+            assert!(controller.busy());
+            release.store(true, Ordering::Release);
+        }
         let mut resolution = next_completion(&controller);
         if compact {
             let CompletionState::Uncommitted(pending) = resolution.state else {
@@ -332,6 +384,13 @@ fn compiled_context_replacement_keeps_tool_audit_and_save_only_retries_after_reo
                 1
             }
         );
+        if turn == 0 {
+            assert!(completion.result.usages.iter().all(|call| {
+                call.timing
+                    .as_ref()
+                    .is_some_and(|timing| timing.first_token_us.is_some())
+            }));
+        }
         controller.close().unwrap();
         let database = ChatDatabase::open(&path).unwrap();
         let page = database.messages(&id, 50, None).unwrap();

@@ -797,7 +797,7 @@ fn request_events_observe_first_nonempty_stream_text_and_unary_unknowns() {
         assert!(end - start >= 40_000_000);
         if stream {
             assert_eq!(events.len(), 3);
-            assert_eq!(events[1]["name"], mfn_llm::FIRST_TEXT_EVENT);
+            assert_eq!(events[1]["name"], mfn_llm::FIRST_OUTPUT_EVENT);
             assert!(events[1]["time_unix_nano"].as_u64().unwrap() - start >= 90_000_000);
         } else {
             assert_eq!(events.len(), 2);
@@ -829,7 +829,7 @@ fn captured_stream_failures_retain_events_without_node_local_timing() {
         );
         let events = result["results"][0]["events"].as_array().unwrap();
         assert_eq!(events.len(), 3);
-        assert_eq!(events[1]["name"], mfn_llm::FIRST_TEXT_EVENT);
+        assert_eq!(events[1]["name"], mfn_llm::FIRST_OUTPUT_EVENT);
         assert_eq!(events[2]["name"], mfn_llm::REQUEST_FINISHED_EVENT);
         assert!(events[2]["body"]["error"].is_string());
         assert!(usage.error.is_some());

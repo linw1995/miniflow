@@ -221,13 +221,14 @@ This logical fixture demonstrates successful node completion:
 
 ## Model request observations
 
-The `mf.observation` log scope carries `llm.request.started`, `llm.response.first_text`, and
+The `mf.observation` log scope carries `llm.request.started`, `llm.response.first_output`, and
 `llm.request.finished`. Each structured body identifies its `call_id`; request boundaries carry the model,
 node/scope attribution, and available call facts. Source timestamps and native trace/span correlation are retained
-unchanged by local collectors and OTel export. The first-text observation is emitted before downstream publication.
-These observations do not consume workflow lifecycle sequence numbers or change lifecycle schema versions.
+unchanged by local collectors and OTel export. The first-output observation is emitted before downstream publication
+of the first nonempty text or tool-call delta. These observations do not consume workflow lifecycle sequence numbers
+or change lifecycle schema versions.
 
-Application hosts derive request duration and first-text latency from corresponding event timestamps, then combine
+Application hosts derive request duration and first-output latency from corresponding event timestamps, then combine
 those windows with provider output-token counts. `mf_telemetry::events::collect` installs a local collector in
 the observation Context; `events::record` shares each source event with that collector and the active exporter.
 Existing observation contexts propagate collection across worker and nested invocations. Runtime execution
