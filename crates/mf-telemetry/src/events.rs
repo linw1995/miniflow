@@ -16,75 +16,7 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use uuid::Uuid;
-
 pub const SCOPE: &str = "mf.observation";
-pub const CALL_EXECUTION_EVENT: &str = "mf.call.execution";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CallExecutionPhase {
-    Running,
-    Succeeded,
-    Failed,
-    Interrupted,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CallExecution {
-    pub category: String,
-    pub correlation_id: String,
-    pub name: String,
-    pub attempt: Uuid,
-    pub phase: CallExecutionPhase,
-}
-
-impl CallExecution {
-    pub fn valid_label(value: &str) -> bool {
-        value.len() <= 256 && !value.trim().is_empty() && !value.chars().any(char::is_control)
-    }
-
-    pub fn validate(&self) -> Result<(), ContractError> {
-        crate::require(
-            !self.attempt.is_nil()
-                && [&self.category, &self.correlation_id, &self.name]
-                    .into_iter()
-                    .all(|value| Self::valid_label(value)),
-            "invalid call execution identity",
-        )
-    }
-
-    /// Emit the measured call boundary on the current trace, without recording its inputs or outputs.
-    pub fn start(category: &str, correlation_id: &str, name: &str) -> Option<Self> {
-        let context = Context::current();
-        if (context.get::<CollectEvent>().is_none() && context.get::<EmitEvent>().is_none())
-            || ![category, correlation_id, name]
-                .into_iter()
-                .all(Self::valid_label)
-        {
-            return None;
-        }
-        let call = Self {
-            category: category.into(),
-            correlation_id: correlation_id.into(),
-            name: name.into(),
-            attempt: Uuid::new_v4(),
-            phase: CallExecutionPhase::Running,
-        };
-        call.emit();
-        Some(call)
-    }
-
-    pub fn finish(mut self, phase: CallExecutionPhase) {
-        self.phase = phase;
-        self.emit();
-    }
-
-    fn emit(&self) {
-        record(CALL_EXECUTION_EVENT, serde_json::json!(self));
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EventRecord {

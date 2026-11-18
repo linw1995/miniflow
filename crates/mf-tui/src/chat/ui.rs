@@ -168,7 +168,9 @@ fn render_message_group(
                 title: tool_call_label(Some(&call.name), &call.id),
                 arguments: Some(ToolArguments::Canonical(&call.arguments)),
                 result: group.results.get(call.id.as_str()).copied(),
-                execution: executions.get(&call.id),
+                execution: executions
+                    .get(&call.id)
+                    .filter(|execution| execution.name == call.name),
             });
             render_assistant(transcript, key, content, tools, None, expanded, focused);
             return;
@@ -419,10 +421,15 @@ fn live_messages<'a>(
             continue;
         };
         let id = tool.id.as_deref().filter(|id| unique.contains(id));
-        let execution = id.and_then(|id| executions.get(id));
-        let name = execution
-            .map(|execution| execution.name.as_str())
-            .or(tool.name.as_deref());
+        let execution = id.and_then(|id| executions.get(id)).filter(|execution| {
+            tool.name
+                .as_ref()
+                .is_none_or(|name| name == &execution.name)
+        });
+        let name = tool
+            .name
+            .as_deref()
+            .or_else(|| execution.map(|execution| execution.name.as_str()));
         let index = format!("index {}", tool.index);
         message.tools.push(ToolGroup {
             key: id.map_or_else(
@@ -454,12 +461,12 @@ fn live_messages<'a>(
 }
 
 fn tool_status(execution: &mf_chat::ToolExecution) -> &'static str {
-    use mf_chat::CallExecutionPhase;
+    use mf_chat::ToolExecutionPhase;
     match execution.phase {
-        Some(CallExecutionPhase::Running) => "Running",
-        Some(CallExecutionPhase::Succeeded) => "Succeeded",
-        Some(CallExecutionPhase::Failed) => "Failed",
-        Some(CallExecutionPhase::Interrupted) => "Interrupted",
+        Some(ToolExecutionPhase::Running) => "Running",
+        Some(ToolExecutionPhase::Succeeded) => "Succeeded",
+        Some(ToolExecutionPhase::Failed) => "Failed",
+        Some(ToolExecutionPhase::Interrupted) => "Interrupted",
         None => "Unknown",
     }
 }
@@ -3059,7 +3066,7 @@ mod tests {
                     id.into(),
                     mf_chat::ToolExecution {
                         name: "search".into(),
-                        phase: Some(mf_chat::CallExecutionPhase::Running),
+                        phase: Some(mf_chat::ToolExecutionPhase::Running),
                         duration_ns: None,
                     },
                 )
@@ -3089,14 +3096,20 @@ mod tests {
 
     #[test]
     fn tool_observations_label_live_calls_even_with_the_flow_panel_hidden() {
-        use mf_telemetry::events::{CALL_EXECUTION_EVENT, EventRecord};
+        use mf_runtime::ValueRef;
+        use mf_telemetry::{
+            event::{Event, LifecycleEvent, LoopPassOutcome, LoopPathEntry},
+            identity::{RunId, WorkflowId},
+            observation::LocalRecord,
+        };
+
         let root = tempfile::tempdir().unwrap();
         let launch = super::super::tests::launch(root.path());
         let mut view = ChatView::new(launch.runner.description()).unwrap();
         let run = LocalRun::start(
             Command::new("true"),
             launch.runner.description().clone(),
-            mf_telemetry::identity::RunId::new(),
+            RunId::new(),
             1024,
         )
         .unwrap();
@@ -3122,30 +3135,62 @@ mod tests {
             .unwrap();
         let screen = render(&view, 100, 25);
         assert!(screen.contains("Tool call search [matched]") && !screen.contains("[Running]"));
-        let observe = |id: &str, phase: &str| {
-            metrics.observe(&EventRecord {
-            name: CALL_EXECUTION_EVENT.into(),
-            time_unix_nano: if phase == "running" { 10 } else { 11 },
-            body: serde_json::json!({"category":"tool", "correlation_id":id, "name":"search", "attempt":"00000000-0000-4000-8000-000000000001", "phase":phase}),
-            trace_context: None,
-        }).unwrap()
+
+        let run_id = RunId::new();
+        let observe = |id: &str, terminal: Option<LoopPassOutcome>| {
+            let scope = vec![LoopPathEntry::Call { call_id: id.into() }];
+            metrics.observe_snapshot(
+                run_id,
+                &scope,
+                &ValueRef::from(serde_json::json!({
+                    "call": {"id": id, "name": "search", "arguments": {}}
+                })),
+            );
+            let mut path = scope;
+            path.push(LoopPathEntry::Call {
+                call_id: "selected".into(),
+            });
+            let observe = |sequence: i64, event| {
+                metrics.observe(
+                    LocalRecord::Finite(&LifecycleEvent {
+                        workflow_id: WorkflowId::from_definition(&"test", &[]).unwrap(),
+                        run_id,
+                        sequence: sequence.try_into().unwrap(),
+                        event,
+                    }),
+                    false,
+                )
+            };
+            observe(
+                1,
+                Event::CallStarted {
+                    path: path.clone(),
+                    elapsed_ns: 10.try_into().unwrap(),
+                },
+            );
+            if let Some(outcome) = terminal {
+                observe(
+                    2,
+                    Event::CallFinished {
+                        path,
+                        elapsed_ns: 11.try_into().unwrap(),
+                        outcome,
+                    },
+                );
+            }
         };
-        observe("matched", "running");
-        for (id, phase) in [
-            ("failed", "failed"),
-            ("done", "succeeded"),
-            ("stopped", "interrupted"),
-            ("ambiguous", "failed"),
-            ("ambiguous", "interrupted"),
-        ] {
-            observe(id, phase);
-        }
+        observe("matched", None);
+        observe("failed", Some(LoopPassOutcome::Failed));
+        observe("done", Some(LoopPassOutcome::Completed));
+        observe("stopped", None);
+        observe("ambiguous", Some(LoopPassOutcome::Failed));
+        observe("ambiguous", Some(LoopPassOutcome::Completed));
         let screen = render(&view, 100, 25);
         for expected in [
             "[+] [Running] Tool call search [matched]",
             "[+] [Failed] Tool call search [failed]",
             "[+] [Succeeded] Tool call search [done]",
-            "[+] [Interrupted] Tool call search [stopped]",
+            "[+] [Running] Tool call search [stopped]",
             "[+] [Unknown] Tool call search [ambiguous]",
         ] {
             assert!(screen.contains(expected), "{screen}");
@@ -3162,6 +3207,11 @@ mod tests {
             row_of(&screen, "[done]"),
             row_of(&screen, "[ambiguous]") + 2
         );
+        metrics.close(true);
+        let screen = render(&view, 100, 25);
+        assert!(screen.contains("[+] [Interrupted] Tool call search [matched]"));
+        assert!(screen.contains("[+] [Interrupted] Tool call search [stopped]"));
+        assert!(screen.contains("[+] [Succeeded] Tool call search [done]"));
         view.toggle_tool();
         let opened = render(&view, 100, 25);
         assert!(opened.contains("[-] [Interrupted] Tool call search [stopped]"));

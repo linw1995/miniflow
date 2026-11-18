@@ -19,7 +19,7 @@ pub enum CallEventError {
 #[derive(Clone, Debug, Default)]
 struct ObservedCall {
     started: Option<(u64, CallUsage)>,
-    first_text: Option<u64>,
+    first_output: Option<u64>,
     finished: Option<(u64, CallUsage)>,
     correlation: Option<TraceContext>,
     conflicted: bool,
@@ -33,7 +33,7 @@ impl ObservedCall {
         let start = self.started.as_ref()?.0;
         let end = self.finished.as_ref()?.0;
         let elapsed_us = i64::try_from(end.checked_sub(start)? / 1000).ok()?;
-        let first_token_us = match self.first_text {
+        let first_token_us = match self.first_output {
             Some(first) => {
                 if first > end {
                     return None;
@@ -59,7 +59,7 @@ impl CallEventCollector {
         matches!(
             name,
             mfn_llm::REQUEST_STARTED_EVENT
-                | mfn_llm::FIRST_TEXT_EVENT
+                | mfn_llm::FIRST_OUTPUT_EVENT
                 | mfn_llm::REQUEST_FINISHED_EVENT
         )
     }
@@ -85,7 +85,7 @@ impl CallEventCollector {
                 reason: "requires a call identity"
             }
         );
-        let usage = if event.name == mfn_llm::FIRST_TEXT_EVENT {
+        let usage = if event.name == mfn_llm::FIRST_OUTPUT_EVENT {
             None
         } else {
             let facts: mfn_llm::CallUsage =
@@ -111,10 +111,10 @@ impl CallEventCollector {
             } else {
                 *slot = Some((event.time_unix_nano, usage));
             }
-        } else if let Some(previous) = call.first_text {
+        } else if let Some(previous) = call.first_output {
             call.conflicted |= previous != event.time_unix_nano;
         } else {
-            call.first_text = Some(event.time_unix_nano);
+            call.first_output = Some(event.time_unix_nano);
         }
         if let (Some((_, start)), Some((_, end))) = (&call.started, &call.finished) {
             call.conflicted |= start.model != end.model
@@ -178,7 +178,7 @@ mod tests {
     fn records(id: &str) -> [EventRecord; 3] {
         [
             event(mfn_llm::REQUEST_STARTED_EVENT, 10_000_000_000, id),
-            event(mfn_llm::FIRST_TEXT_EVENT, 10_500_000_000, id),
+            event(mfn_llm::FIRST_OUTPUT_EVENT, 10_500_000_000, id),
             event(mfn_llm::REQUEST_FINISHED_EVENT, 12_000_000_000, id),
         ]
     }
@@ -249,7 +249,7 @@ mod tests {
             let mut collector = CallEventCollector::default();
             for record in [
                 complete[0].clone(),
-                event(mfn_llm::FIRST_TEXT_EVENT, first, "one"),
+                event(mfn_llm::FIRST_OUTPUT_EVENT, first, "one"),
                 event(mfn_llm::REQUEST_FINISHED_EVENT, end, "one"),
             ] {
                 collector.observe(&record).unwrap();
@@ -312,7 +312,7 @@ mod tests {
             .unwrap();
         assert!(
             collector
-                .observe(&event(mfn_llm::FIRST_TEXT_EVENT, 1, " "))
+                .observe(&event(mfn_llm::FIRST_OUTPUT_EVENT, 1, " "))
                 .is_err()
         );
         let mut invalid = event(mfn_llm::REQUEST_STARTED_EVENT, 0, "one");

@@ -254,7 +254,7 @@ fn next_completion(
 
 #[test]
 fn compiled_context_replacement_keeps_tool_audit_and_save_only_retries_after_reopen() {
-    use mf_chat::{CallExecutionPhase, MessageUpdate, contract::CompletionState};
+    use mf_chat::{MessageUpdate, ToolExecutionPhase, contract::CompletionState};
     use mf_tui::{
         chat::{ChatCommand, ChatController, ChatEvent, ChatLaunch, ChatOptions},
         run::RunOptions,
@@ -332,7 +332,7 @@ fn compiled_context_replacement_keeps_tool_audit_and_save_only_retries_after_reo
                 if arguments_seen
                     && statuses
                         .get("first")
-                        .is_some_and(|tool| tool.phase == Some(CallExecutionPhase::Succeeded))
+                        .is_some_and(|tool| tool.phase == Some(ToolExecutionPhase::Succeeded))
                 {
                     assert_eq!(statuses.len(), 1);
                     assert_eq!(statuses["first"].name, "calculator");
@@ -384,6 +384,13 @@ fn compiled_context_replacement_keeps_tool_audit_and_save_only_retries_after_reo
                 1
             }
         );
+        if turn == 0 {
+            assert!(completion.result.usages.iter().all(|call| {
+                call.timing
+                    .as_ref()
+                    .is_some_and(|timing| timing.first_token_us.is_some())
+            }));
+        }
         controller.close().unwrap();
         let database = ChatDatabase::open(&path).unwrap();
         let page = database.messages(&id, 50, None).unwrap();

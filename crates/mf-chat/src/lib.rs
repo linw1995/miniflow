@@ -27,12 +27,11 @@ pub use contract::{
 };
 pub use error::{BackendSnafu, CaptureSnafu, ChatError};
 pub use host::{ChatHost, ChatJob, HostConfig};
-pub use mf_telemetry::events::CallExecutionPhase;
 pub use models::{Message, ModelCall, Session, Turn};
 pub use preview::{PreviewConsumer, PreviewDelta, PreviewEvent, PreviewReceiver};
 pub use session::{MessagePage, MessageRecord, SessionPage};
 pub use storage::ChatDatabase;
-pub use tool_metrics::{ToolExecution, ToolExecutionMetrics};
+pub use tool_metrics::{ToolExecution, ToolExecutionMetrics, ToolExecutionPhase};
 pub use turn::{Invocation, ModelIdentity};
 pub use usage::CallPurpose;
 pub use usage::{

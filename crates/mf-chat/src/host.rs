@@ -288,6 +288,7 @@ impl ChatHost {
         let worker_completed = completed.clone();
         let job_invocation = invocation.clone();
         let job_cancellation = cancellation.clone();
+        let worker_cancellation = job_cancellation.clone();
         let tool_metrics = ToolExecutionMetrics::default();
         let worker_metrics = tool_metrics.clone();
         let worker = thread::Builder::new()
@@ -304,7 +305,7 @@ impl ChatHost {
                         },
                     )
                 }));
-                worker_metrics.close();
+                worker_metrics.close(worker_cancellation.failure().is_some());
                 let result = match result {
                     Ok(result) => result,
                     Err(_) => {

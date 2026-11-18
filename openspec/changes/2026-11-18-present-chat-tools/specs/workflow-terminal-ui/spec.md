@@ -59,3 +59,30 @@ Chat SHALL group arguments and results by call. Groups SHALL automatically expan
 
 - **WHEN** argument previews exceed the count or byte budget
 - **THEN** retained preview data remains bounded and valid UTF-8, recent tool argument deltas replace older display history, omitted data is indicated, and consumption and final settlement continue
+
+## MODIFIED Requirements
+
+### Requirement: Present model call performance beside replies and LLM nodes
+
+Completed assistant replies and LLM graph cards SHALL present first-output latency (FTT), Gen, and E2E throughput from authoritative call facts. Narrow chat views MAY omit E2E. Previews SHALL indicate ongoing measurement. Missing data SHALL remain unknown. Reply summaries SHALL exclude explicitly attributed non-conversation calls, average observed FTT, and weight rates by paired tokens and durations. Footers and cards MUST NOT display a call coverage fraction.
+
+#### Scenario: Reload a completed reply
+
+- **WHEN** a saved assistant reply is loaded from a bounded message page
+- **THEN** its footer uses the original committed call facts and preserves unknown timing
+
+#### Scenario: Recover a complete unsaved reply
+
+- **WHEN** a complete reply cannot be saved
+- **THEN** its performance footer retains the original facts during save-only recovery
+
+#### Scenario: Inspect a repeated LLM invocation
+
+- **WHEN** an LLM node runs repeatedly or inside a Loop
+- **THEN** its graph card uses only snapshots correlated to the displayed invocation, with stable space reserved for FTT and both rates
+- **AND** details explain both rate windows and report per-call facts and rate coverage
+
+#### Scenario: Observe missing call data
+
+- **WHEN** an LLM snapshot or provider token count is unavailable
+- **THEN** the card displays unknown values without estimating tokens or borrowing another invocation's data

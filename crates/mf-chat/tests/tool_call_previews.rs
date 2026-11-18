@@ -128,7 +128,7 @@ fn parallel_tool_argument_previews_precede_the_answer_without_changing_the_trans
                         );
                         assert_eq!(
                             metrics["first"].phase,
-                            Some(mf_chat::CallExecutionPhase::Succeeded)
+                            Some(mf_chat::ToolExecutionPhase::Succeeded)
                         );
                         assert!(metrics["first"].duration_ns.is_some());
                         assert_eq!(
@@ -183,6 +183,11 @@ fn parallel_tool_argument_previews_precede_the_answer_without_changing_the_trans
     let completion = job.join().unwrap();
     assert_eq!(completion.result.final_text(), Some("Final answer"));
     assert_eq!(completion.result.display_messages().len(), 4);
+    assert!(completion.result.usages.iter().all(|call| {
+        call.timing
+            .as_ref()
+            .is_some_and(|timing| timing.first_token_us.is_some())
+    }));
     let model = &completion.result.usages[0].call_id;
     assert_eq!(
         fragments[&(model.clone(), 0)],

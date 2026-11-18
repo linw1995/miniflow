@@ -28,7 +28,15 @@ pub fn complete(
             .provider_response_status()
             .map(|status| status.as_u16()),
     })?;
-    let mut first_text = true;
+    let mut first_output = true;
+    let mut observe_output = || {
+        if std::mem::take(&mut first_output) {
+            mf_telemetry::events::record(
+                crate::FIRST_OUTPUT_EVENT,
+                serde_json::json!({"call_id": call_id}),
+            );
+        }
+    };
     loop {
         let (arguments, item) = context.execute_future(
             poll_fn(|cx| {
@@ -48,6 +56,7 @@ pub fn complete(
         // not be replaced with capturable timeouts, and publishing can pause body reads.
         for delta in arguments {
             context.check_future_limits(Some(deadline))?;
+            observe_output();
             publish(
                 emitter,
                 LlmEmission {
@@ -71,13 +80,7 @@ pub fn complete(
         })?;
         let emission = match item {
             Item::Event(StreamEvent::Text { text, .. }) if !text.is_empty() => {
-                if first_text {
-                    mf_telemetry::events::record(
-                        crate::FIRST_TEXT_EVENT,
-                        serde_json::json!({"call_id": call_id}),
-                    );
-                    first_text = false;
-                }
+                observe_output();
                 LlmEmission {
                     delta: Some(TextDelta {
                         text,

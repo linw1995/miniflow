@@ -358,6 +358,7 @@ impl EmbeddedBackend {
             mf_runtime::StreamOptions {
                 arguments,
                 observation,
+                snapshots: context.snapshot_recorder().cloned(),
                 ..Default::default()
             },
         )?;
@@ -1418,9 +1419,17 @@ pub(super) fn run_observed_conversation(
     let collected = calls.clone();
     let _events = mf_telemetry::events::collect(move |event| {
         let _ = collected.lock().unwrap().observe(event);
-        if let Some(tools) = &tools {
-            let _ = tools.observe(event);
-        }
+    });
+    let _execution = tools.as_ref().map(|tools| {
+        let tools = tools.clone();
+        mf_telemetry::observation::collect(move |record| tools.observe(record, false))
+    });
+    let snapshots = tools.map(|tools| {
+        mf_runtime::SnapshotRecorder::new(move |event| {
+            if let Some(run) = mf_telemetry::observation::current_run_id() {
+                tools.observe_snapshot(run, &event.scope, &event.snapshot.inputs);
+            }
+        })
     });
     let title_parameters = automatic_titles
         .then(|| backend.builtin_title_parameters())
@@ -1534,6 +1543,7 @@ pub(super) fn run_observed_conversation(
         let instance = flow.start_with_options(mf_runtime::StreamOptions {
             arguments,
             observation,
+            snapshots,
             ..Default::default()
         })?;
         let runtime_cancellation = instance.cancellation();

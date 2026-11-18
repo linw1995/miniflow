@@ -602,7 +602,8 @@ impl LocalRun {
                 })?;
             stdout
         };
-        self.receiver.finish();
+        self.receiver
+            .finish_with_interruption(self.interrupted_at.is_some());
         let outcome = LocalOutcome {
             status,
             interrupted: self.interrupted_at.is_some(),

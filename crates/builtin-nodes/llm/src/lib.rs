@@ -61,7 +61,7 @@ pub struct UsageAttribution {
 }
 
 pub const REQUEST_STARTED_EVENT: &str = "llm.request.started";
-pub const FIRST_TEXT_EVENT: &str = "llm.response.first_text";
+pub const FIRST_OUTPUT_EVENT: &str = "llm.response.first_output";
 pub const REQUEST_FINISHED_EVENT: &str = "llm.request.finished";
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, NodeValue)]

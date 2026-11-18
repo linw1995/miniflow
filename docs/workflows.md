@@ -666,13 +666,6 @@ are not assumed to be business failures.
 Invocation drains incremental emissions terminally without exposing Router stream ports. Ordinary
 `workflow.call` syntax and topology are unchanged.
 
-A Router can opt into correlated call observations with `config.observe`, a nonblank category label,
-and the optional `observation_id` input. Use a public, non-sensitive identifier, not an argument or
-result. Router emits `mf.call.execution` records on its trace only for a selected body that it invokes;
-missing, blank, oversized, control-containing, or secret identifiers are not emitted. The outcome is
-captured before business-error packing. The shared tool dispatcher opts in with `observe: "tool"`
-and the model's tool-call ID. This adds no stream outputs or execution dependencies.
-
 ## Node clusters
 
 Version `2026-10-23` accepts an optional `clusters` array in the root graph and in Loop and Iteration bodies. Clusters
@@ -1416,9 +1409,9 @@ workflow outputs when observing mixed text/tool responses, for example:
 ```
 
 Selecting a stream port enables native streaming execution. Ordinary downstream nodes connected to
-one stream port are skipped on emissions from the other port. Tool-only responses emit neither empty
-text deltas nor a first-text observation. Incomplete or malformed arguments do not produce a completed
-tool event. Usage, deadlines, cancellation, and error capture retain the same contracts as text calls.
+one stream port are skipped on emissions from the other port. Tool-only responses emit no empty text
+deltas; their first tool-call delta emits the request's single first-output observation. Incomplete
+or malformed arguments do not produce a completed tool event. Usage, deadlines, cancellation, and error capture retain the same contracts as text calls.
 Cancellation and publication failure remain execution failures even with error capture enabled.
 This interface supports text and function tools, not media inputs.
 

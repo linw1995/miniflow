@@ -8,9 +8,25 @@ Rig buffers Chat Completions arguments before yielding its tool-call event. The 
 
 ## Execution observations
 
-Router can opt into a static observation category and an optional public `observation_id`. ToolUses supplies the tool-call ID on the existing classification-to-Router data edge. Call measures the selected body inside its invocation boundary and reports the outcome before business-error packing. An unused route or rejected call cannot emit a start. Records carry an attempt identity, public labels, phase, and the existing source timestamp and trace context, not arguments, results, or error payloads.
+`mf-chat` projects execution from the existing records used by the execution panel. A snapshot containing
+public ToolCall `id` and `name` binds that identity to its run and exact runtime scope without retaining
+arguments. Ordinary Flow calls use their existing CallStarted/CallFinished boundaries. Inside Iteration,
+node records identify the unique direct child scope and its invoker from runtime ancestry, not receipt
+order or overlapping timestamps. A direct body failure remains failed even when the invoker packs a
+business-error result.
 
-`mf-chat` collects execution metrics per invocation through the existing local observation callback. The TUI receiver reduces the same records after run and workflow validation. Each collector bounds retention, accepts duplicate or reordered delivery, and leaves conflicting or missing terminal evidence unknown. No separate exporter, model stream, storage schema, or dispatch step participates.
+Native chat subscribes to existing lifecycle and Iteration records plus a SnapshotRecorder. The compiled receiver feeds the same projection after decoding and admission, using the same Iteration path reconstruction as the execution panel. No Router configuration, dedicated execution event, exporter, model stream, storage schema, or dispatch step participates.
+
+Preview identity, scope binding, execution lifecycle, canonical transcript, and observation closure are
+independent inputs. The projection retains bounded pending evidence and joins by ID, scope, path, RunId,
+and original sequence rather than arrival order. A snapshot without an actual child execution is not
+listed; missing or conflicting evidence is unknown. Transcript results never establish success. Only
+explicit caller or runner interruption turns an unfinished started call into Interrupted; ordinary
+closure without a terminal remains unknown.
+
+## First output timing
+
+The first nonempty text or tool-call delta marks first output before publication or backpressure. Identity and name hints count as tool-call output. The existing request start and finish facts determine the model timing window; no raw delta or tool execution is included in accounting. The reply footer and graph card show FTT without a call coverage fraction.
 
 ## Presentation
 

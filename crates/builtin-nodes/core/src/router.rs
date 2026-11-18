@@ -16,8 +16,6 @@ struct Config {
     routes: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_enables")]
     enables: Option<Vec<String>>,
-    #[serde(default)]
-    observe: Option<String>,
 }
 fn deserialize_enables<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -31,8 +29,6 @@ pub enum RouterBuildError {
     Route { route: String },
     #[snafu(display("Router enables contains a duplicate or unknown route `{route}`"))]
     Enable { route: String },
-    #[snafu(display("Router observation category must be a nonblank label of at most 256 bytes"))]
-    Observation,
 }
 impl From<RouterBuildError> for NodeBuildError {
     fn from(source: RouterBuildError) -> Self {
@@ -51,13 +47,6 @@ fn validate_routes(routes: &[String]) -> Result<(), RouterBuildError> {
 }
 fn validate(config: &Config) -> Result<(), RouterBuildError> {
     validate_routes(&config.routes)?;
-    ensure!(
-        config
-            .observe
-            .as_deref()
-            .is_none_or(mf_telemetry::events::CallExecution::valid_label),
-        ObservationSnafu
-    );
     let known: BTreeSet<_> = config.routes.iter().collect();
     if let Some(enables) = &config.enables {
         let mut enabled = BTreeSet::new();
@@ -93,16 +82,12 @@ struct Router {
 }
 impl NodePortContract for Router {
     fn ports(&self) -> NodePorts {
-        let mut inputs = vec![
-            PortSpec::new("route", ValueType::String, true),
-            PortSpec::new("arguments", ValueType::Object, true),
-            PortSpec::new("flows", ValueType::Map(Box::new(ValueType::Flow)), false),
-        ];
-        if self.config.observe.is_some() {
-            inputs.push(PortSpec::new("observation_id", ValueType::String, false));
-        }
         NodePorts {
-            inputs,
+            inputs: vec![
+                PortSpec::new("route", ValueType::String, true),
+                PortSpec::new("arguments", ValueType::Object, true),
+                PortSpec::new("flows", ValueType::Map(Box::new(ValueType::Flow)), false),
+            ],
             outputs: vec![PortSpec::new("result", ValueType::Object, true)],
         }
     }
@@ -151,19 +136,10 @@ impl TaskNode for Router {
             )])
             .into());
         }
-        // Metadata is opt-in and never taken from the packed arguments or result.
-        let observation_id = inputs
-            .get("observation_id")
-            .filter(|id| !id.is_secret() && !route.is_secret() && !enables.contains_secret())
-            .and_then(ValueRef::as_str)
-            .filter(|id| mf_telemetry::events::CallExecution::valid_label(id))
-            .map(str::to_owned);
-        let observation = self
-            .config
-            .observe
-            .as_deref()
-            .zip(observation_id.as_deref());
-        let mut result = call.execute_packed(inputs, context, configured.as_ref(), observation)?;
+        let mut result = match configured {
+            Some(flow) => call.execute_packed_with_flow(inputs, context, &flow)?,
+            None => call.execute_packed(inputs, context)?,
+        };
         for value in result.outputs.values_mut() {
             *value = value.clone().inherit_secrets([&route, enables]);
         }
@@ -370,99 +346,6 @@ mod tests {
     }
 
     #[test]
-    fn observes_the_selected_body_not_the_router_envelope() {
-        use mf_telemetry::events::{
-            CALL_EXECUTION_EVENT, CallExecution, CallExecutionPhase, collect,
-        };
-        use std::sync::{Arc, Mutex};
-
-        for (mode, expected) in [
-            ("success", Some(CallExecutionPhase::Succeeded)),
-            ("business_failure", Some(CallExecutionPhase::Failed)),
-            ("cancelled", Some(CallExecutionPhase::Interrupted)),
-            ("disabled", None),
-            ("secret", None),
-            ("missing", None),
-        ] {
-            let events = Arc::new(Mutex::new(Vec::new()));
-            let observed = events.clone();
-            let _record = collect(move |event| {
-                assert_eq!(event.name, CALL_EXECUTION_EVENT);
-                assert!(!event.body.to_string().contains("private payload"));
-                observed
-                    .lock()
-                    .unwrap()
-                    .push(serde_json::from_value::<CallExecution>(event.body.clone()).unwrap());
-            });
-            let during = events.clone();
-            let body = PreparedSubgraph::new(vec![], vec![], move |state| {
-                assert_ne!(mode, "disabled");
-                assert_eq!(
-                    during.lock().unwrap().first().map(|call| call.phase),
-                    expected.map(|_| CallExecutionPhase::Running)
-                );
-                if mode == "business_failure" {
-                    return Err(mf_runtime::WorkflowRunError::NodeExecution {
-                        definition_id: "body".into(),
-                        source: mf_runtime::NodeExecutionFailedSnafu {
-                            message: "private payload",
-                        }
-                        .build(),
-                    });
-                }
-                if mode == "cancelled" {
-                    state.cancellation().cancel(
-                        mf_runtime::StreamExecutionSnafu {
-                            message: "cancelled",
-                        }
-                        .build(),
-                    );
-                }
-                Ok(Outputs::new())
-            });
-            let mut config = json!({"routes":["chosen"],"observe":"tool"});
-            if mode == "disabled" {
-                config["enables"] = json!([]);
-            }
-            let prepared =
-                prepared_factory("choose", config, BTreeMap::from([("chosen".into(), body)]))
-                    .unwrap();
-            let mut inputs = Inputs::from([
-                ("route".into(), ValueRef::from("chosen")),
-                ("arguments".into(), ValueRef::object([])),
-            ]);
-            if mode != "missing" {
-                let id = if mode == "secret" {
-                    ValueRef::from("private payload").into_secret()
-                } else {
-                    ValueRef::from("wire-id")
-                };
-                inputs.insert("observation_id".into(), id);
-            }
-            let node = mf_runtime::FlowNode::new("choose", prepared)
-                .into_task()
-                .unwrap();
-            let result = node.node.execute(inputs, &mut ExecutionContext::default());
-            assert_eq!(result.is_err(), mode == "cancelled");
-            if mode == "business_failure" {
-                assert!(result.unwrap().outputs["result"].get("error").is_some());
-            }
-            let events = events.lock().unwrap();
-            if let Some(phase) = expected {
-                let [start, end] = events.as_slice() else {
-                    panic!("expected a measured call: {events:?}");
-                };
-                assert_eq!(start.correlation_id, "wire-id");
-                assert_eq!(start.name, "chosen");
-                assert_eq!(start.attempt, end.attempt);
-                assert_eq!(end.phase, phase);
-            } else {
-                assert!(events.is_empty());
-            }
-        }
-    }
-
-    #[test]
     fn configuration_is_strict_and_children_must_match_routes() {
         for config in [
             json!({}),
@@ -473,7 +356,6 @@ mod tests {
             json!({"routes":["a"],"enables":["a","a"]}),
             json!({"routes":[],"enables":null}),
             json!({"routes":[],"mode":"execute"}),
-            json!({"routes":[],"observe":" "}),
             json!({"routes":[],"flow_field":"run"}),
             json!({"routes":["missing"]}),
         ] {

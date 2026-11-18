@@ -325,7 +325,7 @@ fn streamed_tool(arguments: &str, finish_reason: &str) -> Reply {
 }
 
 #[test]
-fn tool_only_streams_publish_calls_without_text_or_first_text_observations() {
+fn tool_only_streams_publish_calls_and_measure_first_output() {
     let server = Server::start(vec![streamed_tool(r#"{"key":"a"}"#, "tool_calls")]);
     let output = invoke(
         &server,
@@ -348,7 +348,9 @@ fn tool_only_streams_publish_calls_without_text_or_first_text_observations() {
         deltas[1]["tool_call"]["call"],
         result["outputs"]["tool_calls"][0]
     );
-    assert_eq!(result["events"].as_array().unwrap().len(), 2);
+    let events = result["events"].as_array().unwrap();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[1]["name"], mfn_llm::FIRST_OUTPUT_EVENT);
 }
 
 #[test]

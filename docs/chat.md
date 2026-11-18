@@ -444,9 +444,10 @@ and partially reported subtotals are not complete totals. SQL aggregation detect
 
 `mfn_llm::CallUsage` contains provider call facts. `mf_chat::CallUsage` adds event-derived
 `timing.elapsed_us` and optional `timing.first_token_us` without changing their flat JSON shape.
-The LLM emits `llm.request.started`, `llm.response.first_text`, and `llm.request.finished`; observation
-stamps source Unix nanoseconds once. The first-text event precedes publication and backpressure;
-empty or metadata-only events do not count. The application correlates call IDs and derives
+The LLM emits `llm.request.started`, `llm.response.first_output`, and `llm.request.finished`; observation
+stamps source Unix nanoseconds once. The first-output event precedes publication and backpressure for the
+first nonempty text or tool-call delta; empty or metadata-only events do not count. The application
+correlates call IDs and derives
 microsecond differences. Executable chat receives the same events through OTLP before settlement.
 Missing, conflicting, or noncausal sequences stay unknown; receiver arrival time is not substituted.
 Raw standalone node outputs do not compute application timing.
@@ -462,7 +463,7 @@ paired-token rates. Each includes reported/missing coverage. Aggregation sums pa
 positive durations rather than averaging per-call rates. Monetary estimates need separate pricing.
 
 A turn displays one dim footer, for example `FTT 500ms · Gen 66.7 | E2E 50.0 tok/s`. Narrow views
-prioritize FTT and generation throughput. Multiple calls show mean FTT, coverage, and weighted rates;
+prioritize FTT and generation throughput. Multiple calls show mean FTT and weighted rates;
 unknown values stay `—`. Conversation and unlabeled calls contribute; other explicit purposes do not.
 Message pages attach required facts once per visible turn, including pages starting with a tool
 result. Rendering and reload never multiply charges by message count. Retained results keep the same
@@ -582,9 +583,11 @@ settled group displays its complete canonical arguments. Reopening history shows
 and reads complete saved arguments from `messages`; delta history, fold state, and omission markers
 are not persisted. Live assistant blocks use model-call IDs and the same spacing between messages
 and tools as settled replies. The status on each tool header
-comes separately from runtime observations, matched by call ID. An observed call without a matching
+comes from existing snapshots and Flow or Iteration lifecycle records, matched by public call ID and
+exact runtime scope without Router-specific configuration. Native and compiled chats share the
+invocation-local projection and tolerate record reordering. An observed call without a matching
 preview appears under `Observed tools`. `ChatJob::tool_metrics()` exposes the in-process view by
-call ID. Missing observations never imply a start or success.
+call ID. Missing observations and canonical tool results never imply a start or success.
 
 The fold marker leads the group header. Focus and expansion follow a group when a late ID makes it
 identifiable. Tool Flow completion updates the group's status in place but does not prematurely

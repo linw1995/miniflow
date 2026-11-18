@@ -182,7 +182,7 @@ impl mf_runtime::TypedTaskStreamNode for Embedded {
         };
         mf_telemetry::events::record(mfn_llm::REQUEST_STARTED_EVENT, serde_json::json!(&usage));
         mf_telemetry::events::record(
-            mfn_llm::FIRST_TEXT_EVENT,
+            mfn_llm::FIRST_OUTPUT_EVENT,
             serde_json::json!({"call_id":call_id}),
         );
         emitter.send(Emission {

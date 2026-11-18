@@ -93,7 +93,7 @@ impl SubgraphNode for CallNode {
         sink: &mut dyn mf_runtime::EmissionSink,
     ) -> Result<NodeResult, NodeExecutionError> {
         let outputs = self
-            .invoke(WorkflowArguments(inputs), context, sink, None)
+            .invoke(WorkflowArguments(inputs), context, sink)
             .context(CallFailureSnafu {
                 node: &self.id,
                 flow: &self.flow,
@@ -141,29 +141,10 @@ impl CallNode {
         arguments: WorkflowArguments,
         context: &mut ExecutionContext,
         sink: &mut dyn mf_runtime::EmissionSink,
-        observation: Option<(&str, &str)>,
     ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
-        use mf_telemetry::events::{CallExecution, CallExecutionPhase};
         let mut stream = SubgraphStream::new(self.id.as_str(), context, sink);
         context.run_call(&self.scope_key, arguments, &self.body.nodes, |state| {
-            let cancellation = state.cancellation();
-            let observed = observation.and_then(|(category, correlation_id)| {
-                if cancellation.failure().is_some() {
-                    return None;
-                }
-                CallExecution::start(category, correlation_id, &self.flow)
-            });
-            let result = self.body.invoke_with_sink(state, &mut stream);
-            if let Some(observed) = observed {
-                observed.finish(if cancellation.failure().is_some() {
-                    CallExecutionPhase::Interrupted
-                } else if result.is_err() {
-                    CallExecutionPhase::Failed
-                } else {
-                    CallExecutionPhase::Succeeded
-                });
-            }
-            result
+            self.body.invoke_with_sink(state, &mut stream)
         })
     }
 
@@ -172,8 +153,24 @@ impl CallNode {
         &self,
         inputs: Inputs,
         context: &mut ExecutionContext,
+    ) -> Result<NodeResult, NodeExecutionError> {
+        self.execute_packed_configured(inputs, context, None)
+    }
+
+    pub fn execute_packed_with_flow(
+        &self,
+        inputs: Inputs,
+        context: &mut ExecutionContext,
+        flow: &mf_runtime::FlowValue,
+    ) -> Result<NodeResult, NodeExecutionError> {
+        self.execute_packed_configured(inputs, context, Some(flow))
+    }
+
+    fn execute_packed_configured(
+        &self,
+        inputs: Inputs,
+        context: &mut ExecutionContext,
         flow: Option<&mf_runtime::FlowValue>,
-        observation: Option<(&str, &str)>,
     ) -> Result<NodeResult, NodeExecutionError> {
         if let Some(error) = context.cancellation().failure() {
             return Err(error.into());
@@ -192,12 +189,7 @@ impl CallNode {
             }
             arguments.qualify_inputs(&self.body.inputs)?;
             self.body.inputs.mark_secrets(&mut arguments);
-            self.invoke(
-                arguments,
-                context,
-                &mut mf_runtime::DiscardSink,
-                observation,
-            )
+            self.invoke(arguments, context, &mut mf_runtime::DiscardSink)
         })();
         if let Some(error) = context.cancellation().failure() {
             return Err(error.into());
@@ -341,8 +333,6 @@ mod tests {
             node.execute_packed(
                 Inputs::from([("arguments".into(), mf_runtime::ValueRef::from(json!({})))]),
                 context,
-                None,
-                None,
             )
         })
     }

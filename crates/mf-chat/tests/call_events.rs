@@ -23,7 +23,7 @@ impl ConversationBackend for Backend {
         let start =
             mf_telemetry::events::record(mfn_llm::REQUEST_STARTED_EVENT, json!(&usage)).unwrap();
         let first = mf_telemetry::events::record(
-            mfn_llm::FIRST_TEXT_EVENT,
+            mfn_llm::FIRST_OUTPUT_EVENT,
             json!({"call_id":usage.call_id}),
         )
         .unwrap();

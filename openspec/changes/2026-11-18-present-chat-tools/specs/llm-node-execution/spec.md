@@ -20,3 +20,31 @@ The LLM node SHALL expose an optional `tool_call_delta` stream with original non
 
 - **WHEN** the provider response ends with malformed or truncated arguments
 - **THEN** its raw fragments may have been previewed but no completed event is synthesized from the partial arguments
+
+## MODIFIED Requirements
+
+### Requirement: Emit source-timestamped model request observations
+
+Each attempted provider operation SHALL emit request-started and request-finished observations with a call identity. Streaming calls SHALL emit one first-output observation before publishing the first nonempty text or tool-call delta. The observation layer SHALL supply timestamps. LLM execution MUST NOT calculate request duration or first-output latency using a node-local timer.
+
+#### Scenario: Receive a streaming answer
+
+- **WHEN** a provider sends empty or metadata-only events before nonempty text
+- **THEN** the first-output event identifies the first nonempty decoded text before publication and backpressure
+- **AND** the request-finished event precedes terminal conversion or persistence
+
+#### Scenario: Start with a tool call
+
+- **WHEN** a provider sends a tool-call identity, name, or argument delta before any text
+- **THEN** the first-output event precedes publication of that delta
+- **AND** later text or tool-call deltas do not emit another first-output event for the same call
+
+#### Scenario: Complete without a stream subscription
+
+- **WHEN** the node executes its unary request path
+- **THEN** it emits request boundary observations without a first-output event
+
+#### Scenario: Capture a failed provider attempt
+
+- **WHEN** a provider operation fails and the node returns a captured failure
+- **THEN** request observations retain the call identity and available facts without claiming successful throughput

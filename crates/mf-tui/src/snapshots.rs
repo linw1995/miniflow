@@ -204,7 +204,16 @@ pub struct HistorySnapshot {
 }
 
 impl SnapshotCapture {
-    pub fn admit(&mut self, record: LogRecord) -> Result<(), Arc<CaptureError>> {
+    #[cfg(test)]
+    fn admit(&mut self, record: LogRecord) -> Result<(), Arc<CaptureError>> {
+        self.admit_with(record, |_, _| {})
+    }
+
+    pub fn admit_with(
+        &mut self,
+        record: LogRecord,
+        mut observe: impl FnMut(&[LoopPathEntry], &NodeSnapshot),
+    ) -> Result<(), Arc<CaptureError>> {
         if self.finished {
             return Err(Arc::new(ClosedSnafu.build()));
         }
@@ -261,14 +270,16 @@ impl SnapshotCapture {
                     metadata.received_at = Some(std::time::Instant::now());
                     self.metadata.push(metadata);
                 }
-                if let (Some((scope, node)), Some(correlation)) = (node, correlation) {
+                if let Some((scope, node)) = node {
                     let snapshot = self
                         .store
                         .current()
                         .node(&scope, &node)
-                        .expect("admitted node snapshots exist in the store")
-                        .clone();
-                    self.nodes_by_span.insert(correlation, snapshot);
+                        .expect("admitted node snapshots exist in the store");
+                    observe(&scope, snapshot);
+                    if let Some(correlation) = correlation {
+                        self.nodes_by_span.insert(correlation, snapshot.clone());
+                    }
                 }
             }
             Ok(())
