@@ -45,6 +45,17 @@ pub struct ToolCallEvent {
     pub call: ToolCall,
 }
 
+/// A raw argument fragment from the primary Chat Completions choice. It is not a tool call
+/// ready for dispatch. Identity and name are wire hints present only when sent alongside this fragment.
+#[derive(Clone, Debug, PartialEq, Eq, NodeValue)]
+pub struct ToolCallDelta {
+    pub model_call_id: String,
+    pub index: u64,
+    pub arguments: String,
+    pub id: Option<String>,
+    pub name: Option<String>,
+}
+
 impl ToolCall {
     pub fn from_provider(call: rig::ToolCall) -> Result<Self, LlmExecutionError> {
         let id = call.id.wire().into_owned();

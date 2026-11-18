@@ -455,10 +455,18 @@ fn event_backpressure_does_not_prevent_cancellation_or_shutdown_before_launch() 
 }
 
 fn live_launch(directory: &Path, mode: &str) -> (ChatLaunch, std::path::PathBuf) {
-    let manifest = live_manifest();
+    let mut manifest = live_manifest();
     let gate = directory.join("release");
+    let prefix = if mode == "gated_tool_call" {
+        let output = manifest.graph.definition.outputs.last_mut().unwrap();
+        output.name = "tool_call_delta".into();
+        output.port = "tool_call_delta".into();
+        json!({"tool_call_delta":{"arguments":"{\"query\":","model_call_id":"model-call","index":0}})
+    } else {
+        json!({"answer":{"text":"provisional","model_call_id":"model-call"}})
+    };
     let records = json!([
-        {"answer":{"text":"provisional","model_call_id":"model-call"}},
+        prefix,
         {"append":{"status":"succeeded","messages":[{"role":"assistant","content":"canonical"}],"usages":[]}}
     ]);
     // Exceed preview and queue limits without turning delivery checks into a throughput benchmark.
@@ -484,7 +492,7 @@ if mode == 'malformed': records.append({{'append': {{'status': 'succeeded', 'mes
 split = 0 if mode == 'empty' else 1
 for record in records[:split]:
     print(json.dumps(record), flush=True)
-if mode == 'gated':
+if mode in ('gated', 'gated_tool_call'):
     while not os.path.exists({gate:?}): time.sleep(0.01)
 if mode == 'prefix': sys.exit(2)
 for record in records[split:]: print(json.dumps(record), flush=True)
@@ -500,49 +508,57 @@ if mode == 'late':
 
 #[test]
 fn executable_live_previews_arrive_before_authoritative_settlement() {
-    let root = tempfile::tempdir().unwrap();
-    let (launch, gate) = live_launch(root.path(), "gated");
-    let controller = ChatController::open(launch).unwrap();
-    controller
-        .send(ChatCommand::Submit {
-            session_id: None,
-            prompt: "hello".into(),
-        })
-        .unwrap();
-    let invocation = loop {
-        if let ChatEvent::Preview {
-            invocation,
-            preview,
-        } = next(&controller)
-            && preview
-                .segments
-                .iter()
-                .any(|segment| !segment.text.is_empty())
-        {
-            break invocation;
-        }
-    };
-    assert!(controller.busy());
-    assert_eq!(
+    for (mode, expected_fragment) in [("gated", "provisional"), ("gated_tool_call", "{\"query\":")]
+    {
+        let root = tempfile::tempdir().unwrap();
+        let (launch, gate) = live_launch(root.path(), mode);
+        let controller = ChatController::open(launch).unwrap();
         controller
-            ._database
-            .messages(&invocation.session_id, 50, None)
-            .unwrap()
-            .messages
-            .len(),
-        1
-    );
-    fs::write(gate, "release").unwrap();
-    loop {
-        if let ChatEvent::Finished { resolution, .. } = next(&controller) {
-            let CompletionState::Committed(completion) = resolution.unwrap().state else {
-                panic!("expected saved final")
-            };
-            assert_eq!(completion.result.final_text(), Some("canonical"));
-            break;
+            .send(ChatCommand::Submit {
+                session_id: None,
+                prompt: "hello".into(),
+            })
+            .unwrap();
+        let invocation = loop {
+            match next(&controller) {
+                ChatEvent::Preview {
+                    invocation,
+                    preview,
+                } => {
+                    assert_eq!(preview.segments.len(), 1);
+                    assert_eq!(preview.segments[0].text, expected_fragment);
+                    assert_eq!(
+                        preview.segments[0].tool.is_some(),
+                        mode == "gated_tool_call"
+                    );
+                    break invocation;
+                }
+                ChatEvent::Finished { .. } => panic!("settled before preview delivery"),
+                _ => {}
+            }
+        };
+        assert!(controller.busy());
+        assert_eq!(
+            controller
+                ._database
+                .messages(&invocation.session_id, 50, None)
+                .unwrap()
+                .messages
+                .len(),
+            1
+        );
+        fs::write(gate, "release").unwrap();
+        loop {
+            if let ChatEvent::Finished { resolution, .. } = next(&controller) {
+                let CompletionState::Committed(completion) = resolution.unwrap().state else {
+                    panic!("expected saved final")
+                };
+                assert_eq!(completion.result.final_text(), Some("canonical"));
+                break;
+            }
         }
+        controller.close().unwrap();
     }
-    controller.close().unwrap();
 }
 
 #[test]
@@ -690,10 +706,13 @@ fn invalid_terminal_records_invalidate_native_recovery_instead_of_saving_first()
 }
 
 #[test]
-fn answer_selection_requires_native_streaming_execution() {
-    let mut manifest = live_manifest();
-    manifest.graph.definition.execution = None;
-    assert!(ChatContract::from_manifest(&manifest).is_err());
+fn preview_selections_require_native_streaming_execution() {
+    for name in ["answer", "tool_call_delta"] {
+        let mut manifest = live_manifest();
+        manifest.graph.definition.execution = None;
+        manifest.graph.definition.outputs.last_mut().unwrap().name = name.into();
+        assert!(ChatContract::from_manifest(&manifest).is_err());
+    }
 }
 
 #[test]

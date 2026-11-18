@@ -115,7 +115,7 @@ pub use recovery::{
 pub struct ChatContract {
     pub parameters: WorkflowInputSchema,
     pub answer_stream: bool,
-    pub activity_streams: std::collections::BTreeSet<String>,
+    pub tool_call_delta_stream: bool,
     pub streaming: bool,
     inputs: BTreeMap<String, String>,
     pub alternatives: ResultAlternatives,
@@ -123,14 +123,16 @@ pub struct ChatContract {
 
 impl ChatContract {
     pub fn has_previews(&self) -> bool {
-        self.answer_stream || !self.activity_streams.is_empty()
+        self.answer_stream || self.tool_call_delta_stream
     }
 
-    pub fn preview_streams(&self) -> impl Iterator<Item = &str> {
-        self.answer_stream
-            .then_some("answer")
-            .into_iter()
-            .chain(self.activity_streams.iter().map(String::as_str))
+    pub fn preview_streams(&self) -> impl Iterator<Item = &'static str> {
+        [
+            self.answer_stream.then_some("answer"),
+            self.tool_call_delta_stream.then_some("tool_call_delta"),
+        ]
+        .into_iter()
+        .flatten()
     }
 
     /// Returns the qualified workflow ports bound to conversation inputs.
@@ -228,33 +230,21 @@ impl ChatContract {
                 .fail(),
             };
         let streaming = manifest.description()?.is_streaming();
-        let answer_stream = manifest
-            .graph
-            .definition
-            .outputs
+        let answer_stream = outputs.iter().any(|output| output.name == "answer");
+        let tool_call_delta_stream = outputs
             .iter()
-            .any(|output| output.name == "answer");
-        let activity_streams = outputs
-            .iter()
-            .filter(|output| {
-                matches!(
-                    output.name.as_ref(),
-                    "tool_call" | "tool_started" | "tool_finished"
-                )
-            })
-            .map(|output| output.name.to_string())
-            .collect::<std::collections::BTreeSet<_>>();
+            .any(|output| output.name == "tool_call_delta");
         ensure!(
-            (!answer_stream && activity_streams.is_empty()) || streaming,
+            (!answer_stream && !tool_call_delta_stream) || streaming,
             InvalidSnafu {
-                field: "answer stream",
+                field: "conversation preview",
                 reason: "requires native streaming execution"
             }
         );
         Ok(Self {
             parameters: configuration,
             answer_stream,
-            activity_streams,
+            tool_call_delta_stream,
             streaming,
             inputs,
             alternatives,
@@ -420,7 +410,7 @@ pub fn decode_answer_delta(
 /// Validates native workflow output records against the conversation protocol.
 pub struct ConversationOutputDecoder {
     answer: bool,
-    activities: std::collections::BTreeSet<String>,
+    tool_call_delta: bool,
     terminal: TerminalResultDecoder,
 }
 
@@ -428,7 +418,7 @@ impl ConversationOutputDecoder {
     pub fn new(contract: &ChatContract) -> Self {
         Self {
             answer: contract.answer_stream,
-            activities: contract.activity_streams.clone(),
+            tool_call_delta: contract.tool_call_delta_stream,
             terminal: TerminalResultDecoder::new(contract.alternatives),
         }
     }
@@ -438,42 +428,12 @@ impl ConversationOutputDecoder {
         mut values: NodeValues,
     ) -> Result<Option<crate::PreviewDelta>, ChatError> {
         let answer = values.remove("answer");
-        let activities: Vec<_> = ["tool_call", "tool_started", "tool_finished"]
-            .into_iter()
-            .filter_map(|name| values.remove(name).map(|value| (name, value)))
-            .collect();
+        let tool_call_delta = values.remove("tool_call_delta");
         // Count terminal alternatives even when a mixed record carries an invalid preview.
         self.terminal.accept(values)?;
-        ensure!(
-            activities.len() + usize::from(answer.is_some()) <= 1,
-            InvalidSnafu {
-                field: "conversation preview",
-                reason: "requires one preview event per record"
-            }
-        );
-        if let Some((name, value)) = activities.into_iter().next() {
-            ensure!(
-                self.activities.contains(name),
-                InvalidSnafu {
-                    field: "tool activity stream",
-                    reason: "was not declared by the workflow"
-                }
-            );
-            let activity =
-                <crate::ToolActivity as mf_runtime::InputField>::decode_field(name, Some(value))?;
-            ensure!(
-                activity.stream_name() == name,
-                InvalidSnafu {
-                    field: "tool activity stream",
-                    reason: "event kind does not match the stream"
-                }
-            );
-            let delta = crate::PreviewDelta::from(activity);
-            delta.validate()?;
-            return Ok(Some(delta));
-        }
-        let delta = answer
-            .map(|value| -> Result<_, ChatError> {
+        let delta = match (answer, tool_call_delta) {
+            (None, None) => return Ok(None),
+            (Some(value), None) => {
                 ensure!(
                     self.answer,
                     InvalidSnafu {
@@ -481,18 +441,32 @@ impl ConversationOutputDecoder {
                         reason: "was not declared by the workflow"
                     }
                 );
-                let delta = decode_answer_delta(&value)?;
+                crate::PreviewDelta::from(decode_answer_delta(&value)?)
+            }
+            (None, Some(value)) => {
                 ensure!(
-                    !delta.text.is_empty() && !delta.model_call_id.trim().is_empty(),
+                    self.tool_call_delta,
                     InvalidSnafu {
-                        field: "answer stream",
-                        reason: "requires nonempty text and a model call identity"
+                        field: "tool_call_delta stream",
+                        reason: "was not declared by the workflow"
                     }
                 );
-                Ok(delta.into())
-            })
-            .transpose()?;
-        Ok(delta)
+                let delta = <crate::ToolCallDelta as mf_runtime::InputField>::decode_field(
+                    "tool_call_delta",
+                    Some(value),
+                )?;
+                crate::PreviewDelta::from(delta)
+            }
+            (Some(_), Some(_)) => {
+                return InvalidSnafu {
+                    field: "conversation preview",
+                    reason: "requires one preview event per record",
+                }
+                .fail();
+            }
+        };
+        delta.validate()?;
+        Ok(Some(delta))
     }
 
     pub fn result(&self) -> Option<&ConversationResult> {
@@ -514,7 +488,7 @@ mod output_tests {
             alternatives: ResultAlternatives::Both,
             parameters: Default::default(),
             answer_stream: answer,
-            activity_streams: Default::default(),
+            tool_call_delta_stream: false,
             streaming: true,
             inputs: Default::default(),
         })
@@ -525,45 +499,44 @@ mod output_tests {
     }
 
     #[test]
-    fn tool_previews_require_declared_matching_streams_and_valid_identities() {
-        for (name, event) in [
-            (
-                "tool_call",
-                json!({"kind":"call", "model_call_id":"model", "part":0, "arguments":"{"}),
-            ),
-            (
-                "tool_started",
-                json!({"kind":"running", "tool_call_id":"id", "name":"lookup"}),
-            ),
-            (
-                "tool_finished",
-                json!({"kind":"result", "tool_call_id":"id", "failed":false, "content":""}),
-            ),
+    fn tool_call_previews_require_a_declared_stream_and_safe_event_shapes() {
+        let fragment = json!({"model_call_id":"model", "index":0, "arguments":"{"});
+        let record = values(json!({"tool_call_delta":fragment}));
+        assert!(decoder(false).accept(record.clone()).is_err());
+        let mut declared = decoder(true);
+        declared.tool_call_delta = true;
+        let preview = declared.accept(record).unwrap().unwrap();
+        assert!(
+            matches!(preview, crate::PreviewDelta::ToolCall { delta } if delta.arguments == "{")
+        );
+        for event in [
+            json!({"model_call_id":" ","index":0,"arguments":"{"}),
+            json!({"model_call_id":"model","index":0,"arguments":""}),
         ] {
-            let record = values(json!({name:event}));
-            assert!(decoder(false).accept(record.clone()).is_err());
-            let mut declared = decoder(false);
-            declared.activities.insert(name.into());
-            let preview = declared.accept(record).unwrap().unwrap();
-            assert!(matches!(preview, crate::PreviewDelta::Tool { .. }));
+            assert!(matches!(
+                declared.accept(values(json!({"tool_call_delta":event}))),
+                Err(ChatError::Invalid { .. })
+            ));
         }
-        let mut declared = decoder(false);
-        declared
-            .activities
-            .extend(["tool_started".into(), "tool_finished".into()]);
-        for record in [
-            json!({"tool_started":{"kind":"result","tool_call_id":"id","failed":false,"content":"x"}}),
-            json!({"tool_started":{"kind":"running","tool_call_id":"","name":"lookup"}}),
-            json!({"tool_finished":{"kind":"result","tool_call_id":" ","failed":false,"content":"x"}}),
-            json!({"tool_finished":{"kind":"unknown"}}),
-            json!({"answer":{"text":"text","model_call_id":"model"},"tool_finished":{"kind":"result","tool_call_id":"id","failed":false,"content":"x"}}),
+        for event in [
+            json!({"kind":"not a delta"}),
+            json!({"model_call_id":"model","index":-1,"arguments":"{"}),
+            json!({"model_call_id":"model","index":0,"arguments":{}}),
+            json!({"model_call_id":"model","index":0,"arguments":"{","unexpected":true}),
         ] {
-            assert!(declared.accept(values(record)).is_err());
+            assert!(matches!(
+                declared.accept(values(json!({"tool_call_delta":event}))),
+                Err(ChatError::Decode { .. })
+            ));
         }
-        let mut conflict = decoder(false);
-        conflict.accept(values(json!({"append":{"status":"succeeded","messages":[{"role":"assistant","content":"first"}],"usages":[]}}))).unwrap();
-        assert!(conflict.accept(values(json!({"tool_finished":null,"append":{"status":"succeeded","messages":[{"role":"assistant","content":"other"}],"usages":[]}}))).is_err());
-        assert!(conflict.finish().is_err());
+        assert!(declared.accept(values(json!({"answer":{"text":"text","model_call_id":"model"},"tool_call_delta":fragment}))).is_err());
+        let terminal = json!({"append":{"status":"succeeded","messages":[{"role":"assistant","content":"canonical"}],"usages":[]}});
+        declared.accept(values(terminal.clone())).unwrap();
+        let mut conflict = terminal;
+        conflict["tool_call_delta"] = json!(null);
+        assert!(declared.accept(values(conflict)).is_err());
+        assert!(declared.result().is_none());
+        assert!(declared.finish().is_err());
     }
 
     #[test]

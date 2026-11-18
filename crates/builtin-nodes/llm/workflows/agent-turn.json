@@ -80,7 +80,7 @@
   ],
   "outputs": [
     {
-      "name": "tool_call",
+      "name": "tool_call_delta",
       "node": "model",
       "port": "tool_call_delta",
       "optional": true

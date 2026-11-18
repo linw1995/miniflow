@@ -494,13 +494,12 @@ fails delivery; shutdown interrupts blocked publishers. A completed job does not
 output. A valid terminal result retained before final drain remains available for explicit save-only
 recovery if drain fails. Text prefixes alone never become database messages or usage facts.
 
-Tool-aware chatflows may additionally select the shared Agent's optional `tool_call`, `tool_started`,
-and `tool_finished` outputs under those names. Tool-call events carry `kind: "call"`, `model_call_id`,
-`part`, raw `arguments` fragments, and an optional finalized `call`. Execution events carry
-`kind: "running"` with `tool_call_id` and `name`, or `kind: "result"` with `tool_call_id`, `failed`, and
-literal `content`. Only declared streams are accepted. `PreviewEvent.delta` distinguishes
-`PreviewDelta::Text` from `PreviewDelta::Tool`; none of these events enter history or model context.
-The calculator, context-replacement, and DeepSeek examples select all three streams explicitly.
+Tool-aware chatflows may select the shared Agent's optional `tool_call_delta` stream. Each event
+contains a raw `arguments` fragment, its `model_call_id`, and the provider tool `index`, with optional
+`id` and `name` hints when sent with that fragment. A fragment need not be valid JSON on its own.
+`PreviewEvent.delta` distinguishes `PreviewDelta::Text` from `PreviewDelta::ToolCall`. Neither enters
+history or model context. The calculator, context-replacement, and DeepSeek examples explicitly
+select `tool_call_delta`. A chatflow can select it without exposing `answer`.
 
 Terminal preview capture runs independently of drawing and inspection. It keeps at most 32 text/tool
 entries and 128 KiB of UTF-8 data, including correlation metadata, with an explicit truncation notice
@@ -570,10 +569,9 @@ published context; original records remain visible after compaction. Every assis
 batch, and tool result has a separate message-scoped presentation key. A result page without its
 preceding call batch still shows the tool-call ID without inventing a name or relabeling it as user
 text. Tool arguments and results are inert literal data, never prompts, Markdown images, or commands.
-Live calls show receiving, queued, running, succeeded, failed, or interrupted state from explicit
-lifecycle events. Saved tool results use neutral completed labels rather than inferring success from
-business content. Results are collapsed by default; expansion is keyed by turn and call ID and
-survives authoritative replacement and reload without editing stored messages.
+Live tool previews display argument fragments, not tool execution state. Tool results come from the
+authoritative display transcript and are collapsed by default. Expansion is keyed by turn and call
+ID and survives save and reload without editing stored messages.
 
 Assistant text supports Markdown in saved records, previews, and retained results: headings, emphasis,
 lists, tasks, quotes, links, tables, and code blocks. Headings show explicit levels `#1` through `#6`.

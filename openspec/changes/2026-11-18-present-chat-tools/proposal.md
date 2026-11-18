@@ -1,18 +1,17 @@
-# Present live tools in chat
+# Stream tool-call arguments and fold tool results in chat
 
 ## Why
 
-Chat currently previews assistant text but withholds tool calls and results until final settlement. Long-running tools therefore appear silent, and large saved tool results overwhelm the conversation.
+Chat should show the arguments a model is still generating without waiting for the tool-call batch to finish. Large tool results should not fill the conversation window by default.
 
 ## What changes
 
-- Publish optional typed tool-call fragments and execution lifecycle streams from the shared Agent.
-- Deliver invocation-scoped tool previews through the existing acknowledged conversation transport without changing settlement or model context.
-- Show receiving, queued, running, completed, failed, and interrupted tool states in the chat transcript.
-- Collapse live and saved tool results by default, with per-result keyboard navigation and expansion.
+- Expose raw provider argument fragments through an optional `tool_call_delta` stream, without changing the completed `tool_call` stream.
+- Deliver invocation-scoped argument previews through the existing conversation preview transport without changing settlement or model context.
+- Collapse authoritative tool results by default, with per-result keyboard navigation and expansion.
 
 ## Non-goals
 
-- Provider retries, altered tool selection, or speculative execution.
-- Persisting previews or deriving business arguments from telemetry snapshots.
+- Tool execution status, changes to dispatch ordering, or early execution from previews.
+- Persisting previews or reading business arguments from telemetry snapshots.
 - Interpreting tool results as Markdown, terminal commands, or image requests.

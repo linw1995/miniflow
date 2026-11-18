@@ -51,62 +51,44 @@ fn message(
     focused: Option<&str>,
 ) {
     use mf_chat::ChatMessage;
-    if let ChatMessage::ToolResult {
-        tool_call_id,
-        content,
-        ..
-    } = message
-    {
-        tool_result(
-            transcript,
-            turn,
+    let (label, content) = match message {
+        ChatMessage::User { content, .. } => ("You", content),
+        ChatMessage::System { content, .. } => ("System", content),
+        ChatMessage::Assistant { content, .. } => ("Assistant", content),
+        ChatMessage::ToolResult {
             tool_call_id,
             content,
-            "Completed",
-            (expanded, focused),
-        );
-        return;
-    }
-    let label = match message {
-        ChatMessage::User { .. } => "You".into(),
-        ChatMessage::System { .. } => "System".into(),
-        ChatMessage::Assistant { .. } => "Assistant".into(),
-        ChatMessage::ToolResult { tool_call_id, .. } => format!("Tool result [{tool_call_id}]"),
+            ..
+        } => {
+            tool_result(transcript, turn, tool_call_id, content, expanded, focused);
+            return;
+        }
     };
     transcript.plain(
         format!("{key}:label"),
-        vec![role_label(&label, Color::Cyan, None)],
+        vec![role_label(label, Color::Cyan, None)],
     );
-    match message {
-        ChatMessage::Assistant {
-            content,
-            tool_calls,
-            ..
-        } => {
-            transcript.markdown(format!("{key}:body"), content);
-            for (index, call) in tool_calls.iter().flatten().enumerate() {
-                transcript.plain(
-                    format!("{key}:call:{index}:label"),
-                    vec![role_label(
-                        &format!("Tool call {} [{}]", call.name, call.id),
-                        Color::Yellow,
-                        None,
-                    )],
-                );
-                let arguments = serde_json::to_string_pretty(&call.arguments)
-                    .unwrap_or_else(|error| format!("[Arguments unavailable: {error}]"));
-                transcript.literal(
-                    format!("{key}:call:{index}:arguments"),
-                    &arguments,
-                    Style::default(),
-                );
-            }
+    if let ChatMessage::Assistant { tool_calls, .. } = message {
+        transcript.markdown(format!("{key}:body"), content);
+        for (index, call) in tool_calls.iter().flatten().enumerate() {
+            transcript.plain(
+                format!("{key}:call:{index}:label"),
+                vec![role_label(
+                    &format!("Tool call {} [{}]", call.name, call.id),
+                    Color::Yellow,
+                    None,
+                )],
+            );
+            let arguments = serde_json::to_string_pretty(&call.arguments)
+                .unwrap_or_else(|error| format!("[Arguments unavailable: {error}]"));
+            transcript.literal(
+                format!("{key}:call:{index}:arguments"),
+                &arguments,
+                Style::default(),
+            );
         }
-        ChatMessage::User { content, .. }
-        | ChatMessage::System { content, .. }
-        | ChatMessage::ToolResult { content, .. } => {
-            transcript.literal(format!("{key}:body"), content, Style::default());
-        }
+    } else {
+        transcript.literal(format!("{key}:body"), content, Style::default());
     }
 }
 
@@ -119,24 +101,22 @@ fn tool_result(
     turn: &str,
     id: &str,
     content: &str,
-    status: &str,
-    presentation: (&BTreeSet<String>, Option<&str>),
+    expanded: &BTreeSet<String>,
+    focused: Option<&str>,
 ) {
-    let (expanded, focused) = presentation;
     let key = tool_key(turn, id);
     let open = expanded.contains(&key);
     transcript.plain(
         key.clone(),
         vec![role_label(
             &format!(
-                "{} Tool result [{}] [{}] {} ({} bytes)",
+                "{} Tool result [{}] {} ({} bytes)",
                 if focused == Some(key.as_str()) {
                     ">"
                 } else {
                     " "
                 },
                 id,
-                status,
                 if open { "v" } else { ">" },
                 content.len()
             ),
@@ -860,14 +840,6 @@ impl ChatView {
                     keys.push(tool_key(turn, tool_call_id));
                 }
             }
-        } else {
-            keys.extend(
-                self.preview
-                    .tools
-                    .iter()
-                    .filter(|t| t.content.is_some())
-                    .map(|t| tool_key(turn, &t.id)),
-            );
         }
         let mut seen = BTreeSet::new();
         keys.retain(|key| seen.insert(key.clone()));
@@ -877,6 +849,7 @@ impl ChatView {
     fn focus_tool(&mut self, previous: bool) {
         let keys = self.tool_keys();
         if keys.is_empty() {
+            self.focused_tool = None;
             return;
         }
         let current = self
@@ -1208,7 +1181,7 @@ impl ChatView {
             transcript.plain(format!("turn:{turn}:metadata"), metadata);
         } else {
             let loading = self.pending.is_some() || self.running;
-            let has_preview = !self.preview.order.is_empty();
+            let has_preview = !self.preview.segments.is_empty();
             if loading || has_preview {
                 let indicator = loading.then(|| {
                     let frame = (self.animation_started.elapsed().as_millis() / 100
@@ -1220,48 +1193,28 @@ impl ChatView {
                     vec![role_label("Assistant", Color::Cyan, indicator)],
                 );
             }
-            for item in &self.preview.order {
-                match *item {
-                    super::preview::PreviewItem::Text(index) => {
-                        let segment = &self.preview.segments[index];
-                        transcript.markdown(
-                            format!("turn:{turn}:preview:{}", segment.model_call_id),
-                            &segment.text,
-                        );
-                    }
-                    super::preview::PreviewItem::Tool(index) => {
-                        let tool = &self.preview.tools[index];
-                        let id = if tool.id.is_empty() {
-                            &tool.source
-                        } else {
-                            &tool.id
-                        };
-                        let key = format!("turn:{turn}:tool:{id}");
-                        let status = tool.state.label(self.preview.incomplete);
-                        transcript.plain(
-                            format!("{key}:label"),
-                            vec![role_label(
-                                &format!("Tool call {} [{}] [{status}]", tool.name, id),
-                                Color::Yellow,
-                                None,
-                            )],
-                        );
-                        transcript.literal(
-                            format!("{key}:arguments"),
-                            &tool.arguments,
-                            Style::default(),
-                        );
-                        if let Some(content) = &tool.content {
-                            tool_result(
-                                &mut transcript,
-                                turn,
-                                id,
-                                content,
-                                status,
-                                (&self.expanded_tools, self.focused_tool.as_deref()),
-                            );
-                        }
-                    }
+            for segment in &self.preview.segments {
+                if let Some(tool) = &segment.tool {
+                    let key = format!("turn:{turn}:tool:{}:{}", segment.model_call_id, tool.index);
+                    let reference = tool
+                        .id
+                        .clone()
+                        .unwrap_or_else(|| format!("index {}", tool.index));
+                    let label = if let Some(name) = &tool.name {
+                        format!("Tool call {name} [{reference}]")
+                    } else {
+                        format!("Tool call [{reference}]")
+                    };
+                    transcript.plain(
+                        format!("{key}:label"),
+                        vec![role_label(&label, Color::Yellow, None)],
+                    );
+                    transcript.literal(format!("{key}:arguments"), &segment.text, Style::default());
+                } else {
+                    transcript.markdown(
+                        format!("turn:{turn}:preview:{}", segment.model_call_id),
+                        &segment.text,
+                    );
                 }
             }
             let mut status = vec![];
@@ -1466,127 +1419,6 @@ mod tests {
     }
 
     #[test]
-    fn live_tools_show_states_and_results_expand_without_changing_conversation_facts() {
-        let root = tempfile::tempdir().unwrap();
-        let launch = super::super::tests::launch(root.path());
-        let mut view = ChatView::new(launch.runner.description()).unwrap();
-        view.show_execution = false;
-        let controller = ChatController::open(launch).unwrap();
-        let session = controller
-            ._database
-            .create_session("default", None, None)
-            .unwrap();
-        let invocation = Invocation::new(&session.id);
-        view.event(
-            ChatEvent::Submitted {
-                session: session.clone(),
-                invocation: invocation.clone(),
-                prompt: "Question".into(),
-            },
-            &controller,
-        );
-        view.preview.begin(invocation.clone());
-        let call = serde_json::from_value(
-            serde_json::json!({"id":"first","name":"lookup","arguments":{"query":"example"}}),
-        )
-        .unwrap();
-        for activity in [
-            mf_chat::ToolActivity::Call {
-                model_call_id: "model".into(),
-                part: 0,
-                arguments: "{\"query\":".into(),
-                call: None,
-            },
-            mf_chat::ToolActivity::Call {
-                model_call_id: "model".into(),
-                part: 0,
-                arguments: String::new(),
-                call: Some(call),
-            },
-        ] {
-            view.preview
-                .apply(mf_chat::PreviewEvent {
-                    invocation: invocation.clone(),
-                    delta: activity.into(),
-                })
-                .unwrap();
-        }
-        assert!(render(&view, 130, 40).contains("[Queued]"));
-        view.preview
-            .apply(mf_chat::PreviewEvent {
-                invocation: invocation.clone(),
-                delta: mf_chat::ToolActivity::Running {
-                    tool_call_id: "first".into(),
-                    name: "lookup".into(),
-                }
-                .into(),
-            })
-            .unwrap();
-        assert!(render(&view, 130, 40).contains("[Running]"));
-        view.preview
-            .apply(mf_chat::PreviewEvent {
-                invocation: invocation.clone(),
-                delta: mf_chat::ToolActivity::Result {
-                    tool_call_id: "first".into(),
-                    failed: false,
-                    content: "**literal**\n![inert](tool.png)\n\u{1b}[31m".into(),
-                }
-                .into(),
-            })
-            .unwrap();
-        let collapsed = render(&view, 130, 40);
-        assert!(collapsed.contains("[Succeeded]") && !collapsed.contains("**literal**"));
-        view.key(
-            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
-            &controller,
-        );
-        let expanded = render(&view, 130, 40);
-        assert!(expanded.contains("**literal**") && expanded.contains("![inert](tool.png)"));
-        assert!(expanded.contains("\\u{1b}[31m"));
-        assert_eq!(
-            controller
-                ._database
-                .model_context(&session.id)
-                .unwrap()
-                .revision,
-            0
-        );
-        assert_eq!(
-            controller
-                ._database
-                .messages(&session.id, 50, None)
-                .unwrap()
-                .messages
-                .len(),
-            0
-        );
-        view.key(
-            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
-            &controller,
-        );
-        assert!(!render(&view, 130, 40).contains("**literal**"));
-        view.preview
-            .apply(mf_chat::PreviewEvent {
-                invocation: invocation.clone(),
-                delta: mf_chat::ToolActivity::Running {
-                    tool_call_id: "second".into(),
-                    name: "fetch".into(),
-                }
-                .into(),
-            })
-            .unwrap();
-        view.preview.incomplete = true;
-        view.running = false;
-        let interrupted = render(&view, 130, 40);
-        assert!(interrupted.contains("[Interrupted]") && interrupted.contains("[Succeeded]"));
-        view.switch(None);
-        assert!(view.expanded_tools.is_empty() && view.focused_tool.is_none());
-        view.toggle_tool();
-        assert!(view.focused_tool.is_none());
-        controller.close().unwrap();
-    }
-
-    #[test]
     fn full_display_replaces_previews_and_survives_pending_reload_then_save() {
         for replace in [false, true] {
             let root = tempfile::tempdir().unwrap();
@@ -1629,10 +1461,36 @@ mod tests {
                     .into(),
                 })
                 .unwrap();
-            view.expanded_tools.extend([
-                tool_key(&begun.invocation.turn_id, "first"),
-                tool_key(&begun.invocation.turn_id, "second"),
-            ]);
+            for (arguments, label, hint) in [
+                ("{ \"query\": ", "Tool call [index 0]", false),
+                (
+                    "\"**preview argument**\" }",
+                    "Tool call lookup [first]",
+                    true,
+                ),
+            ] {
+                view.preview
+                    .apply(mf_chat::PreviewEvent {
+                        invocation: begun.invocation.clone(),
+                        delta: mf_chat::ToolCallDelta {
+                            model_call_id: "preview".into(),
+                            index: 0,
+                            arguments: arguments.into(),
+                            id: hint.then(|| "first".into()),
+                            name: hint.then(|| "lookup".into()),
+                        }
+                        .into(),
+                    })
+                    .unwrap();
+                let screen = render(&view, 140, 70);
+                assert_eq!(screen.matches("Tool call").count(), 1);
+                assert!(screen.contains(label) && screen.contains("{ \"query\":"));
+                assert_eq!(screen.contains("**preview argument**"), hint);
+                assert!(!screen.contains("Tool result"));
+                assert!(!screen.contains("[Running]") && !screen.contains("[Queued]"));
+            }
+            view.toggle_tool();
+            assert!(view.focused_tool.is_none());
             let result = tool_result(replace, false);
             view.event(
                 finish(
@@ -1647,11 +1505,26 @@ mod tests {
                 ),
                 &controller,
             );
-            view.focus_tool(false);
+            let collapsed = render(&view, 140, 70);
+            assert_eq!(collapsed.matches("Tool call lookup [first]").count(), 1);
+            assert!(collapsed.contains("Tool result [second]"));
+            assert!(
+                !collapsed.contains("**preview argument**")
+                    && !collapsed.contains("**literal tool**")
+            );
+            assert!(!collapsed.contains("[Completed]"));
+            let toggle = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
+            view.focus_tool(true);
+            view.focus_tool(true);
             assert_eq!(
                 view.focused_tool.as_deref(),
-                Some(tool_key(&begun.invocation.turn_id, "first").as_str())
+                Some(tool_key(&begun.invocation.turn_id, "second").as_str())
             );
+            view.key(toggle, &controller);
+            assert!(render(&view, 140, 70).contains("**literal tool**"));
+            view.key(toggle, &controller);
+            assert!(!render(&view, 140, 70).contains("**literal tool**"));
+            view.key(toggle, &controller);
             for reload in [false, true] {
                 if reload {
                     let page = controller

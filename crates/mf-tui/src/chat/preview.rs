@@ -1,4 +1,4 @@
-use mf_chat::{Invocation, PreviewDelta, PreviewEvent, ToolActivity};
+use mf_chat::{Invocation, PreviewDelta, PreviewEvent};
 
 pub const MAX_PREVIEW_BYTES: usize = 128 * 1024;
 pub const MAX_PREVIEW_SEGMENTS: usize = 32;
@@ -8,66 +8,41 @@ const MAX_ID_BYTES: usize = 256;
 pub struct PreviewSegment {
     pub model_call_id: String,
     pub text: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ToolState {
-    Receiving,
-    Queued,
-    Running,
-    Succeeded,
-    Failed,
-}
-
-impl ToolState {
-    pub fn label(self, incomplete: bool) -> &'static str {
-        match (self, incomplete) {
-            (Self::Receiving | Self::Queued | Self::Running, true) => "Interrupted",
-            (Self::Receiving, false) => "Receiving arguments",
-            (Self::Queued, false) => "Queued",
-            (Self::Running, false) => "Running",
-            (Self::Succeeded, _) => "Succeeded",
-            (Self::Failed, _) => "Failed",
-        }
-    }
+    pub tool: Option<ToolCallPreview>,
 }
 
 #[derive(Clone, Debug)]
-pub struct ToolPreview {
-    pub source: String,
-    pub id: String,
-    pub name: String,
-    pub arguments: String,
-    pub content: Option<String>,
-    pub state: ToolState,
+pub struct ToolCallPreview {
+    pub index: u64,
+    pub id: Option<String>,
+    pub name: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub enum PreviewItem {
-    Text(usize),
-    Tool(usize),
+impl PreviewSegment {
+    fn metadata_bytes(&self) -> usize {
+        self.model_call_id.len()
+            + self.tool.as_ref().map_or(0, |tool| {
+                tool.id.as_ref().map_or(0, String::len) + tool.name.as_ref().map_or(0, String::len)
+            })
+    }
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct LivePreview {
     pub invocation: Option<Invocation>,
     pub segments: Vec<PreviewSegment>,
-    pub tools: Vec<ToolPreview>,
-    pub order: Vec<PreviewItem>,
     pub omitted: bool,
     pub incomplete: bool,
     pub revision: u64,
 }
 
-fn truncate(text: &mut String, available: &mut usize) -> bool {
+fn bounded_prefix(text: &str, available: &mut usize) -> usize {
     let mut length = (*available).min(text.len());
     while !text.is_char_boundary(length) {
         length -= 1;
     }
-    let omitted = length < text.len();
-    text.truncate(length);
     *available -= length;
-    omitted
+    length
 }
 
 impl LivePreview {
@@ -85,184 +60,106 @@ impl LivePreview {
             return Ok(());
         }
         event.validate()?;
-        match event.delta {
-            PreviewDelta::Text { delta } => {
-                if delta.model_call_id.len() > MAX_ID_BYTES {
-                    self.omitted = true;
-                } else if let Some(index) = self
-                    .segments
-                    .iter()
-                    .position(|s| s.model_call_id == delta.model_call_id)
-                {
-                    self.segments[index].text.push_str(&delta.text);
-                } else if self.order.len() < MAX_PREVIEW_SEGMENTS {
-                    self.order.push(PreviewItem::Text(self.segments.len()));
-                    self.segments.push(PreviewSegment {
-                        model_call_id: delta.model_call_id,
-                        text: delta.text,
-                    });
-                } else {
-                    self.omitted = true;
-                }
-            }
-            PreviewDelta::Tool { activity } => self.tool(activity),
-        }
-        // Include correlation metadata in the bound, not only visible business text.
-        let metadata = self
-            .segments
-            .iter()
-            .map(|s| s.model_call_id.len())
-            .sum::<usize>()
-            + self
-                .tools
-                .iter()
-                .map(|t| t.source.len() + t.id.len() + t.name.len())
-                .sum::<usize>();
-        let mut available = MAX_PREVIEW_BYTES.saturating_sub(metadata);
-        for item in &self.order {
-            match *item {
-                PreviewItem::Text(index) => {
-                    self.omitted |= truncate(&mut self.segments[index].text, &mut available)
-                }
-                PreviewItem::Tool(index) => {
-                    let tool = &mut self.tools[index];
-                    self.omitted |= truncate(&mut tool.arguments, &mut available);
-                    if let Some(content) = &mut tool.content {
-                        self.omitted |= truncate(content, &mut available);
-                    }
-                }
-            }
-        }
         self.revision = self.revision.saturating_add(1);
-        Ok(())
-    }
-
-    fn tool(&mut self, activity: ToolActivity) {
-        let (source, id, name) = match &activity {
-            ToolActivity::Call {
-                model_call_id,
-                part,
-                call,
-                ..
-            } => {
-                if model_call_id.len() > MAX_ID_BYTES {
-                    self.omitted = true;
-                    return;
-                }
-                (
-                    format!("{model_call_id}:{part}"),
-                    call.as_ref().map_or("", |c| c.id.as_str()),
-                    call.as_ref().map_or("", |c| c.name.as_str()),
-                )
-            }
-            ToolActivity::Running { tool_call_id, name } => {
-                (String::new(), tool_call_id.as_str(), name.as_str())
-            }
-            ToolActivity::Result { tool_call_id, .. } => (String::new(), tool_call_id.as_str(), ""),
+        let (model_call_id, fragment, tool_index, tool_id, tool_name) = match event.delta {
+            PreviewDelta::Text { delta } => (delta.model_call_id, delta.text, None, None, None),
+            PreviewDelta::ToolCall { delta } => (
+                delta.model_call_id,
+                delta.arguments,
+                Some(delta.index),
+                delta.id,
+                delta.name,
+            ),
         };
-        if source.len() > MAX_ID_BYTES + 21 || id.len() > MAX_ID_BYTES || name.len() > MAX_ID_BYTES
-        {
+        if model_call_id.len() > MAX_ID_BYTES {
             self.omitted = true;
-            return;
+            return Ok(());
         }
-        let by_source = self
-            .tools
-            .iter()
-            .position(|t| !source.is_empty() && t.source == source);
-        let by_id = self.tools.iter().position(|t| !id.is_empty() && t.id == id);
-        // Independently forwarded streams can deliver execution before the final call identity.
-        let index = match (by_source, by_id) {
-            (Some(source_index), Some(id_index)) if source_index != id_index => {
-                let duplicate = self.tools.remove(id_index);
-                self.order
-                    .retain(|item| !matches!(item, PreviewItem::Tool(index) if *index == id_index));
-                for item in &mut self.order {
-                    if let PreviewItem::Tool(index) = item
-                        && *index > id_index
-                    {
-                        *index -= 1;
-                    }
-                }
-                let index = source_index - usize::from(id_index < source_index);
-                let tool = &mut self.tools[index];
-                if tool.content.is_none() {
-                    tool.content = duplicate.content;
-                    tool.state = duplicate.state;
-                }
-                Some(index)
-            }
-            _ => by_source.or(by_id),
-        };
-        let index = if let Some(index) = index {
-            if self.tools[index].source.is_empty() && !source.is_empty() {
-                self.tools[index].source = source.clone();
-            }
+        let index = if let Some(index) = self.segments.iter().position(|segment| {
+            segment.model_call_id == model_call_id
+                && segment.tool.as_ref().map(|tool| tool.index) == tool_index
+        }) {
             index
-        } else if self.order.len() < MAX_PREVIEW_SEGMENTS {
-            self.order.push(PreviewItem::Tool(self.tools.len()));
-            self.tools.push(ToolPreview {
-                source,
-                id: id.into(),
-                name: name.into(),
-                arguments: String::new(),
-                content: None,
-                state: ToolState::Receiving,
+        } else if self.segments.len() < MAX_PREVIEW_SEGMENTS {
+            self.segments.push(PreviewSegment {
+                model_call_id,
+                text: String::new(),
+                tool: tool_index.map(|index| ToolCallPreview {
+                    index,
+                    id: None,
+                    name: None,
+                }),
             });
-            self.tools.len() - 1
+            self.segments.len() - 1
         } else {
             self.omitted = true;
-            return;
+            return Ok(());
         };
-        let tool = &mut self.tools[index];
-        match activity {
-            ToolActivity::Call {
-                arguments, call, ..
-            } => {
-                if let Some(call) = call {
-                    tool.id = call.id;
-                    tool.name = call.name;
-                    tool.arguments = serde_json::to_string_pretty(&call.arguments)
-                        .unwrap_or_else(|_| "[Arguments unavailable]".into());
-                    if tool.state == ToolState::Receiving {
-                        tool.state = ToolState::Queued;
+        if let Some(tool) = &mut self.segments[index].tool {
+            for (stored, hint) in [(&mut tool.id, tool_id), (&mut tool.name, tool_name)] {
+                if let Some(hint) = hint.filter(|hint| !hint.trim().is_empty()) {
+                    if hint.len() <= MAX_ID_BYTES {
+                        *stored = Some(hint);
+                    } else {
+                        self.omitted = true;
                     }
-                } else if tool.state == ToolState::Receiving {
-                    tool.arguments.push_str(&arguments);
                 }
-            }
-            ToolActivity::Running { name, .. } => {
-                tool.name = name;
-                if tool.content.is_none() {
-                    tool.state = ToolState::Running;
-                }
-            }
-            ToolActivity::Result {
-                failed, content, ..
-            } => {
-                tool.content = Some(content);
-                tool.state = if failed {
-                    ToolState::Failed
-                } else {
-                    ToolState::Succeeded
-                };
             }
         }
+        let mut available = MAX_PREVIEW_BYTES.saturating_sub(
+            self.segments
+                .iter()
+                .map(PreviewSegment::metadata_bytes)
+                .sum(),
+        );
+        for segment in &mut self.segments {
+            let length = bounded_prefix(&segment.text, &mut available);
+            if length < segment.text.len() {
+                segment.text.truncate(length);
+                segment.text.shrink_to_fit();
+                self.omitted = true;
+            }
+        }
+        let length = bounded_prefix(&fragment, &mut available);
+        self.segments[index].text.push_str(&fragment[..length]);
+        self.omitted |= length < fragment.len();
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mf_chat::{TextDelta, ToolCallDelta};
 
-    fn event(invocation: &Invocation, call: &str, text: &str) -> PreviewEvent {
+    fn event(invocation: &Invocation, delta: impl Into<PreviewDelta>) -> PreviewEvent {
         PreviewEvent {
             invocation: invocation.clone(),
-            delta: mf_chat::TextDelta {
-                text: text.into(),
-                model_call_id: call.into(),
-            }
-            .into(),
+            delta: delta.into(),
         }
+    }
+
+    fn text(invocation: &Invocation, model: &str, fragment: &str) -> PreviewEvent {
+        event(
+            invocation,
+            TextDelta {
+                text: fragment.into(),
+                model_call_id: model.into(),
+            },
+        )
+    }
+
+    fn call(invocation: &Invocation, model: &str, index: u64, arguments: &str) -> PreviewEvent {
+        event(
+            invocation,
+            ToolCallDelta {
+                model_call_id: model.into(),
+                index,
+                arguments: arguments.into(),
+                id: None,
+                name: None,
+            },
+        )
     }
 
     #[test]
@@ -270,300 +167,106 @@ mod tests {
         let invocation = Invocation::new("session");
         let mut preview = LivePreview::default();
         preview.begin(invocation.clone());
-        for (call, text) in [("first", "one"), ("second", "two"), ("first", "-tail")] {
-            preview.apply(event(&invocation, call, text)).unwrap();
+        for (model, fragment) in [("first", "one"), ("second", "two"), ("first", "-tail")] {
+            preview.apply(text(&invocation, model, fragment)).unwrap();
         }
-        assert_eq!(preview.segments[0].text, "one-tail");
-        assert_eq!(preview.segments[1].text, "two");
         preview
-            .apply(event(&Invocation::new("session"), "third", "stale"))
+            .apply(text(&Invocation::new("session"), "third", "stale"))
             .unwrap();
         assert_eq!(preview.segments.len(), 2);
+        assert_eq!(preview.segments[0].text, "one-tail");
+        assert_eq!(preview.segments[1].text, "two");
     }
 
     #[test]
-    fn bounded_previews_preserve_utf8_and_discard_excess_segments() {
+    fn interleaved_tool_arguments_keep_their_raw_text_and_model_part_identity() {
+        let invocation = Invocation::new("session");
+        let mut preview = LivePreview::default();
+        preview.begin(invocation.clone());
+        for event in [
+            text(&invocation, "first", "Preamble"),
+            event(
+                &invocation,
+                ToolCallDelta {
+                    model_call_id: "first".into(),
+                    index: 0,
+                    arguments: "{ \"query\":".into(),
+                    id: Some("first-call".into()),
+                    name: Some("lookup".into()),
+                },
+            ),
+            call(&invocation, "first", 1, "{}"),
+            call(&invocation, "second", 0, "[]"),
+            call(&Invocation::new("session"), "first", 0, "ignored"),
+            call(&invocation, "first", 0, " \"a\" }"),
+        ] {
+            preview.apply(event).unwrap();
+        }
+
+        assert_eq!(
+            preview
+                .segments
+                .iter()
+                .map(|segment| segment.text.as_str())
+                .collect::<Vec<_>>(),
+            ["Preamble", "{ \"query\": \"a\" }", "{}", "[]"]
+        );
+        let tool = preview.segments[1].tool.as_ref().unwrap();
+        assert_eq!(tool.id.as_deref(), Some("first-call"));
+        assert_eq!(tool.name.as_deref(), Some("lookup"));
+    }
+
+    #[test]
+    fn bounded_tool_and_text_previews_preserve_utf8_and_ignore_oversized_identities() {
         let invocation = Invocation::new("session");
         let mut preview = LivePreview::default();
         preview.begin(invocation.clone());
         preview
-            .apply(event(&invocation, "first", &"é".repeat(MAX_PREVIEW_BYTES)))
+            .apply(call(
+                &invocation,
+                "model",
+                0,
+                &"é".repeat(MAX_PREVIEW_BYTES),
+            ))
             .unwrap();
-        assert!(preview.segments[0].text.len() <= MAX_PREVIEW_BYTES - 5);
+        assert!(preview.omitted);
+        assert_eq!(
+            preview.segments[0].text.len(),
+            MAX_PREVIEW_BYTES - "model".len() - 1
+        );
         for index in 0..MAX_PREVIEW_SEGMENTS + 2 {
             preview
-                .apply(event(&invocation, &format!("call-{index}"), "x"))
+                .apply(text(&invocation, &format!("call-{index}"), "x"))
                 .unwrap();
         }
-        assert!(preview.omitted);
         assert_eq!(preview.segments.len(), MAX_PREVIEW_SEGMENTS);
-    }
-
-    fn activity(preview: &mut LivePreview, activity: ToolActivity) {
-        preview
-            .apply(PreviewEvent {
-                invocation: preview.invocation.clone().unwrap(),
-                delta: activity.into(),
-            })
-            .unwrap();
-    }
-
-    #[test]
-    fn tool_fragments_parallel_states_and_late_events_remain_independent() {
-        let mut preview = LivePreview::default();
-        preview.begin(Invocation::new("session"));
-        for (part, id) in [(0, "first"), (1, "second")] {
-            activity(
-                &mut preview,
-                ToolActivity::Call {
-                    model_call_id: "model".into(),
-                    part,
-                    arguments: "{\"x\":".into(),
-                    call: None,
-                },
-            );
-            activity(
-                &mut preview,
-                ToolActivity::Call {
-                    model_call_id: "model".into(),
-                    part,
-                    arguments: "1}".into(),
-                    call: None,
-                },
-            );
-            assert_eq!(preview.tools[part as usize].arguments, "{\"x\":1}");
-            activity(
-                &mut preview,
-                ToolActivity::Call {
-                    model_call_id: "model".into(),
-                    part,
-                    arguments: String::new(),
-                    call: Some(
-                        serde_json::from_value(
-                            serde_json::json!({"id":id,"name":"lookup","arguments":{"x":1}}),
-                        )
-                        .unwrap(),
-                    ),
-                },
-            );
-            assert_eq!(preview.tools[part as usize].state, ToolState::Queued);
-            activity(
-                &mut preview,
-                ToolActivity::Running {
-                    tool_call_id: id.into(),
-                    name: "lookup".into(),
-                },
-            );
-        }
-        activity(
-            &mut preview,
-            ToolActivity::Result {
-                tool_call_id: "second".into(),
-                failed: true,
-                content: "error".into(),
-            },
-        );
-        assert_eq!(preview.tools[0].state, ToolState::Running);
-        assert_eq!(preview.tools[1].state, ToolState::Failed);
-        activity(
-            &mut preview,
-            ToolActivity::Running {
-                tool_call_id: "second".into(),
-                name: "lookup".into(),
-            },
-        );
-        assert_eq!(preview.tools[1].state, ToolState::Failed);
-        activity(
-            &mut preview,
-            ToolActivity::Result {
-                tool_call_id: "first".into(),
-                failed: false,
-                content: String::new(),
-            },
-        );
-        assert_eq!(preview.tools[0].state, ToolState::Succeeded);
-        for state in [ToolState::Receiving, ToolState::Queued, ToolState::Running] {
-            assert_eq!(state.label(true), "Interrupted");
-            assert_ne!(state.label(false), "Interrupted");
-        }
-        assert_eq!(ToolState::Succeeded.label(true), "Succeeded");
-        assert_eq!(ToolState::Failed.label(false), "Failed");
-    }
-
-    #[test]
-    fn independently_forwarded_execution_events_reconcile_with_partial_call_identity() {
-        for execution_first in [false, true] {
-            for completed in [false, true] {
-                let mut preview = LivePreview::default();
-                preview.begin(Invocation::new("session"));
-                let execution = |preview: &mut LivePreview| {
-                    activity(
-                        preview,
-                        ToolActivity::Running {
-                            tool_call_id: "id".into(),
-                            name: "lookup".into(),
-                        },
-                    );
-                    if completed {
-                        activity(
-                            preview,
-                            ToolActivity::Result {
-                                tool_call_id: "id".into(),
-                                failed: false,
-                                content: "result".into(),
-                            },
-                        );
-                    }
-                };
-                if execution_first {
-                    execution(&mut preview);
-                }
-                activity(
-                    &mut preview,
-                    ToolActivity::Call {
-                        model_call_id: "model".into(),
-                        part: 0,
-                        arguments: "{".into(),
-                        call: None,
-                    },
-                );
-                if !execution_first {
-                    execution(&mut preview);
-                }
-                assert_eq!(preview.tools.len(), 2);
-                activity(
-                    &mut preview,
-                    ToolActivity::Call {
-                        model_call_id: "model".into(),
-                        part: 0,
-                        arguments: String::new(),
-                        call: Some(
-                            serde_json::from_value(
-                                serde_json::json!({"id":"id","name":"lookup","arguments":{}}),
-                            )
-                            .unwrap(),
-                        ),
-                    },
-                );
-                assert_eq!(preview.tools.len(), 1);
-                assert_eq!(preview.order.len(), 1);
-                assert!(matches!(preview.order[0], PreviewItem::Tool(0)));
-                assert_eq!(preview.tools[0].source, "model:0");
-                assert_eq!(preview.tools[0].id, "id");
-                assert_eq!(
-                    preview.tools[0].state,
-                    if completed {
-                        ToolState::Succeeded
-                    } else {
-                        ToolState::Running
-                    }
-                );
-                assert_eq!(
-                    preview.tools[0].content.as_deref(),
-                    completed.then_some("result")
-                );
-            }
-        }
-        let mut preview = LivePreview::default();
-        preview.begin(Invocation::new("session"));
-        activity(
-            &mut preview,
-            ToolActivity::Running {
-                tool_call_id: "id".into(),
-                name: "lookup".into(),
-            },
-        );
-        activity(
-            &mut preview,
-            ToolActivity::Call {
-                model_call_id: "model".into(),
-                part: 0,
-                arguments: String::new(),
-                call: Some(
-                    serde_json::from_value(
-                        serde_json::json!({"id":"id","name":"lookup","arguments":{}}),
-                    )
-                    .unwrap(),
-                ),
-            },
-        );
-        assert_eq!(preview.tools[0].source, "model:0");
-        assert_eq!(preview.tools.len(), 1);
-    }
-
-    #[test]
-    fn tool_only_previews_are_bounded_without_stalling_status_updates() {
-        let mut preview = LivePreview::default();
-        preview.begin(Invocation::new("session"));
-        activity(
-            &mut preview,
-            ToolActivity::Running {
-                tool_call_id: "id".into(),
-                name: "lookup".into(),
-            },
-        );
-        activity(
-            &mut preview,
-            ToolActivity::Running {
-                tool_call_id: "x".repeat(MAX_ID_BYTES + 1),
-                name: "lookup".into(),
-            },
-        );
-        activity(
-            &mut preview,
-            ToolActivity::Result {
-                tool_call_id: "id".into(),
-                failed: false,
-                content: "é".repeat(MAX_PREVIEW_BYTES),
-            },
-        );
-        assert_eq!(preview.tools[0].state, ToolState::Succeeded);
-        assert!(
-            preview.omitted && preview.tools[0].content.as_ref().unwrap().len() < MAX_PREVIEW_BYTES
-        );
-        activity(
-            &mut preview,
-            ToolActivity::Call {
-                model_call_id: "x".repeat(MAX_ID_BYTES + 1),
-                part: 0,
-                arguments: "huge identity".into(),
-                call: None,
-            },
-        );
-        assert_eq!(preview.tools.len(), 1);
-        for index in 0..MAX_PREVIEW_SEGMENTS + 2 {
-            activity(
-                &mut preview,
-                ToolActivity::Running {
-                    tool_call_id: format!("id-{index}"),
-                    name: "lookup".into(),
-                },
-            );
-        }
-        assert_eq!(preview.tools.len(), MAX_PREVIEW_SEGMENTS);
-        activity(
-            &mut preview,
-            ToolActivity::Result {
-                tool_call_id: "id-0".into(),
-                failed: true,
-                content: "failure".into(),
-            },
-        );
-        assert_eq!(preview.tools[1].state, ToolState::Failed);
         assert!(
             preview
-                .apply(PreviewEvent {
-                    invocation: preview.invocation.clone().unwrap(),
-                    delta: mf_chat::TextDelta {
-                        model_call_id: "x".repeat(MAX_ID_BYTES + 1),
-                        text: "ignored".into()
-                    }
-                    .into()
-                })
-                .is_ok()
+                .segments
+                .iter()
+                .map(|segment| segment.text.len() + segment.metadata_bytes())
+                .sum::<usize>()
+                <= MAX_PREVIEW_BYTES
         );
-        assert!(preview.segments.is_empty());
-        preview.begin(Invocation::new("session"));
-        assert!(preview.tools.is_empty() && preview.order.is_empty() && !preview.omitted);
+        preview.begin(invocation.clone());
+        preview
+            .apply(call(&invocation, &"m".repeat(MAX_ID_BYTES + 1), 0, "{}"))
+            .unwrap();
+        assert!(preview.omitted && preview.segments.is_empty());
+        preview
+            .apply(event(
+                &invocation,
+                ToolCallDelta {
+                    model_call_id: "model".into(),
+                    index: 0,
+                    arguments: "{}".into(),
+                    id: Some("x".repeat(MAX_ID_BYTES + 1)),
+                    name: Some("lookup".into()),
+                },
+            ))
+            .unwrap();
+        let tool = preview.segments[0].tool.as_ref().unwrap();
+        assert!(tool.id.is_none());
+        assert_eq!(tool.name.as_deref(), Some("lookup"));
     }
 }

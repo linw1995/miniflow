@@ -329,21 +329,9 @@
   ],
   "outputs": [
     {
-      "name": "tool_call",
+      "name": "tool_call_delta",
       "node": "conversation",
-      "port": "tool_call",
-      "optional": true
-    },
-    {
-      "name": "tool_started",
-      "node": "conversation",
-      "port": "tool_started",
-      "optional": true
-    },
-    {
-      "name": "tool_finished",
-      "node": "conversation",
-      "port": "tool_finished",
+      "port": "tool_call_delta",
       "optional": true
     },
     {

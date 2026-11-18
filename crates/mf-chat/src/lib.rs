@@ -38,7 +38,7 @@ pub use usage::{
 };
 
 pub use mfn_llm::{
-    ChatMessage, MessageMetadata, TextDelta, ToolActivity, UsageAttribution, UsageNode, UsageScope,
+    ChatMessage, MessageMetadata, TextDelta, ToolCallDelta, UsageAttribution, UsageNode, UsageScope,
 };
 
 pub use workflow::{ConversationBackend, WorkflowProfile};

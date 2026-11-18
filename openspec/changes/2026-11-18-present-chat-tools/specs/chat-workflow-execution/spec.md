@@ -1,19 +1,18 @@
 ## ADDED Requirements
 
-### Requirement: Explicit invocation-scoped tool previews
+### Requirement: Optional invocation-scoped tool-call argument previews
 
-Chat workflows MAY expose optional `tool_call`, `tool_started`, and `tool_finished` streams. The host SHALL validate each event against its declared stream and attach the active invocation. Tool previews SHALL share text-preview acknowledgement and cancellation semantics and MUST NOT mutate audit history, model context, usages, or settlement decisions.
+Chat workflows MAY expose an optional `tool_call_delta` stream independently of `answer`. The host SHALL decode declared argument fragments, attach the active invocation, and use the same delivery receipts and cancellation as text previews. Argument previews MUST NOT dispatch tools, report tool execution states, or modify history, model context, usage, or settlement.
 
-#### Scenario: Stream parallel calls before completion
+#### Scenario: Receive fragments before the turn is complete
 
-- **WHEN** an Agent streams argument fragments and dispatches multiple tools
-- **THEN** fragments are correlated by model-call identity and part index, and execution events identify the actual tool-call ID
-- **AND** each result is delivered before the next model response without requiring final turn settlement
+- **WHEN** a chatflow selects `tool_call_delta` and the model emits raw tool arguments
+- **THEN** the host can deliver a fragment without waiting for the rest of the arguments, a tool result, or the terminal turn result
 
-#### Scenario: Reject invalid or undeclared activity
+#### Scenario: Reject malformed or undeclared argument previews
 
-- **WHEN** a workflow emits an undeclared tool stream, mismatched event kind, or blank identity
-- **THEN** preview decoding fails without concealing conflicting terminal alternatives or saving provisional events
+- **WHEN** a workflow emits an undeclared tool argument stream, a malformed fragment, or a blank model-call identity
+- **THEN** preview decoding fails without concealing conflicting terminal alternatives or saving a provisional value
 
 #### Scenario: Preserve existing text-only workflows
 

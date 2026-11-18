@@ -33,7 +33,7 @@ impl Wake for CancelWorkflow {
     }
 }
 
-/// Invokes one backend and forwards optional text deltas into the conversation Flow.
+/// Invokes one backend and forwards optional model-output previews into the conversation Flow.
 pub trait ConversationBackend: Send + Sync {
     /// Exposes a finite embedded Flow and resolved parameters for `workflow.call` composition.
     /// Other backends retain the host-bound invocation adapter.
@@ -191,7 +191,8 @@ fn compile_call(
         })
         .collect();
     if definition.outputs.iter().any(|output| {
-        output.name == "answer" && !streams.contains(&(output.node.as_str(), output.port.as_ref()))
+        matches!(output.name.as_ref(), "answer" | "tool_call_delta")
+            && !streams.contains(&(output.node.as_str(), output.port.as_ref()))
     }) || definition
         .edges
         .iter()
@@ -1028,18 +1029,17 @@ impl mf_runtime::TypedTaskNode for WorkflowPreview {
 register_task!("mf_chat.workflow.preview", WorkflowPreview::default());
 
 #[derive(NodeValue)]
-struct ToolPreviewInputs {
-    activity: crate::ToolActivity,
+struct ToolCallPreviewInputs {
+    tool_call_delta: crate::ToolCallDelta,
 }
 
 #[derive(Default)]
-struct ToolPreview {
+struct ToolCallPreview {
     invocation: Option<Invocation>,
-    stream: Option<String>,
 }
 
-impl mf_runtime::TypedTaskNode for ToolPreview {
-    type Input = ToolPreviewInputs;
+impl mf_runtime::TypedTaskNode for ToolCallPreview {
+    type Input = ToolCallPreviewInputs;
     type Output = PreviewOutput;
 
     fn execute(
@@ -1051,23 +1051,19 @@ impl mf_runtime::TypedTaskNode for ToolPreview {
             field: "conversation preview",
             reason: "must be bound by the application host",
         })?;
-        ensure!(
-            self.stream.as_deref() == Some(input.activity.stream_name()),
-            InvalidSnafu {
-                field: "tool activity stream",
-                reason: "event kind does not match the stream"
-            }
-        );
         let preview = PreviewEvent {
             invocation,
-            delta: input.activity.into(),
+            delta: input.tool_call_delta.into(),
         };
         preview.validate()?;
         Ok(PreviewOutput { preview }.into())
     }
 }
 
-register_task!("mf_chat.workflow.tool_preview", ToolPreview::default());
+register_task!(
+    "mf_chat.workflow.tool_call_preview",
+    ToolCallPreview::default()
+);
 
 struct ConversationPlan {
     plan: CompiledWorkflow,
@@ -1103,7 +1099,7 @@ fn register_runner(
         outputs.iter().map(|port| port.name.to_string()).collect();
     let streams = contract
         .preview_streams()
-        .map(|name| mf_runtime::PortSpec::owned(name, mf_runtime::ValueType::Object, false))
+        .map(|name| mf_runtime::PortSpec::new(name, mf_runtime::ValueType::Object, false))
         .collect();
     let body =
         mf_runtime::PreparedSubgraph::streaming(vec![], outputs, streams, move |context, sink| {
@@ -1114,15 +1110,10 @@ fn register_runner(
                         crate::PreviewDelta::Text { delta } => {
                             WorkflowPreviewInputs { answer: delta }.into_values()?
                         }
-                        crate::PreviewDelta::Tool { activity } => {
-                            let name = activity.stream_name();
-                            let mut values = ToolPreviewInputs { activity }.into_values()?;
-                            [(
-                                name.into(),
-                                values.remove("activity").expect("encoded activity"),
-                            )]
-                            .into()
+                        crate::PreviewDelta::ToolCall { delta } => ToolCallPreviewInputs {
+                            tool_call_delta: delta,
                         }
+                        .into_values()?,
                     };
                     // Remote records contain populated ports only; other subscriptions must skip this wave.
                     let skipped = contract
@@ -1278,23 +1269,16 @@ fn compose_conversation(
             .context(BackendBuildSnafu)?,
         ));
     }
-    for name in &contract.activity_streams {
-        let id = format!("preview_{name}");
+    if contract.tool_call_delta_stream {
         nodes.push(serde_json::json!({
-            "id":id, "kind":"mf_chat.workflow.tool_preview",
-            "inputs":{"activity":{"from":{"node":"workflow","port":name}}}
+            "id":"tool_call_preview", "kind":"mf_chat.workflow.tool_call_preview",
+            "inputs":{"tool_call_delta":{"from":{"node":"workflow","port":"tool_call_delta"}}}
         }));
         bindings.push((
-            match name.as_str() {
-                "tool_call" => "preview_tool_call",
-                "tool_started" => "preview_tool_started",
-                "tool_finished" => "preview_tool_finished",
-                _ => unreachable!(),
-            },
+            "tool_call_preview",
             PreparedNode::typed_task(
-                ToolPreview {
+                ToolCallPreview {
                     invocation: Some(invocation.clone()),
-                    stream: Some(name.clone()),
                 },
                 NodeMetadata::default(),
             )
@@ -1309,18 +1293,16 @@ fn compose_conversation(
             .find(|output| output["name"] == "preview")
             .expect("conversation preview")["node"] = "preview".into();
     }
-    for name in &contract.activity_streams {
+    if contract.tool_call_delta_stream {
         definition["outputs"].as_array_mut().expect("conversation outputs").push(serde_json::json!({
-            "name":format!("preview_{name}"), "node":format!("preview_{name}"), "port":"preview", "optional":true
+            "name":"tool_call_preview", "node":"tool_call_preview", "port":"preview", "optional":true
         }));
     }
     for (index, port) in call_node
         .metadata
         .stream_outputs
         .iter()
-        .filter(|port| {
-            port.name != "answer" && !contract.activity_streams.contains(port.name.as_ref())
-        })
+        .filter(|port| !matches!(port.name.as_ref(), "answer" | "tool_call_delta"))
         .enumerate()
     {
         definition["outputs"].as_array_mut().expect("conversation outputs")
@@ -1529,14 +1511,9 @@ pub fn run_conversation_with_preview(
         let mut settlement = None;
         while let Some(delivery) = instance.receive()? {
             let mut outputs = delivery.output().outputs.clone();
-            let event = [
-                "preview",
-                "preview_tool_call",
-                "preview_tool_started",
-                "preview_tool_finished",
-            ]
-            .into_iter()
-            .find_map(|name| outputs.remove(name));
+            let event = outputs
+                .remove("preview")
+                .or_else(|| outputs.remove("tool_call_preview"));
             if let Some(event) = event {
                 let event = PreviewOutput::from_values([("preview".into(), event)].into())?.preview;
                 if let Some(consumer) = &preview {

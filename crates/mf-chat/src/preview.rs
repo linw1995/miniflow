@@ -1,4 +1,4 @@
-use crate::{ChatError, Invocation, TextDelta, error::*};
+use crate::{ChatError, Invocation, TextDelta, ToolCallDelta, error::*};
 use mf_runtime::{NodeEnum, NodeValue, StreamCancellation, StreamDelivery};
 use snafu::{ResultExt, ensure};
 use std::sync::mpsc;
@@ -8,7 +8,7 @@ use std::sync::mpsc;
 #[value(tag = "kind")]
 pub enum PreviewDelta {
     Text { delta: TextDelta },
-    Tool { activity: crate::ToolActivity },
+    ToolCall { delta: ToolCallDelta },
 }
 
 impl From<TextDelta> for PreviewDelta {
@@ -17,9 +17,9 @@ impl From<TextDelta> for PreviewDelta {
     }
 }
 
-impl From<crate::ToolActivity> for PreviewDelta {
-    fn from(activity: crate::ToolActivity) -> Self {
-        Self::Tool { activity }
+impl From<ToolCallDelta> for PreviewDelta {
+    fn from(delta: ToolCallDelta) -> Self {
+        Self::ToolCall { delta }
     }
 }
 
@@ -33,7 +33,13 @@ impl PreviewDelta {
                     reason: "requires nonempty text and a model call identity"
                 }
             ),
-            Self::Tool { activity } => activity.validate().boxed().context(PreviewDeliverySnafu)?,
+            Self::ToolCall { delta } => ensure!(
+                !delta.model_call_id.trim().is_empty() && !delta.arguments.is_empty(),
+                InvalidSnafu {
+                    field: "tool_call_delta stream",
+                    reason: "requires a nonempty argument fragment and a model call identity"
+                }
+            ),
         }
         Ok(())
     }
@@ -53,7 +59,7 @@ impl PreviewEvent {
                 && !self.invocation.call_id.trim().is_empty(),
             InvalidSnafu {
                 field: "conversation preview",
-                reason: "requires text, invocation, and model call identities"
+                reason: "requires nonblank invocation identities"
             }
         );
         self.delta.validate()
@@ -153,15 +159,12 @@ mod tests {
                 model_call_id: "model".into(),
             }
             .into(),
-            crate::ToolActivity::Running {
-                tool_call_id: "tool".into(),
-                name: "lookup".into(),
-            }
-            .into(),
-            crate::ToolActivity::Result {
-                tool_call_id: "tool".into(),
-                failed: true,
-                content: "**literal**".into(),
+            ToolCallDelta {
+                model_call_id: "model".into(),
+                index: 0,
+                arguments: "{\"query\":".into(),
+                id: Some("call".into()),
+                name: None,
             }
             .into(),
         ] {
@@ -180,14 +183,6 @@ mod tests {
                 event
             );
         }
-        let invalid = PreviewDelta::Tool {
-            activity: crate::ToolActivity::Running {
-                tool_call_id: String::new(),
-                name: "lookup".into(),
-            },
-        };
-        let error = invalid.validate().unwrap_err();
-        assert!(std::error::Error::source(&error).is_some());
         let mut event = PreviewEvent {
             invocation,
             delta: TextDelta {

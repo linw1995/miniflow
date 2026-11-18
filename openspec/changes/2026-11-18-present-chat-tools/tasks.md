@@ -1,8 +1,7 @@
 ## Implementation
 
-- [x] Add typed tool-call fragments and execution lifecycle emissions to shared Agent composition.
-- [x] Deliver declared tool previews through native and executable conversation backends.
-- [x] Present bounded, invocation-scoped tool activity and collapsed literal results.
-- [x] Add per-result keyboard focus and expansion with stable turn/call keys.
-- [x] Verify parallel, fragmented, failed, cancelled, saved, recovered, and source-free behavior.
-- [x] Run focused tests, shared affected selection, coverage, strict specification validation, and repository hooks.
+- [x] Stream nonempty provider argument fragments before tool-call assembly.
+- [x] Forward only the optional model-output stream through Agent and conversation adapters.
+- [x] Preserve the dispatch graph and ordinary tool result encoding.
+- [x] Render bounded argument previews and collapse authoritative literal tool results.
+- [x] Validate fragmented, parallel, cancelled, saved, and source-free cases, repository hooks, and coverage.

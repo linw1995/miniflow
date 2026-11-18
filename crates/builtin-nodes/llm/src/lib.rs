@@ -2,12 +2,10 @@ pub mod call;
 pub mod flows;
 pub mod tools;
 pub use call::{
-    CallOutcome, ToolCall, ToolCallEvent, ToolDefinition, ToolResult, TranscriptError,
-    TranscriptMode, validate_transcript,
+    CallOutcome, ToolCall, ToolCallDelta, ToolCallEvent, ToolDefinition, ToolResult,
+    TranscriptError, TranscriptMode, validate_transcript,
 };
-mod activity;
 mod streaming;
-pub use activity::ToolActivity;
 #[cfg(feature = "test-support")]
 #[path = "../tests/support/mod.rs"]
 pub mod test_support;
@@ -131,7 +129,7 @@ macro_rules! impl_message_serde {
     };
 }
 
-impl_message_serde!(ChatMessage, ToolCall, ToolResult, ToolActivity);
+impl_message_serde!(ChatMessage, ToolCall, ToolResult, ToolCallDelta);
 
 #[derive(Clone, Debug, NodeValue)]
 pub struct LlmInputs {
@@ -167,7 +165,7 @@ pub struct TextDelta {
 pub struct LlmEmission {
     pub delta: Option<TextDelta>,
     pub tool_call: Option<ToolCallEvent>,
-    pub tool_call_delta: Option<ToolActivity>,
+    pub tool_call_delta: Option<ToolCallDelta>,
 }
 
 #[derive(mf_runtime::NodeInputs)]
@@ -593,13 +591,11 @@ impl LlmNode {
             );
             key
         };
-        let transport = transport::TerminalTransport::new(self.client()?);
         let keyless = key.is_empty();
         let mut openai = OpenAIConfig::new(key).with_base_url(&config.base_url);
         if keyless {
             openai.auth = Auth::OptionalBearer;
         }
-        let model = openai.connect(transport.clone()).chat(&config.model);
         let mut usage = CallUsage {
             attribution: config.attribution.clone(),
             started_at: None,
@@ -620,13 +616,20 @@ impl LlmNode {
             usage: None,
             error: None,
         };
+        let allow_tools = !request.tools.is_empty();
+        let streaming = emitter.is_connected();
+        let transport = transport::TerminalTransport::new(
+            self.client()?,
+            (allow_tools && streaming).then_some(usage.call_id.as_str()),
+        );
+        let model = openai.connect(transport.clone()).chat(&config.model);
         usage.started_at =
             mf_telemetry::events::record(REQUEST_STARTED_EVENT, serde_json::json!(&usage))
                 .and_then(|timestamp| i64::try_from(timestamp / 1_000_000).ok());
-        let allow_tools = !request.tools.is_empty();
-        let response = if emitter.is_connected() {
+        let response = if streaming {
             streaming::complete(
                 model.stream(request),
+                &transport,
                 emitter,
                 &usage.call_id,
                 deadline,

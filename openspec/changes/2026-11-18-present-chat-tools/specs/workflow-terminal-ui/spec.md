@@ -1,21 +1,21 @@
 ## ADDED Requirements
 
-### Requirement: Live tool lifecycle and collapsible results
+### Requirement: Tool argument previews and collapsible results
 
-The chat transcript SHALL show streamed tool arguments and independently correlated execution states. Outstanding tools SHALL be marked interrupted when execution ends without authoritative completion. Tool results SHALL be collapsed by default and individually expandable using keyboard navigation. Arguments and results MUST remain inert literal data.
+The chat transcript SHALL show raw argument fragments grouped by model call and provider tool index, without tool execution status. Authoritative completion SHALL replace provisional calls without duplication. Tool results from the authoritative transcript SHALL be collapsed by default and individually expandable using the keyboard. Arguments and results MUST remain literal.
 
-#### Scenario: Parallel execution and recovery
+#### Scenario: Show interleaved argument fragments
 
-- **WHEN** one tool completes while another remains active
-- **THEN** their displayed states remain independent
-- **AND** authoritative completion replaces provisional records without duplication, including unsaved recovery and history reload
+- **WHEN** the model sends interleaved fragments for multiple tool calls
+- **THEN** each fragment appears in the matching preview without waiting for a tool result
+- **AND** canonical transcript entries replace provisional calls when the turn settles
 
 #### Scenario: Expand and collapse a result
 
 - **WHEN** the user selects a result with Tab or Shift+Tab in browse mode and presses Space or Ctrl+T
 - **THEN** only that result changes expansion state, without running tools, changing model context, or interpreting result Markdown or escape sequences
 
-#### Scenario: Bound live tool data
+#### Scenario: Bound live preview data
 
-- **WHEN** argument or result previews exceed the count or byte budget
-- **THEN** retained preview data remains bounded and valid UTF-8, omitted data is indicated, and lifecycle consumption and final settlement continue
+- **WHEN** argument previews exceed the count or byte budget
+- **THEN** retained preview data remains bounded and valid UTF-8, omitted data is indicated, and consumption and final settlement continue

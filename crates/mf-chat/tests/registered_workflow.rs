@@ -93,35 +93,17 @@ impl ConversationBackend for Runner {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let consume = preview.expect("declared streams are drained even without a subscriber");
         if self.tool_previews {
-            for activity in [
-                mf_chat::ToolActivity::Call {
-                    model_call_id: "model".into(),
-                    part: 0,
-                    arguments: "{}".into(),
-                    call: None,
-                },
-                mf_chat::ToolActivity::Call {
-                    model_call_id: "model".into(),
-                    part: 0,
-                    arguments: String::new(),
-                    call: Some(
-                        serde_json::from_value(
-                            serde_json::json!({"id":"tool","name":"lookup","arguments":{}}),
-                        )
-                        .unwrap(),
-                    ),
-                },
-                mf_chat::ToolActivity::Running {
-                    tool_call_id: "tool".into(),
-                    name: "lookup".into(),
-                },
-                mf_chat::ToolActivity::Result {
-                    tool_call_id: "tool".into(),
-                    failed: false,
-                    content: "**literal**".into(),
-                },
-            ] {
-                consume(activity.into())?;
+            for arguments in ["{", "}"] {
+                consume(
+                    mf_chat::ToolCallDelta {
+                        model_call_id: "model".into(),
+                        index: 0,
+                        arguments: arguments.into(),
+                        id: None,
+                        name: None,
+                    }
+                    .into(),
+                )?;
             }
         } else {
             consume(
@@ -197,14 +179,12 @@ fn registered_tool_only_runners_share_preview_delivery_and_save_only_recovery() 
         runner.tool_previews = true;
         let outputs = &mut runner.manifest.graph.definition.outputs;
         outputs.retain(|output| output.name != "answer");
-        for name in ["tool_call", "tool_started", "tool_finished"] {
-            outputs.push(
-                serde_json::from_value(
-                    serde_json::json!({"name":name,"node":"remote","port":name,"optional":true}),
-                )
-                .unwrap(),
-            );
-        }
+        outputs.push(
+            serde_json::from_value(serde_json::json!({
+                "name":"tool_call_delta", "node":"remote", "port":"tool_call_delta", "optional":true
+            }))
+            .unwrap(),
+        );
         let runner = Arc::new(runner);
         let profile = WorkflowProfile::with_backend("runner", runner.clone()).unwrap();
         let host =
@@ -215,22 +195,20 @@ fn registered_tool_only_runners_share_preview_delivery_and_save_only_recovery() 
             .unwrap();
         let (job, receiver) = host.submit_stream(&session.id, "canonical").unwrap();
         let invocation = job.invocation().clone();
-        let mut kinds = Vec::new();
+        let mut fragments = Vec::new();
         while let Ok(event) = receiver.recv() {
             assert_eq!(event.invocation, invocation);
-            let mf_chat::PreviewDelta::Tool { activity } = event.delta else {
+            let mf_chat::PreviewDelta::ToolCall { delta } = event.delta else {
                 panic!("unexpected text")
             };
-            kinds.push(activity.stream_name());
+            assert_eq!(delta.index, 0);
+            fragments.push(delta.arguments);
         }
+        // A backend failure may cancel queued previews before delivery, but not duplicate them.
+        assert!(["{", "}"].starts_with(&fragments.iter().map(String::as_str).collect::<Vec<_>>()));
         if !fail {
-            assert_eq!(
-                kinds,
-                ["tool_call", "tool_call", "tool_started", "tool_finished"]
-            );
+            assert_eq!(fragments, ["{", "}"]);
         }
-        // Immediate producer failure may cancel queued preview waves before delivery.
-        assert!(kinds.len() <= 4);
         let completion = if fail {
             let ChatError::Uncommitted { pending, .. } = job.join().unwrap_err() else {
                 panic!("expected retained result")

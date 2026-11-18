@@ -432,17 +432,9 @@
           ]
         },
         "stream_outputs": {
-          "tool_call": {
+          "tool_call_delta": {
             "node": "turn",
-            "port": "tool_call"
-          },
-          "tool_started": {
-            "node": "dispatch",
-            "port": "tool_started"
-          },
-          "tool_finished": {
-            "node": "dispatch",
-            "port": "tool_finished"
+            "port": "tool_call_delta"
           },
           "answer": {
             "node": "turn",
@@ -546,21 +538,9 @@
   "edges": [],
   "outputs": [
     {
-      "name": "tool_call",
+      "name": "tool_call_delta",
       "node": "repeat",
-      "port": "tool_call",
-      "optional": true
-    },
-    {
-      "name": "tool_started",
-      "node": "repeat",
-      "port": "tool_started",
-      "optional": true
-    },
-    {
-      "name": "tool_finished",
-      "node": "repeat",
-      "port": "tool_finished",
+      "port": "tool_call_delta",
       "optional": true
     },
     {

@@ -1,4 +1,7 @@
-use crate::{LlmEmission, LlmExecutionError, TextDelta, ToolActivity, ToolCall, ToolCallEvent};
+use crate::{
+    LlmEmission, LlmExecutionError, TextDelta, ToolCall, ToolCallEvent,
+    transport::TerminalTransport,
+};
 use futures::StreamExt;
 use mf_runtime::{TypedEmitter, TypedNodeResult};
 use rig_core::{
@@ -8,10 +11,11 @@ use rig_core::{
     streaming::{Item, StreamEvent, Streamed},
 };
 use snafu::ResultExt;
-use std::time::Instant;
+use std::{future::poll_fn, task::Poll, time::Instant};
 
 pub fn complete(
     response: Result<Streamed<Completion>, ProviderError>,
+    transport: &TerminalTransport,
     emitter: &mut TypedEmitter<'_, '_, LlmEmission>,
     call_id: &str,
     deadline: Instant,
@@ -25,9 +29,39 @@ pub fn complete(
             .map(|status| status.as_u16()),
     })?;
     let mut first_text = true;
-    // Keep synchronous publication outside the future driver's deadline check so
-    // a delivery failure cannot be replaced with a capturable provider timeout.
-    while let Some(item) = context.execute_future(response.next(), Some(deadline))? {
+    loop {
+        let (arguments, item) = context.execute_future(
+            poll_fn(|cx| {
+                // Rig polls the body inline but may not yield an event until it assembles the call.
+                // Hand captured wire fragments back to the synchronous publisher on the same poll.
+                let item = response.poll_next_unpin(cx);
+                let arguments = transport.take_tool_arguments();
+                if item.is_ready() || !arguments.is_empty() {
+                    Poll::Ready((arguments, item))
+                } else {
+                    Poll::Pending
+                }
+            }),
+            Some(deadline),
+        )?;
+        // Keep synchronous publication outside the future driver. Delivery errors must
+        // not be replaced with capturable timeouts, and publishing can pause body reads.
+        for delta in arguments {
+            context.check_future_limits(Some(deadline))?;
+            publish(
+                emitter,
+                LlmEmission {
+                    delta: None,
+                    tool_call: None,
+                    tool_call_delta: Some(delta),
+                },
+            )?;
+        }
+        let item = match item {
+            Poll::Pending => continue,
+            Poll::Ready(None) => break,
+            Poll::Ready(Some(item)) => item,
+        };
         context.check_future_limits(Some(deadline))?;
         let item = item.with_context(|source| crate::ProviderSnafu {
             kind: source.kind().code(),
@@ -53,53 +87,20 @@ pub fn complete(
                     tool_call_delta: None,
                 }
             }
-            Item::Event(StreamEvent::Arguments { part, json }) if allow_tools => LlmEmission {
-                delta: None,
-                tool_call: None,
-                tool_call_delta: Some(ToolActivity::Call {
-                    model_call_id: call_id.into(),
-                    part: part.index() as u64,
-                    arguments: json,
-                    call: None,
-                }),
-            },
             Item::Event(StreamEvent::End {
-                part,
                 content: AssistantContent::ToolCall(call),
-            }) if allow_tools => {
-                let call = ToolCall::from_provider(call)?;
-                LlmEmission {
-                    delta: None,
-                    tool_call: Some(ToolCallEvent {
-                        model_call_id: call_id.into(),
-                        call: call.clone(),
-                    }),
-                    tool_call_delta: Some(ToolActivity::Call {
-                        model_call_id: call_id.into(),
-                        part: part.index() as u64,
-                        arguments: String::new(),
-                        call: Some(call),
-                    }),
-                }
-            }
+                ..
+            }) if allow_tools => LlmEmission {
+                delta: None,
+                tool_call: Some(ToolCallEvent {
+                    model_call_id: call_id.into(),
+                    call: ToolCall::from_provider(call)?,
+                }),
+                tool_call_delta: None,
+            },
             _ => continue,
         };
-        let skipped = [
-            ("delta", emission.delta.is_none()),
-            ("tool_call", emission.tool_call.is_none()),
-            ("tool_call_delta", emission.tool_call_delta.is_none()),
-        ]
-        .into_iter()
-        .filter(|(_, absent)| *absent)
-        .map(|(name, _)| name.into())
-        .collect();
-        emitter
-            .send(TypedNodeResult {
-                outputs: emission,
-                skipped,
-                loop_summary: None,
-            })
-            .context(crate::PublicationSnafu)?;
+        publish(emitter, emission)?;
     }
     context
         .execute_future(response.finish(), Some(deadline))?
@@ -109,4 +110,26 @@ pub fn complete(
                 .provider_response_status()
                 .map(|status| status.as_u16()),
         })
+}
+
+fn publish(
+    emitter: &mut TypedEmitter<'_, '_, LlmEmission>,
+    emission: LlmEmission,
+) -> Result<(), LlmExecutionError> {
+    let skipped = [
+        ("delta", emission.delta.is_none()),
+        ("tool_call", emission.tool_call.is_none()),
+        ("tool_call_delta", emission.tool_call_delta.is_none()),
+    ]
+    .into_iter()
+    .filter(|(_, absent)| *absent)
+    .map(|(name, _)| name.into())
+    .collect();
+    emitter
+        .send(TypedNodeResult {
+            outputs: emission,
+            skipped,
+            loop_summary: None,
+        })
+        .context(crate::PublicationSnafu)
 }

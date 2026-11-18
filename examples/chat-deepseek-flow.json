@@ -338,21 +338,9 @@
   ],
   "outputs": [
     {
-      "name": "tool_call",
+      "name": "tool_call_delta",
       "node": "agent",
-      "port": "tool_call",
-      "optional": true
-    },
-    {
-      "name": "tool_started",
-      "node": "agent",
-      "port": "tool_started",
-      "optional": true
-    },
-    {
-      "name": "tool_finished",
-      "node": "agent",
-      "port": "tool_finished",
+      "port": "tool_call_delta",
       "optional": true
     },
     {

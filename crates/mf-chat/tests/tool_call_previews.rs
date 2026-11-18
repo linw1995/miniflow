@@ -1,22 +1,30 @@
 use mf_chat::{
-    ChatHost, ConversationInputs, HostConfig, Invocation, PreviewDelta, ToolActivity,
-    WorkflowProfile,
+    ChatHost, ConversationInputs, HostConfig, Invocation, PreviewDelta, WorkflowProfile,
 };
 use mf_runtime::{ExecutionContext, NodeValue, WorkflowArguments};
 use mfn_llm::test_support::{Reply, Server};
 use serde_json::json;
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::TryRecvError,
+    },
+    time::{Duration, Instant},
+};
 
 fn calls() -> Reply {
     let mut reply = Reply::stream_text("");
     let chunks = [
         json!({"content":"Checking tools"}),
         json!({"tool_calls":[
-            {"index":0,"id":"first","type":"function","function":{"name":"calculator","arguments":"{\"operation\":\"add\","}},
+            {"index":0,"id":"first","type":"function","function":{"name":"calculator","arguments":"{ \"operation\":\"add\","}},
             {"index":1,"id":"second","type":"function","function":{"name":"unknown","arguments":"{"}}
         ]}),
         json!({"tool_calls":[{"index":1,"function":{"arguments":"}"}}]}),
-        json!({"tool_calls":[{"index":0,"function":{"arguments":"\"left\":2,\"right\":3}"}}]}),
+        json!({"tool_calls":[{"index":0,"function":{"arguments":"\"left\":2,\"right\":3 }"}}]}),
     ];
     reply.body = chunks.into_iter().map(|delta| {
         let chunk = json!({"id":"response","object":"chat.completion.chunk","created":0,"model":"fixture","choices":[{"index":0,"delta":delta,"finish_reason":null}]});
@@ -43,8 +51,19 @@ fn profile(server: &Server) -> WorkflowProfile {
 }
 
 #[test]
-fn parallel_tool_previews_precede_terminal_text_and_never_become_saved_messages() {
-    let server = Server::start(vec![calls(), Reply::stream_text("Final answer")]);
+fn parallel_tool_argument_previews_precede_the_answer_without_changing_the_transcript() {
+    let release = Arc::new(AtomicBool::new(false));
+    let mut reply = calls();
+    let prefix = reply
+        .body
+        .split_inclusive("\n\n")
+        .take(2)
+        .map(str::len)
+        .sum();
+    let (prefix, tail) = reply.body.as_bytes().split_at(prefix);
+    reply.fragments = Some(vec![prefix.to_vec(), tail.to_vec()]);
+    reply.release_after_prefix = Some(release.clone());
+    let server = Server::start(vec![reply, Reply::stream_text("Final answer")]);
     let root = tempfile::tempdir().unwrap();
     let host = ChatHost::open(
         root.path().join("chat.sqlite"),
@@ -55,14 +74,40 @@ fn parallel_tool_previews_precede_terminal_text_and_never_become_saved_messages(
         .database()
         .create_session("tools", None, Some("Manual title".into()))
         .unwrap();
-    let (job, receiver) = host.submit_stream(&session.id, "Use tools").unwrap();
+    let (mut job, receiver) = host.submit_stream(&session.id, "Use tools").unwrap();
     let invocation = job.invocation().clone();
-    let mut fragments = BTreeMap::<(String, u64), String>::new();
-    let mut ready = BTreeMap::new();
-    let mut running = BTreeMap::new();
-    let mut results = BTreeMap::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let first_fragment = loop {
+        match receiver.try_recv() {
+            Ok(
+                event @ mf_chat::PreviewEvent {
+                    delta: PreviewDelta::ToolCall { .. },
+                    ..
+                },
+            ) => break event,
+            Ok(_) => continue,
+            Err(TryRecvError::Disconnected) => panic!("model ended without an argument fragment"),
+            Err(TryRecvError::Empty) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "argument publication waited for the withheld SSE tail"
+                );
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+    };
+    assert!(!job.poll());
+    assert_eq!(server.requests().len(), 1);
+    assert_eq!(
+        host.database().model_context(&session.id).unwrap().revision,
+        0
+    );
+    release.store(true, Ordering::Release);
+    let mut fragments = BTreeMap::<(String, u64), Vec<String>>::new();
+    let mut named = BTreeSet::new();
     let mut final_text = false;
-    while let Ok(event) = receiver.recv() {
+    for event in std::iter::once(first_fragment).chain(std::iter::from_fn(|| receiver.recv().ok()))
+    {
         assert_eq!(event.invocation, invocation);
         assert!(
             !serde_json::to_string(&event)
@@ -72,80 +117,72 @@ fn parallel_tool_previews_precede_terminal_text_and_never_become_saved_messages(
         match event.delta {
             PreviewDelta::Text { delta } => {
                 if delta.text == "Final answer" {
-                    assert_eq!(results.len(), 2);
+                    assert_eq!(fragments.len(), 2);
+                    assert!(fragments.values().all(|parts| parts.len() == 2));
                     final_text = true;
                 }
             }
-            PreviewDelta::Tool {
-                activity:
-                    ToolActivity::Call {
-                        model_call_id,
-                        part,
-                        arguments,
-                        call,
-                    },
-            } => {
-                assert!(!model_call_id.is_empty());
-                let text = fragments.entry((model_call_id, part)).or_default();
-                if let Some(call) = call {
-                    assert_eq!(
-                        serde_json::from_str::<serde_json::Value>(text).unwrap(),
-                        serde_json::to_value(&call.arguments).unwrap()
-                    );
-                    ready.insert(call.id, call.name);
-                } else {
-                    text.push_str(&arguments);
+            PreviewDelta::ToolCall { delta } => {
+                if let Some(id) = delta.id {
+                    assert!(named.insert((id, delta.name.unwrap())));
                 }
-            }
-            PreviewDelta::Tool {
-                activity: ToolActivity::Running { tool_call_id, name },
-            } => {
-                assert_eq!(ready.get(&tool_call_id), Some(&name));
-                running.insert(tool_call_id, name);
-            }
-            PreviewDelta::Tool {
-                activity:
-                    ToolActivity::Result {
-                        tool_call_id,
-                        failed,
-                        content,
-                    },
-            } => {
-                assert!(running.contains_key(&tool_call_id));
-                results.insert(tool_call_id, (failed, content));
+                fragments
+                    .entry((delta.model_call_id, delta.index))
+                    .or_default()
+                    .push(delta.arguments);
             }
         }
     }
     assert!(final_text);
     assert_eq!(fragments.len(), 2);
-    assert_eq!(results["first"], (false, "5.0".into()));
-    assert!(results["second"].0 && results["second"].1.contains("unknown tool"));
+    assert_eq!(
+        named,
+        BTreeSet::from([
+            ("first".into(), "calculator".into()),
+            ("second".into(), "unknown".into()),
+        ])
+    );
     let completion = job.join().unwrap();
     assert_eq!(completion.result.final_text(), Some("Final answer"));
     assert_eq!(completion.result.display_messages().len(), 4);
+    let model = &completion.result.usages[0].call_id;
+    assert_eq!(
+        fragments[&(model.clone(), 0)],
+        [r#"{ "operation":"add","#, r#""left":2,"right":3 }"#]
+    );
+    assert_eq!(fragments[&(model.clone(), 1)], ["{", "}"]);
+    let page = host.database().messages(&session.id, 50, None).unwrap();
+    assert_eq!(page.messages.len(), 5);
+    let results: BTreeMap<_, _> = page
+        .messages
+        .iter()
+        .filter_map(|record| match &record.message.payload {
+            mf_chat::ChatMessage::ToolResult {
+                tool_call_id,
+                content,
+                ..
+            } => Some((tool_call_id.as_str(), content.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results["first"], "5.0");
+    assert!(results["second"].contains("unknown tool"));
     assert_eq!(
         host.database().model_context(&session.id).unwrap().revision,
         1
-    );
-    let page = host.database().messages(&session.id, 50, None).unwrap();
-    assert_eq!(page.messages.len(), 5);
-    assert!(
-        page.messages
-            .iter()
-            .all(|record| !record.message.content().contains("model_call_id"))
     );
     assert_eq!(server.requests().len(), 2);
     host.close().unwrap();
 }
 
 #[test]
-fn native_tool_only_streams_are_observed_and_mismatched_kinds_fail() {
+fn native_tool_only_previews_accept_call_deltas_and_reject_other_payloads() {
     for mismatched in [false, true] {
         let server = Server::start(vec![calls()]);
-        let name = if mismatched {
-            "tool_finished"
+        let port = if mismatched {
+            "delta"
         } else {
-            "tool_call"
+            "tool_call_delta"
         };
         let definition = serde_json::from_value(json!({
             "version":"2026-10-28", "dependencies":{},
@@ -157,7 +194,7 @@ fn native_tool_only_streams_are_observed_and_mismatched_kinds_fail() {
                 {"id":"result","kind":"builtin.constant","config":{"value":{"status":"succeeded","messages":[{"role":"assistant","content":"Done"}],"usages":[]}}}
             ],
             "edges":[{"from_node":"model","to_node":"result"}],
-            "outputs":[{"name":name,"node":"model","port":"tool_call_delta","optional":true}, {"name":"append","node":"result","port":"value"}]
+            "outputs":[{"name":"tool_call_delta","node":"model","port":port,"optional":true}, {"name":"append","node":"result","port":"value"}]
         })).unwrap();
         let profile = WorkflowProfile::new("tools", definition, Default::default()).unwrap();
         let root = tempfile::tempdir().unwrap();
@@ -170,50 +207,42 @@ fn native_tool_only_streams_are_observed_and_mismatched_kinds_fail() {
         let (job, receiver) = host.submit_stream(&session.id, "Use tools").unwrap();
         let mut events = 0;
         while let Ok(event) = receiver.recv() {
-            assert!(matches!(
-                event.delta,
-                PreviewDelta::Tool {
-                    activity: ToolActivity::Call { .. }
-                }
-            ));
+            assert!(matches!(event.delta, PreviewDelta::ToolCall { .. }));
             events += 1;
         }
         let result = job.join();
         if mismatched {
             assert!(result.is_err());
             assert_eq!(events, 0);
+            assert_eq!(
+                host.database().model_context(&session.id).unwrap().revision,
+                0
+            );
         } else {
-            assert!(result.is_ok());
-            assert!(events >= 2);
+            assert_eq!(result.unwrap().result.final_text(), Some("Done"));
+            assert_eq!(events, 4);
         }
         host.close().unwrap();
     }
 }
 
 #[test]
-fn cancellation_from_a_running_tool_preview_cannot_publish_success_or_an_error_result() {
+fn cancellation_during_tool_argument_streaming_does_not_complete_the_turn() {
     let server = Server::start(vec![calls()]);
     let backend = profile(&server).backend();
     let mut context = ExecutionContext::default();
     let cancellation = context.cancellation();
-    let mut started = false;
+    let mut saw_fragment = false;
     let mut consume = |delta| -> Result<(), mf_chat::ChatError> {
-        match delta {
-            PreviewDelta::Tool {
-                activity: ToolActivity::Running { .. },
-            } => {
-                started = true;
-                cancellation.cancel(
-                    mf_runtime::StreamExecutionSnafu {
-                        message: "cancel from tool preview",
-                    }
-                    .build(),
-                );
-            }
-            PreviewDelta::Tool {
-                activity: ToolActivity::Result { .. },
-            } => panic!("cancelled dispatch published a result"),
-            _ => {}
+        if let PreviewDelta::ToolCall { delta } = delta {
+            assert_eq!(delta.arguments, r#"{ "operation":"add","#);
+            saw_fragment = true;
+            cancellation.cancel(
+                mf_runtime::StreamExecutionSnafu {
+                    message: "cancel from argument preview",
+                }
+                .build(),
+            );
         }
         Ok(())
     };
@@ -233,6 +262,6 @@ fn cancellation_from_a_running_tool_preview_cannot_publish_success_or_an_error_r
             )
             .is_err()
     );
-    assert!(started);
+    assert!(saw_fragment);
     assert_eq!(server.requests().len(), 1);
 }

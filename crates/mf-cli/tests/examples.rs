@@ -567,20 +567,22 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                 } else {
                     2
                 };
-                assert!(
-                    records
-                        .iter()
-                        .any(|record| record.get("tool_call").is_some()),
-                    "{name}: missing call fragments"
-                );
-                for stream in ["tool_started", "tool_finished"] {
-                    assert_eq!(
-                        records
-                            .iter()
-                            .filter(|record| record.get(stream).is_some())
-                            .count(),
-                        expected,
-                        "{name}: {stream}"
+                let deltas: Vec<_> = records
+                    .iter()
+                    .filter_map(|record| record.get("tool_call_delta"))
+                    .collect();
+                assert_eq!(deltas.len(), expected, "{name}");
+                let mut parts = std::collections::BTreeSet::new();
+                for delta in deltas {
+                    assert!(parts.insert((
+                        delta["model_call_id"].as_str().unwrap(),
+                        delta["index"].as_u64().unwrap()
+                    )));
+                    assert!(delta["id"].as_str().is_some());
+                    assert!(
+                        serde_json::from_str::<Value>(delta["arguments"].as_str().unwrap())
+                            .unwrap()
+                            .is_object()
                     );
                 }
             }
