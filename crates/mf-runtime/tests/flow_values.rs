@@ -211,6 +211,133 @@ fn native_codecs_and_node_value_derive_clone_capabilities_without_serde() {
     assert_eq!(forwarded["handlers"][0].as_flow(), Some(&flow));
 }
 
+#[test]
+fn configured_capabilities_survive_native_codecs_and_preserve_typed_configuration_failures() {
+    use mf_runtime::{FlowInputConfigurationError, NodeBuildError};
+    let schema: WorkflowInputSchema = serde_json::from_value(json!({"inputs":{"params":{
+        "token":{"type":"string","required":true,"binding":{"secret":true}},
+        "fixed":{"type":"string","required":true},
+        "query":{"type":"string","required":true}
+    }},"stdin":{}}))
+    .unwrap();
+    let original = FlowValue::new(
+        PreparedSubgraph::new(
+            vec![],
+            vec![PortSpec::new("content", ValueType::String, true)],
+            |context| {
+                assert_eq!(
+                    context.workflow_arguments().0["params.token"].as_str(),
+                    Some("synthetic-codec-token")
+                );
+                assert!(context.workflow_arguments().0["params.token"].is_secret());
+                assert_eq!(
+                    context.workflow_arguments().0["params.fixed"].as_str(),
+                    Some("application-owned")
+                );
+                Ok(FlowOutputs::from([(
+                    "content".into(),
+                    context.workflow_arguments().0["params.query"].clone(),
+                )]))
+            },
+        )
+        .with_input_schema(schema),
+    )
+    .unwrap();
+    let source = FlowNode {
+        definition_id: "source".into(),
+        node: (),
+        metadata: NodePorts {
+            inputs: vec![],
+            outputs: vec![PortSpec::new("token", ValueType::String, true)],
+        }
+        .into(),
+        output_keys: Default::default(),
+    };
+    let context = ExecutionContext::for_message(
+        &source,
+        Inputs::from([(
+            "token".into(),
+            ValueRef::from("synthetic-codec-token").into_secret(),
+        )])
+        .into(),
+    )
+    .unwrap();
+    let configuration = original
+        .configure_inputs(BTreeMap::from([
+            ("token".into(), json!({"$ref":"source.token"})),
+            ("fixed".into(), json!("application-owned")),
+        ]))
+        .unwrap();
+    assert_eq!(configuration.references().len(), 1);
+    let properties = configuration.properties();
+    assert_eq!(properties["allowed"], json!({"query":{"type":"string"}}));
+    assert_eq!(properties["required"], json!(["query"]));
+    assert!(!properties.to_string().contains("synthetic-codec-token"));
+    assert_eq!(
+        format!("{configuration:?}"),
+        "FlowInputConfiguration { .. }"
+    );
+    let configured = configuration.resolve(&context).unwrap();
+    drop(context);
+    let encoded = configured.clone().encode().unwrap();
+    let decoded = FlowValue::decode(encoded).unwrap();
+    assert_eq!(configured, decoded);
+    assert_ne!(original, decoded);
+    assert_eq!(decoded.properties(), properties);
+    assert_eq!(
+        decoded.signature().inputs,
+        [PortSpec::new("params.query", ValueType::String, true)]
+    );
+    let output = decoded
+        .invoke(
+            "codec",
+            WorkflowArguments(Inputs::from([("query".into(), "native round trip".into())])),
+            &mut ExecutionContext::default(),
+        )
+        .unwrap();
+    assert_eq!(output["content"].as_str(), Some("native round trip"));
+    for name in ["fixed", "params.fixed"] {
+        assert!(
+            decoded
+                .invocation_arguments(WorkflowArguments(Inputs::from([(
+                    name.into(),
+                    "override".into()
+                )])))
+                .is_err()
+        );
+    }
+    let invalid = original
+        .configure_inputs(BTreeMap::from([("fixed".into(), json!(42))]))
+        .unwrap_err();
+    let invalid: NodeBuildError = invalid.into();
+    assert!(
+        std::error::Error::source(&invalid)
+            .unwrap()
+            .is::<FlowInputConfigurationError>()
+    );
+    let missing = original
+        .configure_inputs(BTreeMap::from([(
+            "fixed".into(),
+            json!({"$ref":"missing.output"}),
+        )]))
+        .unwrap();
+    let invalid: NodeExecutionError = missing
+        .resolve(&ExecutionContext::default())
+        .unwrap_err()
+        .into();
+    assert!(
+        std::error::Error::source(&invalid)
+            .unwrap()
+            .is::<FlowInputConfigurationError>()
+    );
+    let empty = original.configure_inputs(BTreeMap::new()).unwrap();
+    assert_eq!(empty.properties(), original.properties());
+    assert_eq!(
+        empty.resolve(&ExecutionContext::default()).unwrap(),
+        original
+    );
+}
+
 struct Emit(ValueRef);
 
 impl NodePortContract for Emit {

@@ -42,8 +42,8 @@
                 },
                 "code": {
                   "structure": "item.interface.callable",
-                  "documented": "cel.bind(docs, ('parameters' in item ? item.parameters : {}), size(docs) == size(item.interface.allowed.transformMap(k, v, k in docs, v)))",
-                  "portable": "item.interface.parameters.all(p, p.secret || !p.runtime_only)",
+                  "documented": "cel.bind(docs, ('parameters' in item ? item.parameters : {}), docs.all(k, item.interface.parameters.exists(p, p.name == k && !p.secret)))",
+                  "portable": "item.interface.parameters.all(p, p.secret || ('configured' in p && p.configured) || !p.runtime_only)",
                   "value": "cel.bind(docs, ('parameters' in item ? item.parameters : {}), {'name': name, 'description': item.description, 'input_schema': {'type': 'object', 'properties': item.interface.allowed.transformMap(k, v, true, k in docs ? v + docs[k] : v), 'required': item.interface.required, 'additionalProperties': false}})"
                 }
               },
@@ -66,7 +66,7 @@
               "id": "require_structure",
               "kind": "builtin.assert",
               "config": {
-                "message": "Every tool requires exactly one startup node, a terminal interface, no stdin, and a resolvable secret source",
+                "message": "Every tool requires exactly one startup node, a terminal interface, and no stdin",
                 "condition": {
                   "source": {
                     "output": "definition.structure",
