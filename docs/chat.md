@@ -618,7 +618,7 @@ resources on session change, eviction, or exit.
 | Browse messages / return to editing | Esc / i |
 | Open commands | Ctrl+P |
 | Toggle execution panel | Ctrl+E |
-| Select next / previous tool group while browsing | Tab / Shift+Tab |
+| Select next / previous tool group while browsing | j / k, or Tab / Shift+Tab |
 | Manually expand / collapse selected tool group | Space while browsing, or Ctrl+T |
 | New chat / switch saved chat | Ctrl+N / Ctrl+S |
 | Cancel current execution | Ctrl+C |

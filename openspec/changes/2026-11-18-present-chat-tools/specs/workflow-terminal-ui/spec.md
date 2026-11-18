@@ -37,8 +37,9 @@ Chat SHALL group arguments and results by call. Groups SHALL automatically expan
 
 #### Scenario: Expand and collapse a group
 
-- **WHEN** the user selects a group with Tab or Shift+Tab in browse mode and presses Space or Ctrl+T
+- **WHEN** the user selects a group with j/k or Tab/Shift+Tab in browse mode and presses Space or Ctrl+T
 - **THEN** only that group's arguments and result change visibility, without running tools, changing model context, or interpreting tool payloads as Markdown or escape sequences
+- **AND** arrow keys continue scrolling and j/k remain ordinary text in the input editor
 
 #### Scenario: Collapse the completed turn
 

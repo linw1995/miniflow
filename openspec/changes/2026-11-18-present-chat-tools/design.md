@@ -20,8 +20,9 @@ arguments begin streaming and collapses when turn settlement replaces the previe
 and any result remain behind a leading `[+]` or `[-]` marker. Tool execution status does not control
 folding. Preview rows use the model-call identity to reproduce the
 same message and inter-tool spacing as settled batches. Unmatched observations use the same rule
-without guessing a message identity. Browse-mode Tab/Shift+Tab selects groups in display order;
-Space or Ctrl+T toggles the selection. A late, unambiguous wire ID transfers focus, expansion, and
+without guessing a message identity. Browse-mode j/k selects groups in display order, with
+Tab/Shift+Tab retained as aliases and arrow keys reserved for scrolling. Space or Ctrl+T toggles
+the selection. A late, unambiguous wire ID transfers focus, expansion, and
 scrolling to the canonical group key. Only a correlated execution observation updates the group
 status. Missing or ambiguous hints do not match by position or name.
 

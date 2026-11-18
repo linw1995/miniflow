@@ -1399,17 +1399,13 @@ impl ChatView {
                 _ => self.editor.key(key),
             },
             Mode::Browse => match key.code {
-                KeyCode::Tab => self.focus_tool(false),
-                KeyCode::BackTab => self.focus_tool(true),
+                KeyCode::Tab | KeyCode::Char('j') => self.focus_tool(false),
+                KeyCode::BackTab | KeyCode::Char('k') => self.focus_tool(true),
                 KeyCode::Char(' ') => self.toggle_tool(),
                 KeyCode::Enter => self.submit(controller),
                 KeyCode::Char('i') | KeyCode::Esc => self.mode = Mode::Input,
-                KeyCode::Up | KeyCode::Char('k') => {
-                    self.scroll.set(self.scroll.get().saturating_add(1))
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    self.scroll.set(self.scroll.get().saturating_sub(1))
-                }
+                KeyCode::Up => self.scroll.set(self.scroll.get().saturating_add(1)),
+                KeyCode::Down => self.scroll.set(self.scroll.get().saturating_sub(1)),
                 KeyCode::PageUp => self.scroll.set(self.scroll.get().saturating_add(10)),
                 KeyCode::PageDown => self.scroll.set(self.scroll.get().saturating_sub(10)),
                 _ => {}
@@ -1704,9 +1700,7 @@ impl ChatView {
         drop(transcript);
         let hint = match self.mode {
             Mode::Input => " Alt+Enter send | Enter newline | Esc browse ",
-            Mode::Browse => {
-                " Enter send | i edit | Tab/Shift+Tab tool | Space fold | arrows scroll "
-            }
+            Mode::Browse => " Enter send | i edit | j/k tool | Space fold | arrows scroll ",
             _ => "",
         };
         let editor = Paragraph::new(input).wrap(Wrap { trim: false });
@@ -2350,12 +2344,16 @@ mod tests {
             assert_grouped_tools(&settled, true, false);
             assert!(settled.contains("**argument**") && !settled.contains("**preview argument**"));
             assert_eq!(view.tool_keys(), [first.clone(), second.clone()]);
-            view.focus_tool(false);
-            assert_eq!(view.focused_tool.as_ref(), Some(&second));
-            view.focus_tool(true);
-            assert_eq!(view.focused_tool.as_ref(), Some(&first));
-            view.focus_tool(false);
-            assert_eq!(view.focused_tool.as_ref(), Some(&second));
+            for (key, expected) in [
+                (KeyCode::Char('j'), &second),
+                (KeyCode::Char('k'), &first),
+                (KeyCode::BackTab, &second),
+                (KeyCode::Tab, &first),
+                (KeyCode::Char('j'), &second),
+            ] {
+                view.key(KeyEvent::new(key, KeyModifiers::NONE), &controller);
+                assert_eq!(view.focused_tool.as_ref(), Some(expected));
+            }
             view.key(toggle, &controller);
             assert!(render(&view, 140, 70).contains("**literal tool**"));
             view.key(toggle, &controller);
@@ -2960,16 +2958,19 @@ mod tests {
     }
 
     #[test]
-    fn connection_shortcut_does_not_intercept_chat_prompt_editing() {
+    fn editing_keeps_plain_letters_out_of_global_shortcuts() {
         let root = tempfile::tempdir().unwrap();
         let launch = super::super::tests::launch(root.path());
         let mut view = ChatView::new(launch.runner.description()).unwrap();
         let controller = ChatController::open(launch).unwrap();
-        view.key(
-            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
-            &controller,
-        );
-        assert_eq!(view.editor.text, "e");
+        for character in ['e', 'j', 'k'] {
+            view.key(
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+                &controller,
+            );
+        }
+        assert_eq!(view.editor.text, "ejk");
+        assert!(view.focused_tool.is_none());
         controller.close().unwrap();
     }
 
