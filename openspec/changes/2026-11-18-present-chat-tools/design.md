@@ -15,8 +15,10 @@ Router can opt into a static observation category and an optional public `observ
 ## Presentation
 
 The live cache groups arguments by invocation, model call, and index. Rendering and keyboard
-navigation use the same live tool group projection. Each group folds its arguments and any result
-behind a leading `[+]` or `[-]` marker. Preview rows use the model-call identity to reproduce the
+navigation use the same live tool group projection. Each group automatically expands when its
+arguments begin streaming and collapses when turn settlement replaces the preview. Its arguments
+and any result remain behind a leading `[+]` or `[-]` marker. Tool execution status does not control
+folding. Preview rows use the model-call identity to reproduce the
 same message and inter-tool spacing as settled batches. Unmatched observations use the same rule
 without guessing a message identity. Browse-mode Tab/Shift+Tab selects groups in display order;
 Space or Ctrl+T toggles the selection. A late, unambiguous wire ID transfers focus, expansion, and
@@ -26,10 +28,11 @@ status. Missing or ambiguous hints do not match by position or name.
 Authoritative messages replace previews without duplicating a call. If both are visible on the
 current history page, results appear under their matching calls within the same turn and assistant
 batch. A result-only page keeps the ID and the same fold key. Grouping does not reorder stored
-messages. Raw argument previews and canonical arguments share incremental JSON syntax highlighting. Incomplete or malformed fragments keep their exact text
-without waiting for JSON validation. Each call retains up to 8 KiB of recent argument text within
-the existing shared preview budget; older deltas are omitted with delta and byte counts. Canonical
-arguments use the same tail limit after settlement and SQLite reload without inventing delta counts.
-Neither provisional delta history nor omission markers are persisted. Full arguments remain in the
-authoritative messages and in actual dispatch. Arguments and results remain literal; assistant text
-keeps Markdown rendering.
+messages. Raw argument previews and canonical arguments share incremental JSON syntax highlighting.
+Incomplete or malformed fragments keep their exact text without waiting for JSON validation.
+Each call retains up to 8 KiB of recent argument text within the existing shared preview budget;
+older deltas are omitted with delta and byte counts. The tail limit applies only to live previews.
+Manually expanded canonical arguments and SQLite history display their complete saved values.
+Neither provisional delta history, fold state, nor omission markers are persisted. Full arguments
+remain in the authoritative messages and in actual dispatch. Arguments and results remain literal;
+assistant text keeps Markdown rendering.

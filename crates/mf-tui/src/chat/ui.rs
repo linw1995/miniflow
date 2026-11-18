@@ -214,7 +214,7 @@ enum ToolArguments<'a> {
 struct ArgumentView<'a> {
     text: &'a str,
     total_bytes: usize,
-    omitted_deltas: Option<u64>,
+    omitted_deltas: u64,
 }
 
 fn display_bytes(bytes: usize) -> String {
@@ -234,13 +234,12 @@ impl ArgumentView<'_> {
 
     fn omission_label(&self) -> String {
         let bytes = display_bytes(self.omitted_bytes());
-        match self.omitted_deltas {
-            Some(count) => {
-                let unit = if count == 1 { "delta" } else { "deltas" };
-                format!("… {count} older {unit} omitted · {bytes} …")
-            }
-            None => format!("… canonical argument prefix omitted · {bytes} …"),
-        }
+        let unit = if self.omitted_deltas == 1 {
+            "delta"
+        } else {
+            "deltas"
+        };
+        format!("… {} older {unit} omitted · {bytes} …", self.omitted_deltas)
     }
 }
 
@@ -281,35 +280,41 @@ impl<'a> ToolGroup<'a> {
             result,
             execution,
         } = self;
+        let open = expanded.contains(&key);
         let argument_key = format!("{key}:arguments");
         let canonical;
-        let arguments = match arguments {
-            Some(ToolArguments::Raw(text, tool)) => Some(ArgumentView {
-                text,
-                total_bytes: tool.argument_bytes(),
-                omitted_deltas: Some(tool.omitted_deltas()),
-            }),
-            Some(ToolArguments::Canonical(value)) => {
-                canonical = transcript.canonical_arguments(argument_key.clone(), value);
-                Some(ArgumentView {
-                    text: &canonical.text,
-                    total_bytes: canonical.total_bytes,
-                    omitted_deltas: None,
-                })
+        let arguments = if open {
+            match arguments {
+                Some(ToolArguments::Raw(text, tool)) => Some(ArgumentView {
+                    text,
+                    total_bytes: tool.argument_bytes(),
+                    omitted_deltas: tool.omitted_deltas(),
+                }),
+                Some(ToolArguments::Canonical(value)) => {
+                    canonical = serde_json::to_string_pretty(value)
+                        .unwrap_or_else(|error| format!("[Arguments unavailable: {error}]"));
+                    Some(ArgumentView {
+                        text: &canonical,
+                        total_bytes: canonical.len(),
+                        omitted_deltas: 0,
+                    })
+                }
+                None => None,
             }
-            None => None,
+        } else {
+            None
         };
-        let open = expanded.contains(&key);
         let marker = if open { "[-]" } else { "[+]" };
-        let mut title = title;
-        if let Some(arguments) = &arguments
+        let title = if let Some(arguments) = &arguments
             && arguments.omitted_bytes() > 0
         {
-            title.push_str(&format!(
-                " · {} · truncated",
+            format!(
+                "{title} · {} · truncated",
                 display_bytes(arguments.total_bytes)
-            ));
-        }
+            )
+        } else {
+            title
+        };
         let label = if let Some(execution) = execution {
             format!("{marker} [{}] {title}", tool_status(execution))
         } else {
@@ -908,7 +913,7 @@ impl ChatView {
                         .as_ref()
                         .is_some_and(|(active, _)| active == &invocation)
                 {
-                    self.replace_preview(&invocation.turn_id, preview);
+                    self.replace_preview(preview);
                 }
             }
             ChatEvent::Observing(observation) => self.observation = Some(observation),
@@ -928,6 +933,12 @@ impl ChatView {
                 }
                 self.transcript.get_mut().clear_images();
                 self.preview.incomplete = true;
+                if self.running {
+                    let canonical = format!("tool:{}:", invocation.turn_id);
+                    let anonymous = format!("tool-preview:{}:", invocation.turn_id);
+                    self.expanded_tools
+                        .retain(|key| !key.starts_with(&canonical) && !key.starts_with(&anonymous));
+                }
                 self.running = false;
                 self.pending = None;
                 self.retained = false;
@@ -1149,7 +1160,29 @@ impl ChatView {
             self.earlier = false;
         }
     }
-    fn replace_preview(&mut self, turn: &str, preview: LivePreview) {
+    fn replace_preview(&mut self, preview: LivePreview) {
+        let Some(invocation) = &preview.invocation else {
+            return;
+        };
+        let turn = &invocation.turn_id;
+        let unique = unique_preview_ids(&preview);
+        let keys = preview
+            .segments
+            .iter()
+            .filter_map(|segment| {
+                let tool = segment.tool.as_ref()?;
+                (tool.argument_bytes() > 0).then(|| {
+                    tool.id
+                        .as_deref()
+                        .filter(|id| unique.contains(id))
+                        .map_or_else(
+                            || preview_tool_key(turn, &segment.model_call_id, tool.index),
+                            |id| tool_key(turn, id),
+                        )
+                })
+            })
+            .collect::<BTreeSet<_>>();
+        self.expanded_tools.extend(keys);
         if self.preview.segments.is_empty() {
             self.preview = preview;
             return;
@@ -1957,19 +1990,13 @@ mod tests {
     }
 
     #[test]
-    fn argument_omission_labels_do_not_invent_canonical_delta_counts() {
-        let mut view = ArgumentView {
+    fn argument_omission_labels_report_partial_and_complete_deltas() {
+        let view = ArgumentView {
             text: "tail",
             total_bytes: 516,
-            omitted_deltas: Some(1),
+            omitted_deltas: 1,
         };
         assert_eq!(view.omission_label(), "… 1 older delta omitted · 512 B …");
-        view.total_bytes = 1024 * 1024 + view.text.len();
-        view.omitted_deltas = None;
-        assert_eq!(
-            view.omission_label(),
-            "… canonical argument prefix omitted · 1.0 MiB …"
-        );
     }
 
     #[test]
@@ -2025,7 +2052,7 @@ mod tests {
             render(&view, 100, 22);
             assert!(view.transcript.get_mut().focus(&format!("{old}{suffix}")));
             view.scroll.set(1);
-            view.replace_preview(turn, identified.clone());
+            view.replace_preview(identified.clone());
             let screen = render(&view, 100, 22);
             assert!(
                 screen.lines().nth(1).unwrap().contains(expected),
@@ -2098,13 +2125,11 @@ mod tests {
             },
             &controller,
         );
-        let collapsed = render(&view, 240, 70);
-        assert!(collapsed.contains("[+] Tool call search [long] · 8.8 KiB · truncated"));
-        assert!(!collapsed.contains("live-tail") && !collapsed.contains("deltas omitted"));
-        view.expanded_tools.insert(key.clone());
-        let live = render(&view, 240, 70);
+        assert_eq!(view.expanded_tools, BTreeSet::from([key.clone()]));
+        let live = render(&view, 240, 100);
+        assert!(live.contains("[-] Tool call search [long] · 8.8 KiB · truncated"));
         assert!(live.contains("2 older deltas omitted"), "{live}");
-        assert!(live.contains("truncated") && live.contains("live-tail"));
+        assert!(live.contains("live-tail"));
         assert!(!live.contains("OLD_PREFIX"));
 
         let canonical = serde_json::json!({
@@ -2134,19 +2159,24 @@ mod tests {
             &controller,
         );
         let saved = render(&view, 240, 70);
-        assert!(
-            saved.contains("canonical argument prefix omitted"),
-            "{saved}"
+        assert!(saved.contains("[+] Tool call search [long]"), "{saved}");
+        assert!(!saved.contains("live-tail") && !saved.contains("persisted-tail"));
+        view.mode = Mode::Browse;
+        view.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &controller);
+        view.key(
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+            &controller,
         );
-        assert!(saved.contains("truncated") && saved.contains("persisted-tail"));
-        assert!(!saved.contains("live-tail"));
+        let full = render(&view, 240, 100);
+        assert!(full.contains("persisted-tail") && full.contains("Finished"));
+        assert!(!full.contains("live-tail"));
+        assert!(!full.contains("truncated") && !full.contains("older deltas omitted"));
         controller.close().unwrap();
 
         let launch = super::super::tests::launch(root.path());
         let mut view = ChatView::new(launch.runner.description()).unwrap();
         view.show_execution = false;
         view.switch(Some(session.clone()));
-        view.expanded_tools.insert(key);
         let controller = ChatController::open(launch).unwrap();
         let page = controller
             ._database
@@ -2164,6 +2194,15 @@ mod tests {
             })
             .unwrap();
         assert_eq!(serde_json::to_value(stored).unwrap(), canonical);
+        let source = serde_json::to_string_pretty(stored).unwrap();
+        let mut document = crate::markdown::Document::default();
+        document.json(&source);
+        let rows = (0..document.layout(240))
+            .map(|row| document.row(row).unwrap().1.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rows.contains("\"query\"") && rows.matches('c').count() == 9000);
+        assert!(rows.contains("persisted-tail") && !rows.contains("older deltas omitted"));
         view.event(
             ChatEvent::Loaded {
                 session: controller._database.session(&session.id).unwrap(),
@@ -2171,15 +2210,19 @@ mod tests {
             },
             &controller,
         );
-        let loaded = render(&view, 240, 70);
-        for needle in [
-            "Tool call search [long]",
-            "canonical argument prefix omitted",
-            "persisted-tail",
-            "truncated",
-        ] {
-            assert!(loaded.contains(needle), "{needle} missing:\n{loaded}");
-        }
+        let loaded = render(&view, 240, 100);
+        assert!(loaded.contains("[+] Tool call search [long]"));
+        assert!(!loaded.contains("live-tail") && !loaded.contains("persisted-tail"));
+        view.mode = Mode::Browse;
+        view.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &controller);
+        view.key(
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+            &controller,
+        );
+        let full = render(&view, 240, 100);
+        assert!(full.contains("persisted-tail") && full.contains("Finished"));
+        assert!(!full.contains("live-tail"));
+        assert!(!full.contains("truncated") && !full.contains("older deltas omitted"));
         controller.close().unwrap();
     }
 
@@ -2261,15 +2304,9 @@ mod tests {
                     &controller,
                 );
                 if step == 0 {
-                    let collapsed = render(&view, 140, 70);
+                    let expanded = render(&view, 140, 70);
                     assert!(
-                        collapsed.contains("[+] Tool call [index 0]")
-                            && !collapsed.contains("query")
-                    );
-                    view.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &controller);
-                    view.key(
-                        KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
-                        &controller,
+                        expanded.contains("[-] Tool call [index 0]") && expanded.contains("query")
                     );
                 }
                 let screen = render(&view, 140, 70);
@@ -2283,7 +2320,6 @@ mod tests {
             }
             let first = tool_key(&begun.invocation.turn_id, "first");
             let second = tool_key(&begun.invocation.turn_id, "second");
-            assert_eq!(view.focused_tool.as_ref(), Some(&first));
             assert_eq!(view.expanded_tools, BTreeSet::from([first.clone()]));
             let result = tool_result(replace, false);
             view.event(
@@ -2300,12 +2336,19 @@ mod tests {
                 &controller,
             );
             let settled = render(&view, 140, 70);
-            assert_grouped_tools(&settled, true, false);
-            assert!(settled.contains("**argument**"));
+            assert_grouped_tools(&settled, false, false);
             assert!(
-                !settled.contains("**preview argument**") && !settled.contains("**literal tool**")
+                !settled.contains("**argument**")
+                    && !settled.contains("**preview argument**")
+                    && !settled.contains("**literal tool**")
             );
             let toggle = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
+            view.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &controller);
+            view.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &controller);
+            view.key(toggle, &controller);
+            let settled = render(&view, 140, 70);
+            assert_grouped_tools(&settled, true, false);
+            assert!(settled.contains("**argument**") && !settled.contains("**preview argument**"));
             assert_eq!(view.tool_keys(), [first.clone(), second.clone()]);
             view.focus_tool(false);
             assert_eq!(view.focused_tool.as_ref(), Some(&second));

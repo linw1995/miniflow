@@ -572,22 +572,24 @@ published context; original records remain visible after compaction. Each tool r
 its matching call on the current page, regardless of result arrival order. A page without the call
 still shows the result with its tool-call ID. Grouping changes only the display, not stored order.
 Tool arguments and results are inert literal data, never prompts, Markdown images, or commands.
-Tool call groups start collapsed (`[+]`) and can be opened (`[-]`) as soon as a preview appears.
-An open group displays retained argument fragments as received, with incremental JSON syntax
-highlighting for both raw previews and canonical arguments. A truncated header shows total argument
-size; expanded raw groups identify omitted deltas and bytes, while canonical groups identify only
-the omitted byte prefix. Canonical arguments receive the same 8 KiB tail limit when generated from
-settlement or reloaded from SQLite. Complete authoritative arguments remain in `messages`; delta
-history and omission markers are not persisted. Partial or malformed fragments remain visible
-without needing to parse as JSON. Live assistant blocks use model-call IDs and the same spacing
-between messages and tools as settled replies. The status on each tool header
+A tool call group automatically expands (`[-]`) when its argument preview first arrives. An open
+group displays retained argument fragments with incremental JSON syntax highlighting. A truncated
+header shows total argument size and the group identifies omitted deltas and bytes. The display
+does not require the fragment to parse as JSON. Each group automatically collapses (`[+]`) when the
+whole turn finishes and its authoritative transcript replaces the preview; the model may already
+be executing the next model round while the traced tool status updates. Manually expanding a
+settled group displays its complete canonical arguments. Reopening history shows groups collapsed
+and reads complete saved arguments from `messages`; delta history, fold state, and omission markers
+are not persisted. Live assistant blocks use model-call IDs and the same spacing between messages
+and tools as settled replies. The status on each tool header
 comes separately from runtime observations, matched by call ID. An observed call without a matching
 preview appears under `Observed tools`. `ChatJob::tool_metrics()` exposes the in-process view by
 call ID. Missing observations never imply a start or success.
 
 The fold marker leads the group header. Focus and expansion follow a group when a late ID makes it
-identifiable, and remain when the authoritative transcript replaces its preview or reloads from
-storage. Results appear inside the group when the turn settles; execution metrics are not saved.
+identifiable. Tool Flow completion updates the group's status in place but does not prematurely
+collapse the streaming group. Results appear inside the group when the turn settles; execution
+metrics are not saved.
 
 Assistant text supports Markdown in saved records, previews, and retained results: headings, emphasis,
 lists, tasks, quotes, links, tables, and code blocks. Headings show explicit levels `#1` through `#6`.
@@ -617,7 +619,7 @@ resources on session change, eviction, or exit.
 | Open commands | Ctrl+P |
 | Toggle execution panel | Ctrl+E |
 | Select next / previous tool group while browsing | Tab / Shift+Tab |
-| Expand / collapse selected tool group | Space while browsing, or Ctrl+T |
+| Manually expand / collapse selected tool group | Space while browsing, or Ctrl+T |
 | New chat / switch saved chat | Ctrl+N / Ctrl+S |
 | Cancel current execution | Ctrl+C |
 | Quit after cleanup | Ctrl+Q |
