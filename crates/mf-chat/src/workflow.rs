@@ -1366,13 +1366,42 @@ pub fn run_conversation(
 
 pub fn run_conversation_with_preview(
     database: &ChatDatabase,
-    mut request: BeginTurnInputs,
+    request: BeginTurnInputs,
     backend: Arc<dyn ConversationBackend>,
     cancellation: StreamCancellation,
     automatic_titles: bool,
     observer: Option<&Observer>,
     preview: Option<PreviewConsumer>,
 ) -> Result<ReconciledCompletion, ChatError> {
+    run_observed_conversation(
+        database,
+        request,
+        backend,
+        cancellation,
+        automatic_titles,
+        observer,
+        ConversationPresentation {
+            preview,
+            tools: None,
+        },
+    )
+}
+
+pub(super) struct ConversationPresentation {
+    pub preview: Option<PreviewConsumer>,
+    pub tools: Option<crate::ToolExecutionMetrics>,
+}
+
+pub(super) fn run_observed_conversation(
+    database: &ChatDatabase,
+    mut request: BeginTurnInputs,
+    backend: Arc<dyn ConversationBackend>,
+    cancellation: StreamCancellation,
+    automatic_titles: bool,
+    observer: Option<&Observer>,
+    presentation: ConversationPresentation,
+) -> Result<ReconciledCompletion, ChatError> {
+    let ConversationPresentation { preview, tools } = presentation;
     ensure!(
         std::path::Path::new(&request.database_path) == database.path(),
         InvalidSnafu {
@@ -1389,6 +1418,9 @@ pub fn run_conversation_with_preview(
     let collected = calls.clone();
     let _events = mf_telemetry::events::collect(move |event| {
         let _ = collected.lock().unwrap().observe(event);
+        if let Some(tools) = &tools {
+            let _ = tools.observe(event);
+        }
     });
     let title_parameters = automatic_titles
         .then(|| backend.builtin_title_parameters())

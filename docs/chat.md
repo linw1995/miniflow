@@ -569,9 +569,14 @@ published context; original records remain visible after compaction. Each tool r
 its matching call on the current page, regardless of result arrival order. A page without the call
 still shows the result with its tool-call ID. Grouping changes only the display, not stored order.
 Tool arguments and results are inert literal data, never prompts, Markdown images, or commands.
-Live tool previews display argument fragments, not tool execution state. Authoritative results start
-collapsed (`[+]`) and show `[-]` when expanded. The marker leads the result header so it stays visible
-when a long ID wraps. Expansion is keyed by turn and call ID and survives save and reload.
+Live argument previews come from the model stream. Tool status comes separately from the same
+runtime observations used by the tracing view. The TUI shows an observed state on the matching call
+or as a separate execution row when no argument preview has that ID. `ChatJob::tool_metrics()`
+exposes the in-process view by tool-call ID. Missing observations never imply a start or success.
+
+Authoritative results are available when the turn settles. They start collapsed (`[+]`) and show
+`[-]` when expanded. The marker leads the result header so it stays visible when a long ID wraps.
+Expansion is keyed by turn and call ID and survives save and reload; execution metrics are not saved.
 
 Assistant text supports Markdown in saved records, previews, and retained results: headings, emphasis,
 lists, tasks, quotes, links, tables, and code blocks. Headings show explicit levels `#1` through `#6`.

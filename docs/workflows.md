@@ -666,6 +666,13 @@ are not assumed to be business failures.
 Invocation drains incremental emissions terminally without exposing Router stream ports. Ordinary
 `workflow.call` syntax and topology are unchanged.
 
+A Router can opt into correlated call observations with `config.observe`, a nonblank category label,
+and the optional `observation_id` input. Use a public, non-sensitive identifier, not an argument or
+result. Router emits `mf.call.execution` records on its trace only for a selected body that it invokes;
+missing, blank, oversized, control-containing, or secret identifiers are not emitted. The outcome is
+captured before business-error packing. The shared tool dispatcher opts in with `observe: "tool"`
+and the model's tool-call ID. This adds no stream outputs or execution dependencies.
+
 ## Node clusters
 
 Version `2026-10-23` accepts an optional `clusters` array in the root graph and in Loop and Iteration bodies. Clusters

@@ -116,6 +116,7 @@
                 },
                 "code": {
                   "name": "call.name",
+                  "call_id": "call.id",
                   "ok": "call.name in tools && type(call.arguments) == map && size(call.arguments) == size(call.arguments.transformMap(k, v, k in tools[call.name].interface.allowed, v)) && tools[call.name].interface.required.all(r, r in call.arguments)",
                   "arguments": "call.name in tools && type(call.arguments) == map ? call.arguments.transformMap(k, v, k in tools[call.name].interface.allowed, v) : {}",
                   "error": "cel.bind(missing, (call.name in tools ? tools[call.name].interface.required.filter(r, !(r in (type(call.arguments) == map ? call.arguments : {}))) : []), {'error': !(call.name in tools) ? 'unknown tool' : type(call.arguments) != map ? 'arguments must be a JSON object' : size(call.arguments) != size(call.arguments.transformMap(k, v, k in tools[call.name].interface.allowed, v)) ? 'unknown, secret, or configured argument' : size(missing) > 0 ? 'missing required argument `' + missing[0] + '`' : ''})",
@@ -160,7 +161,8 @@
               "id": "execute",
               "kind": "builtin.router",
               "config": {
-                "routes": []
+                "routes": [],
+                "observe": "tool"
               },
               "inputs": {
                 "flows": {
@@ -173,6 +175,12 @@
                   "from": {
                     "node": "classify",
                     "port": "name"
+                  }
+                },
+                "observation_id": {
+                  "from": {
+                    "node": "classify",
+                    "port": "call_id"
                   }
                 },
                 "arguments": {

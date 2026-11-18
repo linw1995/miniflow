@@ -2,7 +2,7 @@
 
 ### Requirement: Tool argument previews and collapsible results
 
-Chat SHALL group raw argument fragments by model call and provider tool index without execution status. Authoritative completion SHALL replace previews without duplicates and group results with their visible calls without changing stored order. Each result SHALL start collapsed, with a leading fold marker and independent keyboard expansion. Arguments and results MUST remain literal.
+Chat SHALL group raw argument fragments by model call and provider tool index. Authoritative completion SHALL replace previews without duplicates and group results with their visible calls without changing stored order. Each result SHALL start collapsed, with a leading fold marker and independent keyboard expansion. Arguments and results MUST remain literal.
 
 #### Scenario: Show interleaved argument fragments
 
@@ -24,6 +24,12 @@ Chat SHALL group raw argument fragments by model call and provider tool index wi
 
 - **WHEN** the user selects a result with Tab or Shift+Tab in browse mode and presses Space or Ctrl+T
 - **THEN** only that result changes expansion state, without running tools, changing model context, or interpreting result Markdown or escape sequences
+
+#### Scenario: Show observed live tool status
+
+- **WHEN** a tool Flow execution is observed for the active chat invocation
+- **THEN** the UI shows the observed state beside the matching live call or as a separate execution row when no preview has that ID
+- **AND** model argument fragments alone do not establish an execution state
 
 #### Scenario: Bound live preview data
 

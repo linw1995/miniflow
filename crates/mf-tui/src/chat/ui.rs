@@ -214,6 +214,17 @@ fn render_tool_result(
     }
 }
 
+fn tool_status(execution: &mf_chat::ToolExecution) -> &'static str {
+    use mf_chat::CallExecutionPhase;
+    match execution.phase {
+        Some(CallExecutionPhase::Running) => "Running",
+        Some(CallExecutionPhase::Succeeded) => "Succeeded",
+        Some(CallExecutionPhase::Failed) => "Failed",
+        Some(CallExecutionPhase::Interrupted) => "Interrupted",
+        None => "Unknown",
+    }
+}
+
 fn execution_areas(body: Rect) -> (Rect, Rect) {
     if body.width >= 120 && body.height >= 12 {
         let [chat, panel] =
@@ -1254,6 +1265,13 @@ impl ChatView {
                     vec![role_label("Assistant", Color::Cyan, indicator)],
                 );
             }
+            let mut executions = if self.running
+                && let Some(run) = &self.observation
+            {
+                run.reader.tool_metrics().snapshot()
+            } else {
+                BTreeMap::new()
+            };
             for segment in &self.preview.segments {
                 if let Some(tool) = &segment.tool {
                     let key = format!("turn:{turn}:tool:{}:{}", segment.model_call_id, tool.index);
@@ -1261,11 +1279,14 @@ impl ChatView {
                         .id
                         .clone()
                         .unwrap_or_else(|| format!("index {}", tool.index));
-                    let label = if let Some(name) = &tool.name {
+                    let mut label = if let Some(name) = &tool.name {
                         format!("Tool call {name} [{reference}]")
                     } else {
                         format!("Tool call [{reference}]")
                     };
+                    if let Some(execution) = tool.id.as_ref().and_then(|id| executions.remove(id)) {
+                        label = format!("[{}] {label}", tool_status(&execution));
+                    }
                     transcript.plain(
                         format!("{key}:label"),
                         vec![role_label(&label, Color::Yellow, None)],
@@ -1277,6 +1298,17 @@ impl ChatView {
                         &segment.text,
                     );
                 }
+            }
+            for (id, execution) in executions {
+                let label = format!(
+                    "[{}] Tool execution {} [{id}]",
+                    tool_status(&execution),
+                    execution.name
+                );
+                transcript.plain(
+                    format!("turn:{turn}:execution:{id}"),
+                    vec![role_label(&label, Color::Yellow, None)],
+                );
             }
             let mut status = vec![];
             if !loading && has_preview && self.preview.incomplete {
@@ -2270,6 +2302,74 @@ mod tests {
         }
         view.switch(None);
         assert!(!render(&view, 180, 40).contains("Flow execution"));
+    }
+
+    #[test]
+    fn tool_observations_label_live_calls_even_with_the_flow_panel_hidden() {
+        use mf_telemetry::events::{CALL_EXECUTION_EVENT, EventRecord};
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
+        let run = LocalRun::start(
+            Command::new("true"),
+            launch.runner.description().clone(),
+            mf_telemetry::identity::RunId::new(),
+            1024,
+        )
+        .unwrap();
+        let observation = run.observation();
+        let metrics = observation.reader.tool_metrics().clone();
+        view.observation = Some(observation);
+        view.show_execution = false;
+        view.running = true;
+        let invocation = Invocation::new("session");
+        view.preview.begin(invocation.clone());
+        view.preview
+            .apply(mf_chat::PreviewEvent {
+                invocation,
+                delta: mf_chat::ToolCallDelta {
+                    model_call_id: "model".into(),
+                    index: 0,
+                    arguments: "{\"query\":\"test\"}".into(),
+                    id: Some("matched".into()),
+                    name: Some("search".into()),
+                }
+                .into(),
+            })
+            .unwrap();
+        let screen = render(&view, 100, 25);
+        assert!(screen.contains("Tool call search [matched]") && !screen.contains("[Running]"));
+        let observe = |id: &str, phase: &str| {
+            metrics.observe(&EventRecord {
+            name: CALL_EXECUTION_EVENT.into(),
+            time_unix_nano: if phase == "running" { 10 } else { 11 },
+            body: serde_json::json!({"category":"tool", "correlation_id":id, "name":"search", "attempt":"00000000-0000-4000-8000-000000000001", "phase":phase}),
+            trace_context: None,
+        }).unwrap()
+        };
+        observe("matched", "running");
+        for (id, phase) in [
+            ("failed", "failed"),
+            ("done", "succeeded"),
+            ("stopped", "interrupted"),
+            ("ambiguous", "failed"),
+            ("ambiguous", "interrupted"),
+        ] {
+            observe(id, phase);
+        }
+        let screen = render(&view, 100, 25);
+        for expected in [
+            "[Running] Tool call search [matched]",
+            "[Failed] Tool execution search [failed]",
+            "[Succeeded] Tool execution search [done]",
+            "[Interrupted] Tool execution search [stopped]",
+            "[Unknown] Tool execution search [ambiguous]",
+        ] {
+            assert!(screen.contains(expected), "{screen}");
+        }
+        assert!(!screen.contains("Tool result") && !screen.contains("Flow execution"));
+        view.running = false;
+        assert!(!render(&view, 100, 25).contains("Tool execution"));
     }
 
     #[test]

@@ -6,6 +6,12 @@ Rig buffers Chat Completions arguments before yielding its tool-call event. The 
 
 `tool_call_delta` carries raw arguments, model-call identity, provider tool index, and optional wire ID/name hints. The shared Agent forwards only this optional model-output port. ToolUses and `llm.tool_result` keep their ordinary execution contracts. The chat host accepts only declared previews, shares acknowledgement and cancellation with text previews, and admits terminal alternatives before preview validation.
 
+## Execution observations
+
+Router can opt into a static observation category and an optional public `observation_id`. ToolUses supplies the tool-call ID on the existing classification-to-Router data edge. Call measures the selected body inside its invocation boundary and reports the outcome before business-error packing. An unused route or rejected call cannot emit a start. Records carry an attempt identity, public labels, phase, and the existing source timestamp and trace context, not arguments, results, or error payloads.
+
+`mf-chat` collects execution metrics per invocation through the existing local observation callback. The TUI receiver reduces the same records after run and workflow validation. Each collector bounds retention, accepts duplicate or reordered delivery, and leaves conflicting or missing terminal evidence unknown. No separate exporter, model stream, storage schema, or dispatch step participates.
+
 ## Presentation
 
 The live cache groups tool arguments by invocation, model call, and index. It bounds retained text and metadata without blocking preview consumption. It never labels a preview as a tool execution or uses it to dispatch a tool. An authoritative result replaces the preview rather than appending a duplicate call.

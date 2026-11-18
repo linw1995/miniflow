@@ -63,7 +63,11 @@ fn parallel_tool_argument_previews_precede_the_answer_without_changing_the_trans
     let (prefix, tail) = reply.body.as_bytes().split_at(prefix);
     reply.fragments = Some(vec![prefix.to_vec(), tail.to_vec()]);
     reply.release_after_prefix = Some(release.clone());
-    let server = Server::start(vec![reply, Reply::stream_text("Final answer")]);
+    let finish = Arc::new(AtomicBool::new(false));
+    let mut answer = Reply::stream_text("Final answer");
+    answer.fragments = Some(vec![vec![], answer.body.as_bytes().to_vec()]);
+    answer.release_after_prefix = Some(finish.clone());
+    let server = Server::start(vec![reply, answer]);
     let root = tempfile::tempdir().unwrap();
     let host = ChatHost::open(
         root.path().join("chat.sqlite"),
@@ -97,6 +101,8 @@ fn parallel_tool_argument_previews_precede_the_answer_without_changing_the_trans
         }
     };
     assert!(!job.poll());
+    let tool_metrics = job.tool_metrics().clone();
+    assert!(tool_metrics.snapshot().is_empty());
     assert_eq!(server.requests().len(), 1);
     assert_eq!(
         host.database().model_context(&session.id).unwrap().revision,
@@ -106,8 +112,40 @@ fn parallel_tool_argument_previews_precede_the_answer_without_changing_the_trans
     let mut fragments = BTreeMap::<(String, u64), Vec<String>>::new();
     let mut named = BTreeSet::new();
     let mut final_text = false;
-    for event in std::iter::once(first_fragment).chain(std::iter::from_fn(|| receiver.recv().ok()))
-    {
+    for event in std::iter::once(first_fragment).chain(std::iter::from_fn(|| {
+        // Continue draining previews while the model's final response is withheld.
+        loop {
+            match receiver.try_recv() {
+                Ok(event) => return Some(event),
+                Err(TryRecvError::Disconnected) => return None,
+                Err(TryRecvError::Empty) => {
+                    if server.requests().len() == 2 && !finish.load(Ordering::Acquire) {
+                        let metrics = tool_metrics.snapshot();
+                        assert_eq!(
+                            metrics.len(),
+                            1,
+                            "rejected tool must not execute: {metrics:?}"
+                        );
+                        assert_eq!(
+                            metrics["first"].phase,
+                            Some(mf_chat::CallExecutionPhase::Succeeded)
+                        );
+                        assert!(metrics["first"].duration_ns.is_some());
+                        assert_eq!(
+                            host.database().model_context(&session.id).unwrap().revision,
+                            0
+                        );
+                        finish.store(true, Ordering::Release);
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "expected observed tool and final preview"
+                    );
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+        }
+    })) {
         assert_eq!(event.invocation, invocation);
         assert!(
             !serde_json::to_string(&event)

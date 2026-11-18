@@ -83,6 +83,7 @@ struct Context {
     traces: Mutex<TraceStore>,
     logs: Mutex<LogStore>,
     calls: Mutex<mf_chat::CallEventCollector>,
+    tools: mf_chat::ToolExecutionMetrics,
     workflow_id: WorkflowId,
     run_id: String,
 }
@@ -116,6 +117,7 @@ impl LoopbackReceiver {
             traces: Mutex::new(TraceStore::default()),
             logs: Mutex::new(LogStore::default()),
             calls: Mutex::new(mf_chat::CallEventCollector::default()),
+            tools: mf_chat::ToolExecutionMetrics::default(),
             workflow_id,
             run_id: run_id.to_string(),
         });
@@ -166,6 +168,7 @@ impl LoopbackReceiver {
 
     pub fn finish(&mut self) -> StateSnapshot {
         self.stop();
+        self.context.tools.close();
         self.context
             .snapshots
             .lock()
@@ -250,6 +253,10 @@ impl ObservationReader {
             .lock()
             .expect("call observations were not poisoned")
             .clone()
+    }
+
+    pub fn tool_metrics(&self) -> &mf_chat::ToolExecutionMetrics {
+        &self.context.tools
     }
 
     pub fn apply_call_timings(&self, usages: &mut [mf_chat::CallUsage]) {
@@ -429,11 +436,12 @@ fn response(status: StatusCode, body: &str) -> Response<Full<Bytes>> {
         .expect("static HTTP response is valid")
 }
 
-fn receive_call_event(record: LogRecord, context: &Context) -> Result<(), IngestError> {
+fn receive_observation_event(record: LogRecord, context: &Context) -> Result<(), IngestError> {
+    let tool_execution = record.event_name == mf_telemetry::events::CALL_EXECUTION_EVENT;
     if string_attribute(&record.attributes, "mf.run.id") != Some(context.run_id.as_str())
         || string_attribute(&record.attributes, "mf.workflow.id")
             != Some(context.workflow_id.as_str())
-        || !mf_chat::CallEventCollector::recognizes(&record.event_name)
+        || !(tool_execution || mf_chat::CallEventCollector::recognizes(&record.event_name))
     {
         return Ok(());
     }
@@ -456,7 +464,7 @@ fn receive_call_event(record: LogRecord, context: &Context) -> Result<(), Ingest
     };
     let body = record.body.ok_or_else(|| {
         InvalidSnafu {
-            message: "missing model call event payload",
+            message: "missing observation event payload",
         }
         .build()
     })?;
@@ -466,11 +474,15 @@ fn receive_call_event(record: LogRecord, context: &Context) -> Result<(), Ingest
         body: value(&body, 0)?,
         trace_context,
     };
-    context
-        .calls
-        .lock()
-        .expect("call observations were not poisoned")
-        .observe(&event)?;
+    if tool_execution {
+        context.tools.observe(&event)?;
+    } else {
+        context
+            .calls
+            .lock()
+            .expect("call observations were not poisoned")
+            .observe(&event)?;
+    }
     Ok(())
 }
 
@@ -551,7 +563,7 @@ fn receive_logs(bytes: &[u8], context: &Context) -> Result<(), IngestError> {
                     receive_iteration(record, context)
                         .inspect_err(|_| note_error(context, "invalid iteration detail record"))
                 } else if scope_name == Some(mf_telemetry::events::SCOPE) {
-                    receive_call_event(record, context)
+                    receive_observation_event(record, context)
                 } else if scope_name == Some(mf_telemetry::snapshot::SCOPE) {
                     receive_snapshot(record, context)
                 } else {

@@ -253,15 +253,23 @@ fn next_completion(
 
 #[test]
 fn compiled_context_replacement_keeps_tool_audit_and_save_only_retries_after_reopen() {
-    use mf_chat::{MessageUpdate, contract::CompletionState};
+    use mf_chat::{CallExecutionPhase, MessageUpdate, contract::CompletionState};
     use mf_tui::{
-        chat::{ChatCommand, ChatController, ChatLaunch, ChatOptions},
+        chat::{ChatCommand, ChatController, ChatEvent, ChatLaunch, ChatOptions},
         run::RunOptions,
     };
     use serde_json::json;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let release = Arc::new(AtomicBool::new(false));
+    let mut answer = Reply::stream_text("First answer: 5");
+    answer.fragments = Some(vec![vec![], answer.body.as_bytes().to_vec()]);
+    answer.release_after_prefix = Some(release.clone());
     let server = Server::start(vec![
         calculator_call("first", "add", 2.0, 3.0),
-        Reply::stream_text("First answer: 5"),
+        answer,
         calculator_call("second", "multiply", 3.0, 4.0),
         Reply::stream_text("Second answer: 12"),
         Reply::text("Summary only: 5 and 12"),
@@ -296,6 +304,36 @@ fn compiled_context_replacement_keeps_tool_audit_and_save_only_retries_after_reo
                 prompt: format!("Question {turn}"),
             })
             .unwrap();
+        if turn == 0 {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let observation = loop {
+                assert!(Instant::now() < deadline, "no runner observation");
+                match controller.try_event() {
+                    Some(ChatEvent::Observing(observation)) => break observation,
+                    Some(ChatEvent::Finished { .. }) => panic!("settled before observation"),
+                    _ => thread::sleep(Duration::from_millis(2)),
+                }
+            };
+            loop {
+                let statuses = observation.reader.tool_metrics().snapshot();
+                if statuses
+                    .get("first")
+                    .is_some_and(|tool| tool.phase == Some(CallExecutionPhase::Succeeded))
+                {
+                    assert_eq!(statuses.len(), 1);
+                    assert_eq!(statuses["first"].name, "calculator");
+                    assert!(statuses["first"].duration_ns.is_some());
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "tool telemetry not delivered before settlement: {statuses:?}"
+                );
+                thread::sleep(Duration::from_millis(2));
+            }
+            assert!(controller.busy());
+            release.store(true, Ordering::Release);
+        }
         let mut resolution = next_completion(&controller);
         if compact {
             let CompletionState::Uncommitted(pending) = resolution.state else {
