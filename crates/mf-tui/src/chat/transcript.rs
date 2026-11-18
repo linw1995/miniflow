@@ -1,19 +1,82 @@
+use super::preview::MAX_TOOL_ARGUMENT_PREVIEW_BYTES;
 use crate::{
     images::Images,
     markdown::{Document, Position},
 };
+use mf_runtime::ValueRef;
 use ratatui::{Frame, layout::Rect, style::Style, text::Line};
 use ratatui_image::picker::Picker;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     io::{self, Write},
     path::PathBuf,
+    rc::Rc,
 };
 
 #[derive(Default)]
 struct Entry {
     document: Document,
+    canonical_arguments: Option<Rc<CanonicalArguments>>,
     seen: bool,
+}
+
+pub struct CanonicalArguments {
+    value: ValueRef,
+    pub text: String,
+    pub total_bytes: usize,
+}
+
+impl CanonicalArguments {
+    fn new(value: &ValueRef) -> Self {
+        let mut tail = JsonTail::default();
+        let (text, total_bytes) = match serde_json::to_writer_pretty(&mut tail, value) {
+            Ok(()) => (tail.text(), tail.total_bytes),
+            Err(error) => {
+                let text = format!("[Arguments unavailable: {error}]");
+                let total_bytes = text.len();
+                (text, total_bytes)
+            }
+        };
+        Self {
+            value: value.clone(),
+            text,
+            total_bytes,
+        }
+    }
+}
+
+#[derive(Default)]
+struct JsonTail {
+    bytes: VecDeque<u8>,
+    total_bytes: usize,
+}
+
+impl JsonTail {
+    fn text(&mut self) -> String {
+        let bytes = self.bytes.make_contiguous();
+        // Serialization emits UTF-8, but the byte budget may cut through the first character.
+        let start = bytes
+            .iter()
+            .take_while(|byte| **byte & 0xc0 == 0x80)
+            .count();
+        String::from_utf8(bytes[start..].to_vec()).expect("serialized JSON is UTF-8")
+    }
+}
+
+impl Write for JsonTail {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let limit = MAX_TOOL_ARGUMENT_PREVIEW_BYTES;
+        self.total_bytes = self.total_bytes.saturating_add(bytes.len());
+        let tail = &bytes[bytes.len().saturating_sub(limit)..];
+        self.bytes
+            .drain(..(self.bytes.len() + tail.len()).saturating_sub(limit));
+        self.bytes.extend(tail);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -79,6 +142,28 @@ impl Transcript {
             .or_default()
             .document
             .literal(source, style);
+        self.push(key);
+    }
+
+    pub fn canonical_arguments(&mut self, key: String, value: &ValueRef) -> Rc<CanonicalArguments> {
+        let entry = self.entries.entry(key).or_default();
+        entry.seen = true;
+        if let Some(cached) = &entry.canonical_arguments
+            && cached.value.ptr_eq(value)
+        {
+            return Rc::clone(cached);
+        }
+        let arguments = Rc::new(CanonicalArguments::new(value));
+        entry.canonical_arguments = Some(Rc::clone(&arguments));
+        arguments
+    }
+
+    pub fn json(&mut self, key: String, source: &str) {
+        self.entries
+            .entry(key.clone())
+            .or_default()
+            .document
+            .json(source);
         self.push(key);
     }
 
@@ -325,6 +410,41 @@ mod tests {
         transcript.top(10, 0);
         assert_eq!(transcript.entries.len(), 1);
         assert_eq!(screen(&transcript, 0, 10), ["new reply"]);
+    }
+
+    #[test]
+    fn canonical_argument_cache_serializes_only_once_per_visible_value() {
+        let value = ValueRef::from(serde_json::json!({
+            "text": format!("{}🦀{}", "a".repeat(9000), "b".repeat(8187))
+        }));
+        let serialized = serde_json::to_string_pretty(&value).unwrap();
+        let limit = MAX_TOOL_ARGUMENT_PREVIEW_BYTES;
+        let start = serialized.len() - limit;
+        assert!(!serialized.is_char_boundary(start));
+        let mut transcript = Transcript::default();
+        transcript.begin(80);
+        let key = "tool:arguments";
+        let first = transcript.canonical_arguments(key.into(), &value);
+        assert_eq!(first.total_bytes, serialized.len());
+        assert_eq!(
+            first.text,
+            serialized[serialized.ceil_char_boundary(start)..]
+        );
+        assert!(
+            transcript.is_empty(),
+            "collapsed arguments add no visible rows"
+        );
+        transcript.top(10, 0);
+        transcript.begin(60);
+        let cached = transcript.canonical_arguments(key.into(), &value.clone());
+        assert!(Rc::ptr_eq(&first, &cached));
+        let replacement = transcript.canonical_arguments(key.into(), &ValueRef::from(42));
+        assert_eq!(replacement.text, "42");
+        assert!(!Rc::ptr_eq(&first, &replacement));
+        transcript.top(10, 0);
+        transcript.begin(60);
+        transcript.top(10, 0);
+        assert!(transcript.entries.is_empty());
     }
 
     #[test]

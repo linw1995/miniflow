@@ -11,6 +11,20 @@ Chat SHALL group arguments and results by call. Groups SHALL start collapsed and
 - **AND** an unambiguous late wire ID and canonical replacement preserve the group's focus and expansion
 - **AND** live rows have the same message and inter-tool spacing as the corresponding settled batches
 
+#### Scenario: Highlight incomplete JSON arguments
+
+- **WHEN** an expanded group shows raw argument fragments or canonical arguments
+- **THEN** the text receives incremental JSON syntax highlighting
+- **AND** incomplete or malformed fragments preserve their exact retained text without validation, reformatting, or Markdown interpretation
+
+#### Scenario: Omit historical argument deltas
+
+- **WHEN** a call's argument preview exceeds 8 KiB or the shared preview budget requires eviction
+- **THEN** the expanded group retains a recent UTF-8 tail and identifies omitted deltas and bytes
+- **AND** the collapsed header identifies the total size and truncation
+- **AND** canonical arguments after settlement or SQLite reload receive the same tail limit without invented delta counts
+- **AND** complete authoritative arguments remain persisted and available to dispatch, while delta history and omission markers are not persisted
+
 #### Scenario: Pair parallel calls and results
 
 - **WHEN** the visible transcript contains a batch with tool results in a different order than the calls
@@ -36,4 +50,4 @@ Chat SHALL group arguments and results by call. Groups SHALL start collapsed and
 #### Scenario: Bound live preview data
 
 - **WHEN** argument previews exceed the count or byte budget
-- **THEN** retained preview data remains bounded and valid UTF-8, omitted data is indicated, and consumption and final settlement continue
+- **THEN** retained preview data remains bounded and valid UTF-8, recent tool argument deltas replace older display history, omitted data is indicated, and consumption and final settlement continue

@@ -23,4 +23,13 @@ Space or Ctrl+T toggles the selection. A late, unambiguous wire ID transfers foc
 scrolling to the canonical group key. Only a correlated execution observation updates the group
 status. Missing or ambiguous hints do not match by position or name.
 
-Authoritative messages replace previews without duplicating a call. If both are visible on the current history page, results appear under their matching calls within the same turn and assistant batch. A result-only page keeps the ID and the same fold key. Grouping does not reorder stored messages. Arguments and results remain literal; assistant text keeps Markdown rendering.
+Authoritative messages replace previews without duplicating a call. If both are visible on the
+current history page, results appear under their matching calls within the same turn and assistant
+batch. A result-only page keeps the ID and the same fold key. Grouping does not reorder stored
+messages. Raw argument previews and canonical arguments share incremental JSON syntax highlighting. Incomplete or malformed fragments keep their exact text
+without waiting for JSON validation. Each call retains up to 8 KiB of recent argument text within
+the existing shared preview budget; older deltas are omitted with delta and byte counts. Canonical
+arguments use the same tail limit after settlement and SQLite reload without inventing delta counts.
+Neither provisional delta history nor omission markers are persisted. Full arguments remain in the
+authoritative messages and in actual dispatch. Arguments and results remain literal; assistant text
+keeps Markdown rendering.

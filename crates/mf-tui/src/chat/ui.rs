@@ -1,4 +1,4 @@
-use super::*;
+use super::{preview::ToolCallPreview, *};
 use crate::run::{ObservationView, SignalGuard, TerminalGuard, terminal_area};
 use crossterm::{
     event::{
@@ -207,8 +207,41 @@ fn tool_call_label(name: Option<&str>, reference: &str) -> String {
 }
 
 enum ToolArguments<'a> {
-    Raw(&'a str),
+    Raw(&'a str, &'a ToolCallPreview),
     Canonical(&'a mf_runtime::ValueRef),
+}
+
+struct ArgumentView<'a> {
+    text: &'a str,
+    total_bytes: usize,
+    omitted_deltas: Option<u64>,
+}
+
+fn display_bytes(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+impl ArgumentView<'_> {
+    fn omitted_bytes(&self) -> usize {
+        self.total_bytes - self.text.len()
+    }
+
+    fn omission_label(&self) -> String {
+        let bytes = display_bytes(self.omitted_bytes());
+        match self.omitted_deltas {
+            Some(count) => {
+                let unit = if count == 1 { "delta" } else { "deltas" };
+                format!("… {count} older {unit} omitted · {bytes} …")
+            }
+            None => format!("… canonical argument prefix omitted · {bytes} …"),
+        }
+    }
 }
 
 struct ToolGroup<'a> {
@@ -248,8 +281,35 @@ impl<'a> ToolGroup<'a> {
             result,
             execution,
         } = self;
+        let argument_key = format!("{key}:arguments");
+        let canonical;
+        let arguments = match arguments {
+            Some(ToolArguments::Raw(text, tool)) => Some(ArgumentView {
+                text,
+                total_bytes: tool.argument_bytes(),
+                omitted_deltas: Some(tool.omitted_deltas()),
+            }),
+            Some(ToolArguments::Canonical(value)) => {
+                canonical = transcript.canonical_arguments(argument_key.clone(), value);
+                Some(ArgumentView {
+                    text: &canonical.text,
+                    total_bytes: canonical.total_bytes,
+                    omitted_deltas: None,
+                })
+            }
+            None => None,
+        };
         let open = expanded.contains(&key);
         let marker = if open { "[-]" } else { "[+]" };
+        let mut title = title;
+        if let Some(arguments) = &arguments
+            && arguments.omitted_bytes() > 0
+        {
+            title.push_str(&format!(
+                " · {} · truncated",
+                display_bytes(arguments.total_bytes)
+            ));
+        }
         let label = if let Some(execution) = execution {
             format!("{marker} [{}] {title}", tool_status(execution))
         } else {
@@ -264,14 +324,18 @@ impl<'a> ToolGroup<'a> {
             return;
         }
         if let Some(arguments) = &arguments {
-            let text = match arguments {
-                ToolArguments::Raw(text) => std::borrow::Cow::Borrowed(*text),
-                ToolArguments::Canonical(value) => std::borrow::Cow::Owned(
-                    serde_json::to_string_pretty(value)
-                        .unwrap_or_else(|error| format!("[Arguments unavailable: {error}]")),
-                ),
-            };
-            transcript.literal(format!("{key}:arguments"), &text, Style::default());
+            if arguments.omitted_bytes() > 0 {
+                transcript.plain(
+                    format!("{argument_key}:omission"),
+                    vec![Line::styled(
+                        arguments.omission_label(),
+                        Style::default().fg(Color::DarkGray),
+                    )],
+                );
+            }
+            if !arguments.text.is_empty() {
+                transcript.json(argument_key.clone(), arguments.text);
+            }
         }
         if let Some(content) = result {
             if arguments.is_some() {
@@ -287,7 +351,7 @@ impl<'a> ToolGroup<'a> {
             transcript.literal(format!("{key}:result"), content, Style::default());
         } else if arguments.is_none() {
             transcript.plain(
-                format!("{key}:arguments"),
+                argument_key,
                 vec![Line::styled(
                     "No argument preview",
                     Style::default().fg(Color::DarkGray),
@@ -361,7 +425,8 @@ fn live_messages<'a>(
                 |id| tool_key(turn, id),
             ),
             title: tool_call_label(name, id.unwrap_or(&index)),
-            arguments: (!segment.text.is_empty()).then_some(ToolArguments::Raw(&segment.text)),
+            arguments: (tool.argument_bytes() > 0)
+                .then_some(ToolArguments::Raw(&segment.text, tool)),
             result: None,
             execution,
         });
@@ -1128,8 +1193,12 @@ impl ChatView {
         }
         self.transcript.get_mut().remap_anchor(|key| {
             remapped.get(key).cloned().or_else(|| {
-                let header = key.strip_suffix(":arguments")?;
-                remapped.get(header).map(|key| format!("{key}:arguments"))
+                [":arguments", ":arguments:omission"]
+                    .into_iter()
+                    .find_map(|suffix| {
+                        let header = key.strip_suffix(suffix)?;
+                        remapped.get(header).map(|key| format!("{key}{suffix}"))
+                    })
             })
         });
         self.preview = preview;
@@ -1885,6 +1954,233 @@ mod tests {
         assert_layout(&settled);
         assert!(!settled.contains(LOADING_FRAMES));
         assert_eq!(view.tool_keys(), expected_keys);
+    }
+
+    #[test]
+    fn argument_omission_labels_do_not_invent_canonical_delta_counts() {
+        let mut view = ArgumentView {
+            text: "tail",
+            total_bytes: 516,
+            omitted_deltas: Some(1),
+        };
+        assert_eq!(view.omission_label(), "… 1 older delta omitted · 512 B …");
+        view.total_bytes = 1024 * 1024 + view.text.len();
+        view.omitted_deltas = None;
+        assert_eq!(
+            view.omission_label(),
+            "… canonical argument prefix omitted · 1.0 MiB …"
+        );
+    }
+
+    #[test]
+    fn many_key_deltas_keep_their_recent_tail_and_scroll_anchor_after_late_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let invocation = Invocation::new("session");
+        let delta = |arguments: String, id: Option<String>| mf_chat::PreviewEvent {
+            invocation: invocation.clone(),
+            delta: mf_chat::ToolCallDelta {
+                model_call_id: "model".into(),
+                index: 0,
+                arguments,
+                id,
+                name: None,
+            }
+            .into(),
+        };
+        let mut anonymous = LivePreview::default();
+        anonymous.begin(invocation.clone());
+        anonymous.apply(delta("{\n".into(), None)).unwrap();
+        for index in 0..420 {
+            anonymous
+                .apply(delta(
+                    format!("  \"key_{index:04}\": \"value_{index:04}\",\n"),
+                    None,
+                ))
+                .unwrap();
+        }
+        anonymous
+            .apply(delta("  \"last\": true\n}".into(), None))
+            .unwrap();
+        let retained = &anonymous.segments[0].text;
+        assert!(!retained.contains("key_0000"));
+        assert!(retained.contains("key_0419") && retained.ends_with("  \"last\": true\n}"));
+        let mut identified = anonymous.clone();
+        identified
+            .apply(delta(String::new(), Some("known".into())))
+            .unwrap();
+        let turn = &invocation.turn_id;
+        let old = preview_tool_key(turn, "model", 0);
+        let new = tool_key(turn, "known");
+        for (suffix, expected) in [
+            (":arguments:omission", "older deltas omitted"),
+            (":arguments", retained.lines().next().unwrap()),
+        ] {
+            let mut view = ChatView::new(launch.runner.description()).unwrap();
+            view.show_execution = false;
+            view.running = true;
+            view.latest_invocation = Some(invocation.clone());
+            view.preview = anonymous.clone();
+            view.expanded_tools.insert(old.clone());
+            render(&view, 100, 22);
+            assert!(view.transcript.get_mut().focus(&format!("{old}{suffix}")));
+            view.scroll.set(1);
+            view.replace_preview(turn, identified.clone());
+            let screen = render(&view, 100, 22);
+            assert!(
+                screen.lines().nth(1).unwrap().contains(expected),
+                "{screen}"
+            );
+            assert_eq!(view.expanded_tools, BTreeSet::from([new.clone()]));
+        }
+    }
+
+    #[test]
+    fn long_tool_arguments_elide_live_deltas_and_replay_from_sqlite() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
+        view.show_execution = false;
+        let controller = ChatController::open(launch).unwrap();
+        let session = controller
+            ._database
+            .create_session("default", None, None)
+            .unwrap();
+        let begun = controller
+            ._database
+            .begin_turn(
+                &session.id,
+                "Long arguments",
+                mf_chat::ModelIdentity {
+                    profile: "default".into(),
+                    model: None,
+                },
+                None,
+            )
+            .unwrap();
+        view.event(
+            ChatEvent::Submitted {
+                session: session.clone(),
+                invocation: begun.invocation.clone(),
+                prompt: "Long arguments".into(),
+            },
+            &controller,
+        );
+        let key = tool_key(&begun.invocation.turn_id, "long");
+        let mut preview = LivePreview::default();
+        preview.begin(begun.invocation.clone());
+        for (index, arguments) in [
+            "{\"query\":\"OLD_PREFIX",
+            &"b".repeat(9000),
+            "\",\"latest\":\"live-tail\"}",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            preview
+                .apply(mf_chat::PreviewEvent {
+                    invocation: begun.invocation.clone(),
+                    delta: mf_chat::ToolCallDelta {
+                        model_call_id: "model".into(),
+                        index: 0,
+                        arguments: arguments.into(),
+                        id: (index == 0).then(|| "long".into()),
+                        name: (index == 0).then(|| "search".into()),
+                    }
+                    .into(),
+                })
+                .unwrap();
+        }
+        view.event(
+            ChatEvent::Preview {
+                invocation: begun.invocation.clone(),
+                preview,
+            },
+            &controller,
+        );
+        let collapsed = render(&view, 240, 70);
+        assert!(collapsed.contains("[+] Tool call search [long] · 8.8 KiB · truncated"));
+        assert!(!collapsed.contains("live-tail") && !collapsed.contains("deltas omitted"));
+        view.expanded_tools.insert(key.clone());
+        let live = render(&view, 240, 70);
+        assert!(live.contains("2 older deltas omitted"), "{live}");
+        assert!(live.contains("truncated") && live.contains("live-tail"));
+        assert!(!live.contains("OLD_PREFIX"));
+
+        let canonical = serde_json::json!({
+            "query": "c".repeat(9000),
+            "z_latest": "persisted-tail"
+        });
+        let result = mf_chat::ConversationResult::append(
+            serde_json::from_value(serde_json::json!([
+                {"role":"assistant","content":"","tool_calls":[{
+                    "id":"long","name":"search","arguments":canonical
+                }]},
+                {"role":"tool","tool_call_id":"long","content":"done"},
+                {"role":"assistant","content":"Finished"}
+            ]))
+            .unwrap(),
+        );
+        result.validate().unwrap();
+        let completion = controller
+            ._database
+            .complete_turn(begun.invocation.clone(), result)
+            .unwrap();
+        view.event(
+            finish(
+                begun.invocation.clone(),
+                CompletionState::Committed(completion),
+            ),
+            &controller,
+        );
+        let saved = render(&view, 240, 70);
+        assert!(
+            saved.contains("canonical argument prefix omitted"),
+            "{saved}"
+        );
+        assert!(saved.contains("truncated") && saved.contains("persisted-tail"));
+        assert!(!saved.contains("live-tail"));
+        controller.close().unwrap();
+
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
+        view.show_execution = false;
+        view.switch(Some(session.clone()));
+        view.expanded_tools.insert(key);
+        let controller = ChatController::open(launch).unwrap();
+        let page = controller
+            ._database
+            .messages(&session.id, 50, None)
+            .unwrap();
+        let stored = page
+            .messages
+            .iter()
+            .find_map(|record| match &record.message.payload {
+                mf_chat::ChatMessage::Assistant {
+                    tool_calls: Some(calls),
+                    ..
+                } => Some(&calls[0].arguments),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(serde_json::to_value(stored).unwrap(), canonical);
+        view.event(
+            ChatEvent::Loaded {
+                session: controller._database.session(&session.id).unwrap(),
+                page,
+            },
+            &controller,
+        );
+        let loaded = render(&view, 240, 70);
+        for needle in [
+            "Tool call search [long]",
+            "canonical argument prefix omitted",
+            "persisted-tail",
+            "truncated",
+        ] {
+            assert!(loaded.contains(needle), "{needle} missing:\n{loaded}");
+        }
+        controller.close().unwrap();
     }
 
     #[test]

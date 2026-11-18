@@ -504,7 +504,9 @@ select `tool_call_delta`. A chatflow can select it without exposing `answer`.
 
 Terminal preview capture runs independently of drawing and inspection. It keeps at most 32 text/tool
 entries and 128 KiB of UTF-8 data, including correlation metadata, with an explicit truncation notice
-while continuing to drain and validate.
+while continuing to drain and validate. Each tool call retains at most 8 KiB of recent argument text
+within that shared budget. Older argument deltas are omitted from the provisional view, not from
+tool dispatch or persistence. The notice counts both fully and partially omitted deltas.
 A complete result replaces provisional segments with its display delta. Prefixes without a valid
 result stay visibly unfinished. Older invocation events cannot alter the active turn.
 
@@ -571,8 +573,14 @@ its matching call on the current page, regardless of result arrival order. A pag
 still shows the result with its tool-call ID. Grouping changes only the display, not stored order.
 Tool arguments and results are inert literal data, never prompts, Markdown images, or commands.
 Tool call groups start collapsed (`[+]`) and can be opened (`[-]`) as soon as a preview appears.
-An open group displays argument fragments as received. Live assistant blocks use model-call IDs
-and the same spacing between messages and tools as settled replies. The status on each tool header
+An open group displays retained argument fragments as received, with incremental JSON syntax
+highlighting for both raw previews and canonical arguments. A truncated header shows total argument
+size; expanded raw groups identify omitted deltas and bytes, while canonical groups identify only
+the omitted byte prefix. Canonical arguments receive the same 8 KiB tail limit when generated from
+settlement or reloaded from SQLite. Complete authoritative arguments remain in `messages`; delta
+history and omission markers are not persisted. Partial or malformed fragments remain visible
+without needing to parse as JSON. Live assistant blocks use model-call IDs and the same spacing
+between messages and tools as settled replies. The status on each tool header
 comes separately from runtime observations, matched by call ID. An observed call without a matching
 preview appears under `Observed tools`. `ChatJob::tool_metrics()` exposes the in-process view by
 call ID. Missing observations never imply a start or success.
@@ -584,7 +592,8 @@ storage. Results appear inside the group when the turn settles; execution metric
 Assistant text supports Markdown in saved records, previews, and retained results: headings, emphasis,
 lists, tasks, quotes, links, tables, and code blocks. Headings show explicit levels `#1` through `#6`.
 Fenced blocks use their language for highlighting; unsupported languages, very long code lines, and
-highlighting errors fall back to plain code. HTML, prompts, diagnostics, and tool data stay literal.
+highlighting errors fall back to plain code. HTML, prompts, diagnostics, and tool results stay
+literal; JSON highlighting styles tool arguments without interpreting or reformatting them.
 Terminal controls are escaped without modifying stored content.
 
 Unchanged Markdown blocks and wrapped lines are cached. Resize reflows without repeating highlighting;
