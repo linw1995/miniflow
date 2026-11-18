@@ -1,0 +1,352 @@
+{
+  "version": "2026-10-28",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../crates/builtin-nodes/core"
+    },
+    "code": {
+      "package": "mfn-code",
+      "path": "../crates/builtin-nodes/code"
+    },
+    "llm": {
+      "package": "mfn-llm",
+      "path": "../crates/builtin-nodes/llm"
+    },
+    "deepseek": {
+      "package": "mfn-deepseek",
+      "path": "../crates/builtin-nodes/deepseek"
+    }
+  },
+  "flows": {
+    "agent": {
+      "builtin": "mfn-llm.agent"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "messages": {
+            "type": {
+              "list": "object"
+            }
+          },
+          "llm_model": {
+            "type": "string",
+            "default": "your-model",
+            "secret": false
+          },
+          "llm_base_url": {
+            "type": "string",
+            "default": "https://api.openai.com/v1",
+            "secret": false
+          },
+          "llm_api_key": {
+            "type": "string",
+            "env": "OPENAI_API_KEY"
+          },
+          "deepseek_base_url": {
+            "type": "string",
+            "env": "DEEPSEEK_BASE_URL",
+            "default": "https://api.deepseek.com",
+            "secret": false
+          },
+          "deepseek_api_key": {
+            "type": "string",
+            "env": "DEEPSEEK_API_KEY"
+          },
+          "search_description": {
+            "type": "string",
+            "secret": false,
+            "default": "Search the web using DeepSeek. Returns structured results with titles, URLs, snippets, and summaries. Use fetch to read a promising result. Independent queries can run in parallel."
+          },
+          "search_parameters": {
+            "type": "object",
+            "secret": false,
+            "default": {
+              "query": {
+                "description": "A nonblank search query of 1-128 Unicode characters."
+              },
+              "count": {
+                "description": "Number of results, from 1 to 50; defaults to 5."
+              }
+            }
+          },
+          "fetch_description": {
+            "type": "string",
+            "secret": false,
+            "default": "Fetch a web page using DeepSeek. Returns its title and Markdown content. Use the returned content to ground the answer and cite the source URL."
+          },
+          "fetch_parameters": {
+            "type": "object",
+            "secret": false,
+            "default": {
+              "url": {
+                "description": "An absolute HTTP or HTTPS page URL, without embedded credentials."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "search",
+      "kind": "builtin.constant",
+      "config": {
+        "type": "flow",
+        "value": {
+          "path": "agent-deepseek/search.json"
+        },
+        "inputs": {
+          "api_key": {
+            "$ref": "params.deepseek_api_key"
+          },
+          "base_url": {
+            "$ref": "params.deepseek_base_url"
+          }
+        }
+      }
+    },
+    {
+      "id": "fetch",
+      "kind": "builtin.constant",
+      "config": {
+        "type": "flow",
+        "value": {
+          "path": "agent-deepseek/fetch.json"
+        },
+        "inputs": {
+          "api_key": {
+            "$ref": "params.deepseek_api_key"
+          },
+          "base_url": {
+            "$ref": "params.deepseek_base_url"
+          }
+        }
+      }
+    },
+    {
+      "id": "search_properties",
+      "kind": "builtin.object",
+      "config": {
+        "fields": {
+          "description": "string",
+          "parameters": "object",
+          "interface": "object"
+        }
+      },
+      "inputs": {
+        "description": {
+          "from": {
+            "node": "params",
+            "port": "search_description"
+          }
+        },
+        "parameters": {
+          "from": {
+            "node": "params",
+            "port": "search_parameters"
+          }
+        },
+        "interface": {
+          "from": {
+            "node": "search",
+            "port": "properties"
+          }
+        }
+      }
+    },
+    {
+      "id": "fetch_properties",
+      "kind": "builtin.object",
+      "config": {
+        "fields": {
+          "description": "string",
+          "parameters": "object",
+          "interface": "object"
+        }
+      },
+      "inputs": {
+        "description": {
+          "from": {
+            "node": "params",
+            "port": "fetch_description"
+          }
+        },
+        "parameters": {
+          "from": {
+            "node": "params",
+            "port": "fetch_parameters"
+          }
+        },
+        "interface": {
+          "from": {
+            "node": "fetch",
+            "port": "properties"
+          }
+        }
+      }
+    },
+    {
+      "id": "tool_properties",
+      "kind": "builtin.object",
+      "config": {
+        "fields": {
+          "search": "object",
+          "fetch": "object"
+        }
+      },
+      "inputs": {
+        "search": {
+          "from": {
+            "node": "search_properties",
+            "port": "value"
+          }
+        },
+        "fetch": {
+          "from": {
+            "node": "fetch_properties",
+            "port": "value"
+          }
+        }
+      }
+    },
+    {
+      "id": "tools",
+      "kind": "builtin.object",
+      "config": {
+        "fields": {
+          "search": "flow",
+          "fetch": "flow"
+        }
+      },
+      "inputs": {
+        "search": {
+          "from": {
+            "node": "search",
+            "port": "value"
+          }
+        },
+        "fetch": {
+          "from": {
+            "node": "fetch",
+            "port": "value"
+          }
+        }
+      }
+    },
+    {
+      "id": "agent",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "agent"
+      },
+      "inputs": {
+        "params.tools": {
+          "from": {
+            "node": "tools",
+            "port": "value"
+          }
+        },
+        "params.tool_properties": {
+          "from": {
+            "node": "tool_properties",
+            "port": "value"
+          }
+        },
+        "params.messages": {
+          "from": {
+            "node": "params",
+            "port": "messages"
+          }
+        },
+        "params.model": {
+          "from": {
+            "node": "params",
+            "port": "llm_model"
+          }
+        },
+        "params.base_url": {
+          "from": {
+            "node": "params",
+            "port": "llm_base_url"
+          }
+        },
+        "params.api_key": {
+          "from": {
+            "node": "params",
+            "port": "llm_api_key"
+          }
+        }
+      }
+    },
+    {
+      "id": "result",
+      "kind": "builtin.object",
+      "config": {
+        "fields": {
+          "status": "string",
+          "messages": {
+            "list": "object"
+          },
+          "usages": {
+            "list": "object"
+          },
+          "error": "string"
+        }
+      },
+      "inputs": {
+        "status": {
+          "from": {
+            "node": "agent",
+            "port": "status"
+          }
+        },
+        "messages": {
+          "from": {
+            "node": "agent",
+            "port": "messages"
+          }
+        },
+        "usages": {
+          "from": {
+            "node": "agent",
+            "port": "usages"
+          }
+        },
+        "error": {
+          "from": {
+            "node": "agent",
+            "port": "error"
+          }
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "params",
+      "to_node": "search"
+    },
+    {
+      "from_node": "params",
+      "to_node": "fetch"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "answer",
+      "node": "agent",
+      "port": "answer",
+      "optional": true
+    },
+    {
+      "name": "append",
+      "node": "result",
+      "port": "value"
+    }
+  ]
+}

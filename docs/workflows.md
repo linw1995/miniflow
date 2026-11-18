@@ -559,6 +559,45 @@ nix develop --command cargo run -p mf-cli --features development-support -- comp
 nix develop --command cargo run -p mf-cli --features development-support -- run target/chat-calculator --chat --params.model your-model
 ```
 
+The [DeepSeek web Agent](../examples/chat-deepseek-flow.json) composes the same Agent with
+[Search](../examples/agent-deepseek/search.json) and [Fetch](../examples/agent-deepseek/fetch.json)
+tool Flows. Independent searches can run in parallel; subsequent rounds can fetch a discovered URL
+before answering. Search returns structured results, and Fetch returns the page title and Markdown.
+The model sees only `query` and optional `count` for Search, or `url` for Fetch. Both wrappers keep
+credentials and the tool endpoint outside the model's argument schema. Each Flow constant configures
+those inputs from explicit root parameters with context templates before the unchanged Agent receives
+the tool maps.
+
+The example exposes distinct settings for each provider:
+
+| Root parameter | Purpose | Environment fallback / default |
+| --- | --- | --- |
+| `params.llm_model` | Chat model | `your-model` |
+| `params.llm_base_url` | Chat Completions prefix | `https://api.openai.com/v1` |
+| `params.llm_api_key` | Chat model credential | `OPENAI_API_KEY` |
+| `params.deepseek_base_url` | Search/Fetch prefix | `DEEPSEEK_BASE_URL` / `https://api.deepseek.com` |
+| `params.deepseek_api_key` | Search/Fetch credential | `DEEPSEEK_API_KEY` |
+
+Explicit arguments override environment fallbacks. The model and tool credentials are never implicitly
+shared, even when both services are provided by DeepSeek. Export the two keys in your shell, then run:
+
+```sh
+nix develop --command cargo run -p mf-cli --features development-support -- compile examples/chat-deepseek-flow.json --output target/chat-deepseek
+nix develop --command cargo run -p mf-cli --features development-support -- run target/chat-deepseek --chat --params.llm_model your-model --params.llm_base_url https://api.openai.com/v1 --params.deepseek_base_url https://api.deepseek.com
+```
+
+`params.llm_api_key` and `params.deepseek_api_key` can also be supplied explicitly, although environment
+fallbacks avoid putting credentials in shell history and process arguments. Tool wrappers receive both
+settings as ordinary private Call inputs and do not independently read credential or endpoint variables.
+Compilation requires neither credential and makes no provider requests.
+
+For PiP observation, request two independent searches followed by fetching their useful sources.
+The running tool path ends at `builtin.deepseek.search` or `builtin.deepseek.fetch` beneath the
+Agent Loop, dispatch Call, parallel Iteration, and Router. Actual network latency determines how
+long each node remains visible; this example does not insert artificial delays or force tool use.
+Search and Fetch requests may incur provider charges. Their failures and cancellation retain the
+existing tool-dispatch behavior; the example does not add hidden retries.
+
 The [context-replacement example](../examples/chat-context-flow.json) calls the same calculator Flow,
 then selects either its unchanged `append` result or a separate `replace_context` branch. With
 `params.compact = true`, an explicit summary-model call reports its own `compaction` usage and returns
