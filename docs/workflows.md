@@ -1396,8 +1396,8 @@ and is not sent to the provider.
 The stream exposes `delta` for text, `tool_call_delta` for raw argument fragments, and `tool_call`
 for each completed model-generated call. The text payload remains `{text, model_call_id}`. Raw
 fragments are forwarded from SSE before Rig assembles the call, keyed by model call and provider tool
-index within the primary choice. If the provider sends an ID or name with a fragment, it travels as
-an optional hint. The node does not parse or reconstruct the fragment as JSON. A completed event
+index within the primary choice. An ID or name sent without arguments is still forwarded as a hint,
+with an empty `arguments` string. The node does not parse or reconstruct fragments as JSON. A completed event
 still has `{model_call_id, call}`, where `call` matches one terminal `tool_calls` entry. Neither
 stream implies tool execution; a later failure or truncation can invalidate the batch. Use terminal
 `outcome` to decide whether to dispatch.

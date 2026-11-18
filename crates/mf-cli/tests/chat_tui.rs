@@ -211,9 +211,10 @@ fn calculator_call(id: &str, operation: &str, left: f64, right: f64) -> Reply {
     let mut reply = Reply::stream_text("");
     let arguments =
         serde_json::json!({"operation":operation,"left":left,"right":right}).to_string();
-    let chunk = serde_json::json!({"id":"response","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":id,"type":"function","function":{"name":"calculator","arguments":arguments}}]},"finish_reason":null}]});
+    let identity = serde_json::json!({"id":"response","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":id,"type":"function","function":{"name":"calculator","arguments":""}}]},"finish_reason":null}]});
+    let chunk = serde_json::json!({"id":"response","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":arguments}}]},"finish_reason":null}]});
     let finish = serde_json::json!({"id":"response","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}});
-    reply.body = format!("data: {chunk}\n\ndata: {finish}\n\ndata: [DONE]\n\n");
+    reply.body = format!("data: {identity}\n\ndata: {chunk}\n\ndata: {finish}\n\ndata: [DONE]\n\n");
     reply
 }
 
@@ -306,30 +307,38 @@ fn compiled_context_replacement_keeps_tool_audit_and_save_only_retries_after_reo
             .unwrap();
         if turn == 0 {
             let deadline = Instant::now() + Duration::from_secs(10);
-            let observation = loop {
-                assert!(Instant::now() < deadline, "no runner observation");
+            let mut observation = None;
+            let mut arguments_seen = false;
+            loop {
+                assert!(
+                    Instant::now() < deadline,
+                    "no correlated tool preview and runner observation"
+                );
                 match controller.try_event() {
-                    Some(ChatEvent::Observing(observation)) => break observation,
+                    Some(ChatEvent::Observing(run)) => observation = Some(run),
+                    Some(ChatEvent::Preview { preview, .. }) => {
+                        arguments_seen |= preview.segments.iter().any(|segment| {
+                            segment.tool.as_ref().is_some_and(|tool| {
+                                tool.id.as_deref() == Some("first")
+                                    && tool.name.as_deref() == Some("calculator")
+                            }) && segment.text.contains("\"operation\"")
+                        });
+                    }
                     Some(ChatEvent::Finished { .. }) => panic!("settled before observation"),
                     _ => thread::sleep(Duration::from_millis(2)),
                 }
-            };
-            loop {
-                let statuses = observation.reader.tool_metrics().snapshot();
-                if statuses
-                    .get("first")
-                    .is_some_and(|tool| tool.phase == Some(CallExecutionPhase::Succeeded))
+                let Some(run) = &observation else { continue };
+                let statuses = run.reader.tool_metrics().snapshot();
+                if arguments_seen
+                    && statuses
+                        .get("first")
+                        .is_some_and(|tool| tool.phase == Some(CallExecutionPhase::Succeeded))
                 {
                     assert_eq!(statuses.len(), 1);
                     assert_eq!(statuses["first"].name, "calculator");
                     assert!(statuses["first"].duration_ns.is_some());
                     break;
                 }
-                assert!(
-                    Instant::now() < deadline,
-                    "tool telemetry not delivered before settlement: {statuses:?}"
-                );
-                thread::sleep(Duration::from_millis(2));
             }
             assert!(controller.busy());
             release.store(true, Ordering::Release);

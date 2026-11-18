@@ -47,23 +47,28 @@ fn tool_argument_deltas(reply: &Value, model_call_id: &str) -> impl Iterator<Ite
         .into_iter()
         .flatten()
         .filter_map(move |tool| {
-            let function = tool.get("function")?;
+            let function = tool.get("function");
             let arguments = function
-                .get("arguments")?
-                .as_str()
-                .filter(|text| !text.is_empty())?;
+                .and_then(|function| function.get("arguments"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             let hint = |value: Option<&Value>| {
                 value
                     .and_then(Value::as_str)
                     .filter(|text| !text.trim().is_empty())
                     .map(str::to_owned)
             };
+            let id = hint(tool.get("id"));
+            let name = hint(function.and_then(|function| function.get("name")));
+            if arguments.is_empty() && id.is_none() && name.is_none() {
+                return None;
+            }
             Some(ToolCallDelta {
                 model_call_id: model_call_id.into(),
                 index: tool.get("index").map_or(Some(0), Value::as_u64)?,
                 arguments: arguments.to_owned(),
-                id: hint(tool.get("id")),
-                name: hint(function.get("name")),
+                id,
+                name,
             })
         })
 }
@@ -177,7 +182,7 @@ mod tests {
                 {"index":2,"id":" ","function":{"name":" ","arguments":"  "}},
                 {"index":2,"function":{"arguments":""}},
                 {"index":2,"function":{"arguments":{"query":"whole value"}}},
-                {"index":2,"function":{"name":"no arguments"}},
+                {"index":2,"function":{"name":" "}},
                 {"index":-1,"function":{"arguments":"invalid index"}},
                 {"index":3,"function":null},
                 {"index":3}
@@ -208,6 +213,27 @@ mod tests {
         ] {
             assert!(tool_argument_deltas(&reply, "model").next().is_none());
         }
+    }
+
+    #[test]
+    fn identity_hints_survive_frames_without_an_argument_fragment() {
+        use serde_json::json;
+        let reply = json!({"choices":[{"index":0,"delta":{"tool_calls":[
+            {"index":1,"id":"separate-id"},
+            {"index":1,"function":{"name":"lookup","arguments":""}},
+            {"index":1,"function":{"arguments":"{ \"query\": "}},
+            {"index":2,"id":" ","function":{"name":" ","arguments":""}}
+        ]}}]});
+        let deltas: Vec<_> = tool_argument_deltas(&reply, "model").collect();
+        let [id, name, fragment] = deltas.as_slice() else {
+            panic!("expected both hints and one argument fragment: {deltas:?}");
+        };
+        assert!(deltas.iter().all(|delta| delta.index == 1));
+        assert!(id.arguments.is_empty() && name.arguments.is_empty());
+        assert_eq!(id.id.as_deref(), Some("separate-id"));
+        assert_eq!(name.name.as_deref(), Some("lookup"));
+        assert_eq!(fragment.arguments, "{ \"query\": ");
+        assert!(fragment.id.is_none() && fragment.name.is_none());
     }
 
     #[test]

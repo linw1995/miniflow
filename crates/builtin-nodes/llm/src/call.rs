@@ -45,8 +45,9 @@ pub struct ToolCallEvent {
     pub call: ToolCall,
 }
 
-/// A raw argument fragment from the primary Chat Completions choice. It is not a tool call
-/// ready for dispatch. Identity and name are wire hints present only when sent alongside this fragment.
+/// A raw argument fragment or an identity hint from the primary Chat Completions choice.
+/// Hint-only records have an empty argument string and do not change accumulated arguments.
+/// Neither kind of preview is a tool call ready for dispatch.
 #[derive(Clone, Debug, PartialEq, Eq, NodeValue)]
 pub struct ToolCallDelta {
     pub model_call_id: String,

@@ -1,14 +1,14 @@
 ## ADDED Requirements
 
-### Requirement: Tool argument previews and collapsible results
+### Requirement: Collapsible live tool call groups
 
-Chat SHALL group raw argument fragments by model call and provider tool index. Authoritative completion SHALL replace previews without duplicates and group results with their visible calls without changing stored order. Each result SHALL start collapsed, with a leading fold marker and independent keyboard expansion. Arguments and results MUST remain literal.
+Chat SHALL group arguments and results by call. Groups SHALL start collapsed and be independently expandable during streaming, with a leading fold marker. Authoritative completion SHALL replace previews without duplicates or changes to stored order. Arguments and results MUST remain literal.
 
 #### Scenario: Show interleaved argument fragments
 
 - **WHEN** the model sends interleaved fragments for multiple tool calls
-- **THEN** each fragment appears in the matching preview without waiting for a tool result
-- **AND** canonical transcript entries replace provisional calls when the turn settles
+- **THEN** each fragment appears in its expanded group without waiting for a tool result
+- **AND** an unambiguous late wire ID and canonical replacement preserve the group's focus and expansion
 
 #### Scenario: Pair parallel calls and results
 
@@ -20,15 +20,16 @@ Chat SHALL group raw argument fragments by model call and provider tool index. A
 - **WHEN** a history page contains a tool result but not its matching call
 - **THEN** the result remains visible with its call ID and the fold marker before the ID
 
-#### Scenario: Expand and collapse a result
+#### Scenario: Expand and collapse a group
 
-- **WHEN** the user selects a result with Tab or Shift+Tab in browse mode and presses Space or Ctrl+T
-- **THEN** only that result changes expansion state, without running tools, changing model context, or interpreting result Markdown or escape sequences
+- **WHEN** the user selects a group with Tab or Shift+Tab in browse mode and presses Space or Ctrl+T
+- **THEN** only that group's arguments and result change visibility, without running tools, changing model context, or interpreting tool payloads as Markdown or escape sequences
 
 #### Scenario: Show observed live tool status
 
 - **WHEN** a tool Flow execution is observed for the active chat invocation
-- **THEN** the UI shows the observed state beside the matching live call or as a separate execution row when no preview has that ID
+- **THEN** the UI updates the matching tool call group header, even when it is collapsed
+- **AND** if no preview can be matched by ID, the observation is shown in a tool call group without guessed arguments
 - **AND** model argument fragments alone do not establish an execution state
 
 #### Scenario: Bound live preview data

@@ -49,7 +49,7 @@ struct MessageGroup<'a> {
 }
 
 impl MessageGroup<'_> {
-    fn result_ids(&self) -> impl Iterator<Item = &str> {
+    fn tool_ids(&self) -> impl Iterator<Item = &str> {
         let (calls, standalone) = match self.message {
             mf_chat::ChatMessage::Assistant { tool_calls, .. } => {
                 (tool_calls.as_deref().unwrap_or_default(), None)
@@ -59,11 +59,7 @@ impl MessageGroup<'_> {
             }
             _ => (&[][..], None),
         };
-        calls
-            .iter()
-            .map(|call| call.id.as_str())
-            .filter(|id| self.results.contains_key(id))
-            .chain(standalone)
+        calls.iter().map(|call| call.id.as_str()).chain(standalone)
     }
 }
 
@@ -115,6 +111,7 @@ fn render_message_group(
     key: &str,
     group: &MessageGroup<'_>,
     turn: &str,
+    executions: &BTreeMap<String, mf_chat::ToolExecution>,
     expanded: &BTreeSet<String>,
     focused: Option<&str>,
 ) {
@@ -132,14 +129,8 @@ fn render_message_group(
             content,
             ..
         } => {
-            render_tool_result(
-                transcript,
-                tool_key(turn, tool_call_id),
-                Some(tool_call_id),
-                content,
-                expanded,
-                focused,
-            );
+            ToolGroup::standalone_result(turn, tool_call_id, content, executions.get(tool_call_id))
+                .render(transcript, expanded, focused);
             return;
         }
     };
@@ -153,31 +144,14 @@ fn render_message_group(
             if index > 0 {
                 transcript.plain(format!("{key}:call:{index}:gap"), vec![Line::default()]);
             }
-            transcript.plain(
-                format!("{key}:call:{index}:label"),
-                vec![role_label(
-                    &format!("Tool call {} [{}]", call.name, call.id),
-                    Color::Yellow,
-                    None,
-                )],
-            );
-            let arguments = serde_json::to_string_pretty(&call.arguments)
-                .unwrap_or_else(|error| format!("[Arguments unavailable: {error}]"));
-            transcript.literal(
-                format!("{key}:call:{index}:arguments"),
-                &arguments,
-                Style::default(),
-            );
-            if let Some(content) = group.results.get(call.id.as_str()) {
-                render_tool_result(
-                    transcript,
-                    tool_key(turn, &call.id),
-                    None,
-                    content,
-                    expanded,
-                    focused,
-                );
+            ToolGroup {
+                key: tool_key(turn, &call.id),
+                title: tool_call_label(Some(&call.name), &call.id),
+                arguments: Some(ToolArguments::Canonical(&call.arguments)),
+                result: group.results.get(call.id.as_str()).copied(),
+                execution: executions.get(&call.id),
             }
+            .render(transcript, expanded, focused);
         }
     } else {
         transcript.literal(format!("{key}:body"), content, Style::default());
@@ -185,33 +159,173 @@ fn render_message_group(
 }
 
 fn tool_key(turn: &str, id: &str) -> String {
-    format!("tool-result:{turn}:{id}")
+    // A provider ID may contain the same suffix as one of the group's body keys.
+    format!("tool:{turn}:{}:{id}", id.len())
 }
 
-fn render_tool_result(
-    transcript: &mut super::transcript::Transcript,
+fn preview_tool_key(turn: &str, model: &str, index: u64) -> String {
+    format!("tool-preview:{turn}:{}:{model}:{index}", model.len())
+}
+
+fn tool_call_label(name: Option<&str>, reference: &str) -> String {
+    match name {
+        Some(name) => format!("Tool call {name} [{reference}]"),
+        None => format!("Tool call [{reference}]"),
+    }
+}
+
+enum ToolArguments<'a> {
+    Raw(&'a str),
+    Canonical(&'a mf_runtime::ValueRef),
+}
+
+struct ToolGroup<'a> {
     key: String,
-    standalone_id: Option<&str>,
-    content: &str,
-    expanded: &BTreeSet<String>,
-    focused: Option<&str>,
-) {
-    let open = expanded.contains(&key);
-    let marker = if open { "[-]" } else { "[+]" };
-    let bytes = content.len();
-    let label = if let Some(id) = standalone_id {
-        format!("{marker} Tool result [{id}] ({bytes} bytes)")
-    } else {
-        format!("{marker} Tool result ({bytes} bytes)")
-    };
-    let mut header = role_label(&label, Color::Yellow, None);
-    if focused == Some(key.as_str()) {
-        header = header.style(Style::default().add_modifier(Modifier::REVERSED));
+    title: String,
+    arguments: Option<ToolArguments<'a>>,
+    result: Option<&'a str>,
+    execution: Option<&'a mf_chat::ToolExecution>,
+}
+
+impl<'a> ToolGroup<'a> {
+    fn standalone_result(
+        turn: &str,
+        id: &str,
+        content: &'a str,
+        execution: Option<&'a mf_chat::ToolExecution>,
+    ) -> Self {
+        Self {
+            key: tool_key(turn, id),
+            title: format!("Tool result [{id}] ({} bytes)", content.len()),
+            arguments: None,
+            result: Some(content),
+            execution,
+        }
     }
-    transcript.plain(key.clone(), vec![header]);
-    if open {
-        transcript.literal(format!("{key}:body"), content, Style::default());
+
+    fn render(
+        self,
+        transcript: &mut super::transcript::Transcript,
+        expanded: &BTreeSet<String>,
+        focused: Option<&str>,
+    ) {
+        let Self {
+            key,
+            title,
+            arguments,
+            result,
+            execution,
+        } = self;
+        let open = expanded.contains(&key);
+        let marker = if open { "[-]" } else { "[+]" };
+        let label = if let Some(execution) = execution {
+            format!("{marker} [{}] {title}", tool_status(execution))
+        } else {
+            format!("{marker} {title}")
+        };
+        let mut header = role_label(&label, Color::Yellow, None);
+        if focused == Some(key.as_str()) {
+            header = header.style(Style::default().add_modifier(Modifier::REVERSED));
+        }
+        transcript.plain(key.clone(), vec![header]);
+        if !open {
+            return;
+        }
+        if let Some(arguments) = &arguments {
+            let text = match arguments {
+                ToolArguments::Raw(text) => std::borrow::Cow::Borrowed(*text),
+                ToolArguments::Canonical(value) => std::borrow::Cow::Owned(
+                    serde_json::to_string_pretty(value)
+                        .unwrap_or_else(|error| format!("[Arguments unavailable: {error}]")),
+                ),
+            };
+            transcript.literal(format!("{key}:arguments"), &text, Style::default());
+        }
+        if let Some(content) = result {
+            if arguments.is_some() {
+                transcript.plain(
+                    format!("{key}:result:label"),
+                    vec![role_label(
+                        &format!("Tool result ({} bytes)", content.len()),
+                        Color::Yellow,
+                        None,
+                    )],
+                );
+            }
+            transcript.literal(format!("{key}:result"), content, Style::default());
+        } else if arguments.is_none() {
+            transcript.plain(
+                format!("{key}:arguments"),
+                vec![Line::styled(
+                    "No argument preview",
+                    Style::default().fg(Color::DarkGray),
+                )],
+            );
+        }
     }
+}
+
+fn unique_preview_ids(preview: &LivePreview) -> BTreeSet<&str> {
+    let mut unique = BTreeSet::new();
+    let mut repeated = BTreeSet::new();
+    for id in preview
+        .segments
+        .iter()
+        .filter_map(|segment| segment.tool.as_ref()?.id.as_deref())
+    {
+        if !unique.insert(id) {
+            repeated.insert(id);
+        }
+    }
+    unique.retain(|id| !repeated.contains(id));
+    unique
+}
+
+enum LiveRow<'a> {
+    Text(&'a super::preview::PreviewSegment),
+    Tool(ToolGroup<'a>),
+}
+
+fn live_rows<'a>(
+    turn: &str,
+    preview: &'a LivePreview,
+    executions: &'a BTreeMap<String, mf_chat::ToolExecution>,
+) -> Vec<LiveRow<'a>> {
+    let unique = unique_preview_ids(preview);
+    let previews = preview.segments.iter().map(|segment| {
+        let Some(tool) = &segment.tool else {
+            return LiveRow::Text(segment);
+        };
+        let id = tool.id.as_deref().filter(|id| unique.contains(id));
+        let execution = id.and_then(|id| executions.get(id));
+        let name = execution
+            .map(|execution| execution.name.as_str())
+            .or(tool.name.as_deref());
+        let index = format!("index {}", tool.index);
+        LiveRow::Tool(ToolGroup {
+            key: id.map_or_else(
+                || preview_tool_key(turn, &segment.model_call_id, tool.index),
+                |id| tool_key(turn, id),
+            ),
+            title: tool_call_label(name, id.unwrap_or(&index)),
+            arguments: (!segment.text.is_empty()).then_some(ToolArguments::Raw(&segment.text)),
+            result: None,
+            execution,
+        })
+    });
+    let unmatched = executions
+        .iter()
+        .filter(|(id, _)| !unique.contains(id.as_str()))
+        .map(|(id, execution)| {
+            LiveRow::Tool(ToolGroup {
+                key: tool_key(turn, id),
+                title: tool_call_label(Some(&execution.name), id),
+                arguments: None,
+                result: None,
+                execution: Some(execution),
+            })
+        });
+    previews.chain(unmatched).collect()
 }
 
 fn tool_status(execution: &mf_chat::ToolExecution) -> &'static str {
@@ -674,7 +788,7 @@ impl ChatView {
                         .as_ref()
                         .is_some_and(|(active, _)| active == &invocation)
                 {
-                    self.preview = preview;
+                    self.replace_preview(&invocation.turn_id, preview);
                 }
             }
             ChatEvent::Observing(observation) => self.observation = Some(observation),
@@ -915,12 +1029,69 @@ impl ChatView {
             self.earlier = false;
         }
     }
+    fn replace_preview(&mut self, turn: &str, preview: LivePreview) {
+        if self.preview.segments.is_empty() {
+            self.preview = preview;
+            return;
+        }
+        let previous_ids = unique_preview_ids(&self.preview);
+        let current_ids = unique_preview_ids(&preview);
+        let mut remapped = BTreeMap::new();
+        for previous in &self.preview.segments {
+            let Some(tool) = &previous.tool else { continue };
+            let Some(current) = preview.segments.iter().find_map(|segment| {
+                segment.tool.as_ref().filter(|candidate| {
+                    segment.model_call_id == previous.model_call_id && candidate.index == tool.index
+                })
+            }) else {
+                continue;
+            };
+            let before = tool.id.as_deref().filter(|id| previous_ids.contains(id));
+            let after = current.id.as_deref().filter(|id| current_ids.contains(id));
+            // Adopt an unambiguous ID without transferring state between two different calls.
+            if before == after || (before.is_some() && after.is_some()) {
+                continue;
+            }
+            let key = |id: Option<&str>| {
+                id.map_or_else(
+                    || preview_tool_key(turn, &previous.model_call_id, tool.index),
+                    |id| tool_key(turn, id),
+                )
+            };
+            remapped.insert(key(before), key(after));
+        }
+        let moved = remapped
+            .iter()
+            .filter(|(old, _)| self.expanded_tools.remove(*old))
+            .map(|(_, new)| new.clone())
+            .collect::<Vec<_>>();
+        self.expanded_tools.extend(moved);
+        if let Some(focused) = &mut self.focused_tool
+            && let Some(key) = remapped.get(focused)
+        {
+            *focused = key.clone();
+        }
+        self.transcript.get_mut().remap_anchor(|key| {
+            remapped.get(key).cloned().or_else(|| {
+                let header = key.strip_suffix(":arguments")?;
+                remapped.get(header).map(|key| format!("{key}:arguments"))
+            })
+        });
+        self.preview = preview;
+    }
+
+    fn tool_executions(&self) -> BTreeMap<String, mf_chat::ToolExecution> {
+        self.observation
+            .as_ref()
+            .map_or_else(BTreeMap::new, |run| run.reader.tool_metrics().snapshot())
+    }
+
     fn tool_keys(&self) -> Vec<String> {
         let mut keys = Vec::new();
         for records in self.page.iter().flat_map(page_turns) {
             let turn = &records[0].message.turn_id;
             for group in message_groups(records.iter().map(|record| &record.message.payload)) {
-                keys.extend(group.result_ids().map(|id| tool_key(turn, id)));
+                keys.extend(group.tool_ids().map(|id| tool_key(turn, id)));
             }
         }
         let turn = self
@@ -929,8 +1100,22 @@ impl ChatView {
             .map_or("", |i| i.turn_id.as_str());
         if let Some(reply) = &self.reply {
             for group in message_groups(reply.result.display_messages().iter()) {
-                keys.extend(group.result_ids().map(|id| tool_key(turn, id)));
+                keys.extend(group.tool_ids().map(|id| tool_key(turn, id)));
             }
+        } else {
+            let executions = if self.running {
+                self.tool_executions()
+            } else {
+                BTreeMap::new()
+            };
+            keys.extend(
+                live_rows(turn, &self.preview, &executions)
+                    .into_iter()
+                    .filter_map(|row| match row {
+                        LiveRow::Tool(group) => Some(group.key),
+                        LiveRow::Text(_) => None,
+                    }),
+            );
         }
         let mut seen = BTreeSet::new();
         keys.retain(|key| seen.insert(key.clone()));
@@ -967,10 +1152,13 @@ impl ChatView {
         {
             self.focus_tool(false);
         }
-        if let Some(key) = &self.focused_tool
-            && !self.expanded_tools.remove(key)
-        {
-            self.expanded_tools.insert(key.clone());
+        if let Some(key) = &self.focused_tool {
+            if !self.expanded_tools.remove(key) {
+                self.expanded_tools.insert(key.clone());
+            }
+            if self.transcript.get_mut().focus(key) {
+                self.scroll.set(1);
+            }
         }
     }
 
@@ -1179,9 +1367,20 @@ impl ChatView {
         };
         let mut transcript = self.transcript.borrow_mut();
         transcript.begin(body.width);
+        let current_turn = self
+            .latest_invocation
+            .as_ref()
+            .map_or("", |invocation| invocation.turn_id.as_str());
+        let executions = self.tool_executions();
+        let no_executions = BTreeMap::new();
         for records in self.page.iter().flat_map(page_turns) {
             let first = &records[0];
             let turn = &first.message.turn_id;
+            let executions = if turn == current_turn {
+                &executions
+            } else {
+                &no_executions
+            };
             for group in message_groups(records.iter().map(|record| &record.message.payload)) {
                 let key = format!("message:{}", records[group.index].message.id);
                 render_message_group(
@@ -1189,6 +1388,7 @@ impl ChatView {
                     &key,
                     &group,
                     turn,
+                    executions,
                     &self.expanded_tools,
                     self.focused_tool.as_deref(),
                 );
@@ -1211,10 +1411,7 @@ impl ChatView {
             metadata.push(Line::default());
             transcript.plain(format!("turn:{turn}:saved:metadata"), metadata);
         }
-        let turn = self
-            .latest_invocation
-            .as_ref()
-            .map_or("", |invocation| invocation.turn_id.as_str());
+        let turn = current_turn;
         if let Some((invocation, prompt)) = &self.active
             && !self.page.as_ref().is_some_and(|page| {
                 page.messages
@@ -1237,6 +1434,7 @@ impl ChatView {
                     &key,
                     &group,
                     turn,
+                    &executions,
                     &self.expanded_tools,
                     self.focused_tool.as_deref(),
                 );
@@ -1265,50 +1463,23 @@ impl ChatView {
                     vec![role_label("Assistant", Color::Cyan, indicator)],
                 );
             }
-            let mut executions = if self.running
-                && let Some(run) = &self.observation
-            {
-                run.reader.tool_metrics().snapshot()
+            let executions = if self.running {
+                &executions
             } else {
-                BTreeMap::new()
+                &no_executions
             };
-            for segment in &self.preview.segments {
-                if let Some(tool) = &segment.tool {
-                    let key = format!("turn:{turn}:tool:{}:{}", segment.model_call_id, tool.index);
-                    let reference = tool
-                        .id
-                        .clone()
-                        .unwrap_or_else(|| format!("index {}", tool.index));
-                    let mut label = if let Some(name) = &tool.name {
-                        format!("Tool call {name} [{reference}]")
-                    } else {
-                        format!("Tool call [{reference}]")
-                    };
-                    if let Some(execution) = tool.id.as_ref().and_then(|id| executions.remove(id)) {
-                        label = format!("[{}] {label}", tool_status(&execution));
-                    }
-                    transcript.plain(
-                        format!("{key}:label"),
-                        vec![role_label(&label, Color::Yellow, None)],
-                    );
-                    transcript.literal(format!("{key}:arguments"), &segment.text, Style::default());
-                } else {
-                    transcript.markdown(
+            for row in live_rows(turn, &self.preview, executions) {
+                match row {
+                    LiveRow::Tool(group) => group.render(
+                        &mut transcript,
+                        &self.expanded_tools,
+                        self.focused_tool.as_deref(),
+                    ),
+                    LiveRow::Text(segment) => transcript.markdown(
                         format!("turn:{turn}:preview:{}", segment.model_call_id),
                         &segment.text,
-                    );
+                    ),
                 }
-            }
-            for (id, execution) in executions {
-                let label = format!(
-                    "[{}] Tool execution {} [{id}]",
-                    tool_status(&execution),
-                    execution.name
-                );
-                transcript.plain(
-                    format!("turn:{turn}:execution:{id}"),
-                    vec![role_label(&label, Color::Yellow, None)],
-                );
             }
             let mut status = vec![];
             if !loading && has_preview && self.preview.incomplete {
@@ -1465,19 +1636,23 @@ mod tests {
     }
     const TOOL_RESULT_BODY: &str = "**literal tool**\n![inert](tool.png)\n\u{1b}[31m";
 
-    fn assert_grouped_tools(screen: &str, second_open: bool, partial: bool) {
+    fn assert_grouped_tools(screen: &str, first_open: bool, second_open: bool) {
         let headers: Vec<_> = screen
             .lines()
             .filter(|line| line.contains("Tool call") || line.contains("Tool result"))
             .map(str::trim_end)
             .collect();
-        let marker = if second_open { "[-]" } else { "[+]" };
-        let second = format!("{marker} Tool result ({} bytes)", TOOL_RESULT_BODY.len());
-        let mut expected = vec!["Tool call lookup [first]"];
-        if !partial {
-            expected.push("[+] Tool result (0 bytes)");
+        let mut expected = if first_open {
+            vec!["[-] Tool call lookup [first]", "Tool result (0 bytes)"]
+        } else {
+            vec!["[+] Tool call lookup [first]"]
+        };
+        let result = format!("Tool result ({} bytes)", TOOL_RESULT_BODY.len());
+        if second_open {
+            expected.extend(["[-] Tool call calculate [second]", result.as_str()]);
+        } else {
+            expected.push("[+] Tool call calculate [second]");
         }
-        expected.extend(["Tool call calculate [second]", second.as_str()]);
         assert_eq!(headers, expected, "{screen}");
     }
 
@@ -1561,8 +1736,9 @@ mod tests {
                 },
                 &controller,
             );
-            view.preview.begin(begun.invocation.clone());
-            view.preview
+            let mut preview = LivePreview::default();
+            preview.begin(begun.invocation.clone());
+            preview
                 .apply(mf_chat::PreviewEvent {
                     invocation: begun.invocation.clone(),
                     delta: mf_chat::TextDelta {
@@ -1572,15 +1748,20 @@ mod tests {
                     .into(),
                 })
                 .unwrap();
-            for (arguments, label, hint) in [
+            view.mode = Mode::Browse;
+            for (step, (arguments, label, hint)) in [
                 ("{ \"query\": ", "Tool call [index 0]", false),
+                ("", "Tool call lookup [first]", true),
                 (
                     "\"**preview argument**\" }",
                     "Tool call lookup [first]",
-                    true,
+                    false,
                 ),
-            ] {
-                view.preview
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                preview
                     .apply(mf_chat::PreviewEvent {
                         invocation: begun.invocation.clone(),
                         delta: mf_chat::ToolCallDelta {
@@ -1593,15 +1774,38 @@ mod tests {
                         .into(),
                     })
                     .unwrap();
+                view.event(
+                    ChatEvent::Preview {
+                        invocation: begun.invocation.clone(),
+                        preview: preview.clone(),
+                    },
+                    &controller,
+                );
+                if step == 0 {
+                    let collapsed = render(&view, 140, 70);
+                    assert!(
+                        collapsed.contains("[+] Tool call [index 0]")
+                            && !collapsed.contains("query")
+                    );
+                    view.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &controller);
+                    view.key(
+                        KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+                        &controller,
+                    );
+                }
                 let screen = render(&view, 140, 70);
                 assert_eq!(screen.matches("Tool call").count(), 1);
-                assert!(screen.contains(label) && screen.contains("{ \"query\":"));
-                assert_eq!(screen.contains("**preview argument**"), hint);
-                assert!(!screen.contains("Tool result"));
-                assert!(!screen.contains("[Running]") && !screen.contains("[Queued]"));
+                assert!(
+                    screen.contains(&format!("[-] {label}")) && screen.contains("{ \"query\":"),
+                    "{screen}"
+                );
+                assert_eq!(screen.contains("**preview argument**"), step == 2);
+                assert!(!screen.contains("Tool result") && !screen.contains("[Running]"));
             }
-            view.toggle_tool();
-            assert!(view.focused_tool.is_none());
+            let first = tool_key(&begun.invocation.turn_id, "first");
+            let second = tool_key(&begun.invocation.turn_id, "second");
+            assert_eq!(view.focused_tool.as_ref(), Some(&first));
+            assert_eq!(view.expanded_tools, BTreeSet::from([first.clone()]));
             let result = tool_result(replace, false);
             view.event(
                 finish(
@@ -1616,18 +1820,16 @@ mod tests {
                 ),
                 &controller,
             );
-            let collapsed = render(&view, 140, 70);
-            assert_grouped_tools(&collapsed, false, false);
+            let settled = render(&view, 140, 70);
+            assert_grouped_tools(&settled, true, false);
+            assert!(settled.contains("**argument**"));
             assert!(
-                !collapsed.contains("**preview argument**")
-                    && !collapsed.contains("**literal tool**")
+                !settled.contains("**preview argument**") && !settled.contains("**literal tool**")
             );
-            assert!(!collapsed.contains("[Completed]"));
             let toggle = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
-            let first = tool_key(&begun.invocation.turn_id, "first");
-            let second = tool_key(&begun.invocation.turn_id, "second");
             assert_eq!(view.tool_keys(), [first.clone(), second.clone()]);
             view.focus_tool(false);
+            assert_eq!(view.focused_tool.as_ref(), Some(&second));
             view.focus_tool(true);
             assert_eq!(view.focused_tool.as_ref(), Some(&first));
             view.focus_tool(false);
@@ -1654,7 +1856,7 @@ mod tests {
                 let screen = render(&view, 140, 70);
                 assert_eq!(screen.matches("Original question").count(), 1, "{screen}");
                 assert_eq!(screen.matches("Assistant").count(), 2, "{screen}");
-                assert_grouped_tools(&screen, true, false);
+                assert_grouped_tools(&screen, true, true);
                 assert!(screen.contains("**argument**") && screen.contains("**literal tool**"));
                 assert!(screen.contains("![inert](tool.png)"));
                 assert!(screen.contains("\\u{1b}[31m"));
@@ -1708,7 +1910,7 @@ mod tests {
                 &controller,
             );
             let loaded = render(&view, 140, 70);
-            assert_grouped_tools(&loaded, true, false);
+            assert_grouped_tools(&loaded, true, true);
             assert_eq!(view.tool_keys(), [first, second]);
             assert_eq!(loaded.matches("Assistant").count(), 2);
             assert_eq!(loaded.matches("FTT").count(), 1);
@@ -1773,7 +1975,12 @@ mod tests {
             &controller,
         );
         let screen = render(&view, 120, 55);
-        assert_grouped_tools(&screen, false, true);
+        assert_grouped_tools(&screen, false, false);
+        assert_eq!(
+            view.tool_keys().len(),
+            2,
+            "retain the call whose result was missing"
+        );
         assert!(screen.contains("[failed]") && screen.contains("[not saved]"));
         assert!(screen.contains("Model context unchanged"));
         assert!(!screen.contains("replacement pending"));
@@ -1793,7 +2000,7 @@ mod tests {
             .unwrap();
         view.event(ChatEvent::Loaded { session, page }, &controller);
         let screen = render(&view, 120, 55);
-        assert_grouped_tools(&screen, false, true);
+        assert_grouped_tools(&screen, false, false);
         assert!(screen.contains("[failed"));
         assert!(screen.contains("Provider failed"));
         assert!(!screen.contains("not saved"));
@@ -1892,7 +2099,7 @@ mod tests {
             &controller,
         );
         let screen = render(&view, 120, 70);
-        assert_grouped_tools(&screen, true, false);
+        assert_grouped_tools(&screen, false, true);
         assert_eq!(screen.matches("FTT").count(), 1);
         assert!(!screen.contains("PRIVATE_CONTEXT_ONLY"));
         let page = controller
@@ -1901,7 +2108,7 @@ mod tests {
             .unwrap();
         view.event(ChatEvent::Loaded { session, page }, &controller);
         let screen = render(&view, 120, 35);
-        assert_grouped_tools(&screen, true, true);
+        assert_grouped_tools(&screen, false, true);
         assert_eq!(screen.matches("FTT").count(), 1);
         assert_eq!(
             controller
@@ -1924,11 +2131,8 @@ mod tests {
         let mut expanded = BTreeSet::new();
         for prefix in ["[+] Tool result", "[-] Tool result"] {
             transcript.begin(16);
-            render_tool_result(
+            ToolGroup::standalone_result("turn", id, TOOL_RESULT_BODY, None).render(
                 &mut transcript,
-                key.clone(),
-                Some(id),
-                TOOL_RESULT_BODY,
                 &expanded,
                 Some(&key),
             );
@@ -2305,6 +2509,61 @@ mod tests {
     }
 
     #[test]
+    fn parallel_previews_do_not_share_folds_or_status_on_conflicting_id_hints() {
+        let invocation = Invocation::new("session");
+        let turn = &invocation.turn_id;
+        let mut preview = LivePreview::default();
+        preview.begin(invocation.clone());
+        for (index, id) in [(0, "duplicate"), (1, "duplicate"), (2, "known")] {
+            preview
+                .apply(mf_chat::PreviewEvent {
+                    invocation: invocation.clone(),
+                    delta: mf_chat::ToolCallDelta {
+                        model_call_id: "model".into(),
+                        index,
+                        arguments: index.to_string(),
+                        id: Some(id.into()),
+                        name: Some("search".into()),
+                    }
+                    .into(),
+                })
+                .unwrap();
+        }
+        let executions = ["duplicate", "known"]
+            .into_iter()
+            .map(|id| {
+                (
+                    id.into(),
+                    mf_chat::ToolExecution {
+                        name: "search".into(),
+                        phase: Some(mf_chat::CallExecutionPhase::Running),
+                        duration_ns: None,
+                    },
+                )
+            })
+            .collect();
+        let rows = live_rows(turn, &preview, &executions);
+        let [
+            LiveRow::Tool(first),
+            LiveRow::Tool(second),
+            LiveRow::Tool(known),
+            LiveRow::Tool(observed),
+        ] = rows.as_slice()
+        else {
+            panic!(
+                "expected two anonymous previews, one known group and one unmatched observation"
+            );
+        };
+        assert_ne!(first.key, second.key);
+        assert!(first.execution.is_none() && second.execution.is_none());
+        assert!(first.title.ends_with("[index 0]") && second.title.ends_with("[index 1]"));
+        assert_eq!(known.key, tool_key(turn, "known"));
+        assert!(known.execution.is_some() && known.arguments.is_some());
+        assert_eq!(observed.key, tool_key(turn, "duplicate"));
+        assert!(observed.execution.is_some() && observed.arguments.is_none());
+    }
+
+    #[test]
     fn tool_observations_label_live_calls_even_with_the_flow_panel_hidden() {
         use mf_telemetry::events::{CALL_EXECUTION_EVENT, EventRecord};
         let root = tempfile::tempdir().unwrap();
@@ -2359,17 +2618,24 @@ mod tests {
         }
         let screen = render(&view, 100, 25);
         for expected in [
-            "[Running] Tool call search [matched]",
-            "[Failed] Tool execution search [failed]",
-            "[Succeeded] Tool execution search [done]",
-            "[Interrupted] Tool execution search [stopped]",
-            "[Unknown] Tool execution search [ambiguous]",
+            "[+] [Running] Tool call search [matched]",
+            "[+] [Failed] Tool call search [failed]",
+            "[+] [Succeeded] Tool call search [done]",
+            "[+] [Interrupted] Tool call search [stopped]",
+            "[+] [Unknown] Tool call search [ambiguous]",
         ] {
             assert!(screen.contains(expected), "{screen}");
         }
         assert!(!screen.contains("Tool result") && !screen.contains("Flow execution"));
+        assert!(!screen.contains("Tool execution"));
+        assert_eq!(screen.matches("[matched]").count(), 1);
+        view.toggle_tool();
+        let opened = render(&view, 100, 25);
+        assert!(opened.contains("[-] [Interrupted] Tool call search [stopped]"));
+        assert!(opened.contains("No argument preview"));
         view.running = false;
-        assert!(!render(&view, 100, 25).contains("Tool execution"));
+        let stopped = render(&view, 100, 25);
+        assert!(!stopped.contains("[failed]") && !stopped.contains("[Running]"));
     }
 
     #[test]

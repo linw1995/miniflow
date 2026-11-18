@@ -10,6 +10,12 @@ The LLM node SHALL expose an optional `tool_call_delta` stream with original non
 - **THEN** each raw fragment is available without waiting for a closing SSE event or parseable JSON
 - **AND** fragments for distinct indices remain distinguishable while the completed call is still assembled and validated by the provider adapter
 
+#### Scenario: Forward identity before or after argument data
+
+- **WHEN** the provider sends a nonblank call ID or name in an SSE event without a nonempty argument fragment
+- **THEN** `tool_call_delta` forwards the hint with its model-call identity and index and an empty `arguments` string
+- **AND** the hint does not append argument bytes or establish completed-call validity
+
 #### Scenario: Preserve incomplete-call behavior
 
 - **WHEN** the provider response ends with malformed or truncated arguments

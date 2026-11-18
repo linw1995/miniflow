@@ -104,6 +104,14 @@ impl Transcript {
         true
     }
 
+    pub fn remap_anchor(&mut self, key_for: impl FnOnce(&str) -> Option<String>) {
+        if let Some((key, _)) = &mut self.anchor
+            && let Some(mapped) = key_for(key)
+        {
+            *key = mapped;
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.ends.last().copied().unwrap_or_default() == 0
     }
@@ -226,6 +234,23 @@ mod tests {
         assert!(transcript.focus("tool"));
         assert_eq!(transcript.top(2, 1), 0);
         assert_eq!(screen(&transcript, 0, 1), ["Tool result"]);
+    }
+
+    #[test]
+    fn rekeyed_group_keeps_a_focused_header_at_the_top() {
+        let mut transcript = Transcript::default();
+        transcript.begin(24);
+        transcript.literal("prefix".into(), "earlier", Style::default());
+        transcript.literal("anonymous".into(), "Tool call [index 0]", Style::default());
+        transcript.literal("tail".into(), "one\ntwo\nthree", Style::default());
+        assert!(transcript.focus("anonymous"));
+        transcript.remap_anchor(|key| (key == "anonymous").then(|| "known".into()));
+        transcript.begin(24);
+        transcript.literal("prefix".into(), "earlier\nbefore", Style::default());
+        transcript.literal("known".into(), "Tool call [known]", Style::default());
+        transcript.literal("tail".into(), "one\ntwo\nthree\nfour", Style::default());
+        let top = transcript.top(2, 1);
+        assert_eq!(screen(&transcript, top, 1), ["Tool call [known]"]);
     }
 
     #[test]

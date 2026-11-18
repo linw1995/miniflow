@@ -509,9 +509,17 @@ mod output_tests {
         assert!(
             matches!(preview, crate::PreviewDelta::ToolCall { delta } if delta.arguments == "{")
         );
+        let hint = declared
+            .accept(values(json!({"tool_call_delta":{"model_call_id":"model","index":0,"arguments":"","id":"hint"}})))
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(hint, crate::PreviewDelta::ToolCall { delta } if delta.arguments.is_empty() && delta.id.as_deref() == Some("hint"))
+        );
         for event in [
             json!({"model_call_id":" ","index":0,"arguments":"{"}),
             json!({"model_call_id":"model","index":0,"arguments":""}),
+            json!({"model_call_id":"model","index":0,"arguments":"","id":" "}),
         ] {
             assert!(matches!(
                 declared.accept(values(json!({"tool_call_delta":event}))),

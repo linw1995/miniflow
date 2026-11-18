@@ -2,7 +2,7 @@
 
 ### Requirement: Optional invocation-scoped tool-call argument previews
 
-Chat workflows MAY expose an optional `tool_call_delta` stream independently of `answer`. The host SHALL decode declared argument fragments, attach the active invocation, and use the same delivery receipts and cancellation as text previews. Argument previews MUST NOT dispatch tools, report tool execution states, or modify history, model context, usage, or settlement.
+Chat workflows MAY expose an optional `tool_call_delta` stream independently of `answer`. The host SHALL decode declared fragments and identity-only hints, attach the active invocation, and use the same delivery receipts and cancellation as text previews. Argument previews MUST NOT dispatch tools, report tool execution states, or modify history, model context, usage, or settlement.
 
 #### Scenario: Receive fragments before the turn is complete
 

@@ -34,10 +34,15 @@ impl PreviewDelta {
                 }
             ),
             Self::ToolCall { delta } => ensure!(
-                !delta.model_call_id.trim().is_empty() && !delta.arguments.is_empty(),
+                !delta.model_call_id.trim().is_empty()
+                    && (!delta.arguments.is_empty()
+                        || [&delta.id, &delta.name]
+                            .into_iter()
+                            .flatten()
+                            .any(|hint| !hint.trim().is_empty())),
                 InvalidSnafu {
                     field: "tool_call_delta stream",
-                    reason: "requires a nonempty argument fragment and a model call identity"
+                    reason: "requires a model call identity and an argument fragment or wire hint"
                 }
             ),
         }

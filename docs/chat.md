@@ -496,7 +496,8 @@ recovery if drain fails. Text prefixes alone never become database messages or u
 
 Tool-aware chatflows may select the shared Agent's optional `tool_call_delta` stream. Each event
 contains a raw `arguments` fragment, its `model_call_id`, and the provider tool `index`, with optional
-`id` and `name` hints when sent with that fragment. A fragment need not be valid JSON on its own.
+`id` and `name` hints. An identity-only event has an empty `arguments` string. A fragment need not be
+valid JSON on its own.
 `PreviewEvent.delta` distinguishes `PreviewDelta::Text` from `PreviewDelta::ToolCall`. Neither enters
 history or model context. The calculator, context-replacement, and DeepSeek examples explicitly
 select `tool_call_delta`. A chatflow can select it without exposing `answer`.
@@ -569,14 +570,15 @@ published context; original records remain visible after compaction. Each tool r
 its matching call on the current page, regardless of result arrival order. A page without the call
 still shows the result with its tool-call ID. Grouping changes only the display, not stored order.
 Tool arguments and results are inert literal data, never prompts, Markdown images, or commands.
-Live argument previews come from the model stream. Tool status comes separately from the same
-runtime observations used by the tracing view. The TUI shows an observed state on the matching call
-or as a separate execution row when no argument preview has that ID. `ChatJob::tool_metrics()`
-exposes the in-process view by tool-call ID. Missing observations never imply a start or success.
+Tool call groups start collapsed (`[+]`) and can be opened (`[-]`) as soon as a preview appears.
+An open group displays argument fragments as received. The status on its header comes separately
+from the runtime observations used by the tracing view, matched by call ID. An observed call without
+an argument preview still uses a tool call group. `ChatJob::tool_metrics()` exposes the in-process
+view by tool-call ID. Missing observations never imply a start or success.
 
-Authoritative results are available when the turn settles. They start collapsed (`[+]`) and show
-`[-]` when expanded. The marker leads the result header so it stays visible when a long ID wraps.
-Expansion is keyed by turn and call ID and survives save and reload; execution metrics are not saved.
+The fold marker leads the group header. Focus and expansion follow a group when a late ID makes it
+identifiable, and remain when the authoritative transcript replaces its preview or reloads from
+storage. Results appear inside the group when the turn settles; execution metrics are not saved.
 
 Assistant text supports Markdown in saved records, previews, and retained results: headings, emphasis,
 lists, tasks, quotes, links, tables, and code blocks. Headings show explicit levels `#1` through `#6`.
@@ -604,8 +606,8 @@ resources on session change, eviction, or exit.
 | Browse messages / return to editing | Esc / i |
 | Open commands | Ctrl+P |
 | Toggle execution panel | Ctrl+E |
-| Select next / previous tool result while browsing | Tab / Shift+Tab |
-| Expand / collapse selected tool result | Space while browsing, or Ctrl+T |
+| Select next / previous tool group while browsing | Tab / Shift+Tab |
+| Expand / collapse selected tool group | Space while browsing, or Ctrl+T |
 | New chat / switch saved chat | Ctrl+N / Ctrl+S |
 | Cancel current execution | Ctrl+C |
 | Quit after cleanup | Ctrl+Q |
