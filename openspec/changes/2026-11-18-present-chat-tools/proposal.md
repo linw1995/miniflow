@@ -8,7 +8,7 @@ Chat should show the arguments a model is still generating without waiting for t
 
 - Expose raw provider argument fragments through an optional `tool_call_delta` stream, without changing the completed `tool_call` stream.
 - Deliver invocation-scoped argument previews through the existing conversation preview transport without changing settlement or model context.
-- Collapse authoritative tool results by default, with per-result keyboard navigation and expansion.
+- Group authoritative tool results with their calls and collapse each result by default, with per-result keyboard navigation and expansion.
 
 ## Non-goals
 

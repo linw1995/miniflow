@@ -2,13 +2,23 @@
 
 ### Requirement: Tool argument previews and collapsible results
 
-The chat transcript SHALL show raw argument fragments grouped by model call and provider tool index, without tool execution status. Authoritative completion SHALL replace provisional calls without duplication. Tool results from the authoritative transcript SHALL be collapsed by default and individually expandable using the keyboard. Arguments and results MUST remain literal.
+Chat SHALL group raw argument fragments by model call and provider tool index without execution status. Authoritative completion SHALL replace previews without duplicates and group results with their visible calls without changing stored order. Each result SHALL start collapsed, with a leading fold marker and independent keyboard expansion. Arguments and results MUST remain literal.
 
 #### Scenario: Show interleaved argument fragments
 
 - **WHEN** the model sends interleaved fragments for multiple tool calls
 - **THEN** each fragment appears in the matching preview without waiting for a tool result
 - **AND** canonical transcript entries replace provisional calls when the turn settles
+
+#### Scenario: Pair parallel calls and results
+
+- **WHEN** the visible transcript contains a batch with tool results in a different order than the calls
+- **THEN** each result appears under its matching call and keyboard navigation follows that display order
+
+#### Scenario: View a result on a page without its call
+
+- **WHEN** a history page contains a tool result but not its matching call
+- **THEN** the result remains visible with its call ID and the fold marker before the ID
 
 #### Scenario: Expand and collapse a result
 

@@ -42,15 +42,87 @@ fn role_label(text: &str, color: Color, indicator: Option<char>) -> Line<'static
     Line::from(spans)
 }
 
-fn message(
+struct MessageGroup<'a> {
+    index: usize,
+    message: &'a mf_chat::ChatMessage,
+    results: BTreeMap<&'a str, &'a str>,
+}
+
+impl MessageGroup<'_> {
+    fn result_ids(&self) -> impl Iterator<Item = &str> {
+        let (calls, standalone) = match self.message {
+            mf_chat::ChatMessage::Assistant { tool_calls, .. } => {
+                (tool_calls.as_deref().unwrap_or_default(), None)
+            }
+            mf_chat::ChatMessage::ToolResult { tool_call_id, .. } => {
+                (&[][..], Some(tool_call_id.as_str()))
+            }
+            _ => (&[][..], None),
+        };
+        calls
+            .iter()
+            .map(|call| call.id.as_str())
+            .filter(|id| self.results.contains_key(id))
+            .chain(standalone)
+    }
+}
+
+// Pair only visible results in the same assistant batch. A history page can cut
+// through a batch, so unmatched calls and results remain independently visible.
+fn message_groups<'a>(
+    messages: impl Iterator<Item = &'a mf_chat::ChatMessage>,
+) -> impl Iterator<Item = MessageGroup<'a>> {
+    use mf_chat::ChatMessage;
+    let mut messages = messages.enumerate().peekable();
+    std::iter::from_fn(move || {
+        let (index, message) = messages.next()?;
+        let mut results = BTreeMap::new();
+        if let ChatMessage::Assistant {
+            tool_calls: Some(calls),
+            ..
+        } = message
+        {
+            let mut pending: BTreeSet<_> = calls.iter().map(|call| call.id.as_str()).collect();
+            while let Some((
+                _,
+                ChatMessage::ToolResult {
+                    tool_call_id,
+                    content,
+                    ..
+                },
+            )) = messages.peek().copied()
+                && pending.remove(tool_call_id.as_str())
+            {
+                results.insert(tool_call_id.as_str(), content.as_str());
+                messages.next();
+            }
+        }
+        Some(MessageGroup {
+            index,
+            message,
+            results,
+        })
+    })
+}
+
+fn page_turns(page: &MessagePage) -> impl Iterator<Item = &[mf_chat::MessageRecord]> {
+    page.messages
+        .chunk_by(|left, right| left.message.turn_id == right.message.turn_id)
+}
+
+fn render_message_group(
     transcript: &mut super::transcript::Transcript,
     key: &str,
-    message: &mf_chat::ChatMessage,
+    group: &MessageGroup<'_>,
     turn: &str,
     expanded: &BTreeSet<String>,
     focused: Option<&str>,
 ) {
     use mf_chat::ChatMessage;
+    if group.index > 0 {
+        transcript.plain(format!("{key}:gap"), vec![Line::default()]);
+    }
+    let message = group.message;
     let (label, content) = match message {
         ChatMessage::User { content, .. } => ("You", content),
         ChatMessage::System { content, .. } => ("System", content),
@@ -60,7 +132,14 @@ fn message(
             content,
             ..
         } => {
-            tool_result(transcript, turn, tool_call_id, content, expanded, focused);
+            render_tool_result(
+                transcript,
+                tool_key(turn, tool_call_id),
+                Some(tool_call_id),
+                content,
+                expanded,
+                focused,
+            );
             return;
         }
     };
@@ -71,6 +150,9 @@ fn message(
     if let ChatMessage::Assistant { tool_calls, .. } = message {
         transcript.markdown(format!("{key}:body"), content);
         for (index, call) in tool_calls.iter().flatten().enumerate() {
+            if index > 0 {
+                transcript.plain(format!("{key}:call:{index}:gap"), vec![Line::default()]);
+            }
             transcript.plain(
                 format!("{key}:call:{index}:label"),
                 vec![role_label(
@@ -86,6 +168,16 @@ fn message(
                 &arguments,
                 Style::default(),
             );
+            if let Some(content) = group.results.get(call.id.as_str()) {
+                render_tool_result(
+                    transcript,
+                    tool_key(turn, &call.id),
+                    None,
+                    content,
+                    expanded,
+                    focused,
+                );
+            }
         }
     } else {
         transcript.literal(format!("{key}:body"), content, Style::default());
@@ -96,34 +188,27 @@ fn tool_key(turn: &str, id: &str) -> String {
     format!("tool-result:{turn}:{id}")
 }
 
-fn tool_result(
+fn render_tool_result(
     transcript: &mut super::transcript::Transcript,
-    turn: &str,
-    id: &str,
+    key: String,
+    standalone_id: Option<&str>,
     content: &str,
     expanded: &BTreeSet<String>,
     focused: Option<&str>,
 ) {
-    let key = tool_key(turn, id);
     let open = expanded.contains(&key);
-    transcript.plain(
-        key.clone(),
-        vec![role_label(
-            &format!(
-                "{} Tool result [{}] {} ({} bytes)",
-                if focused == Some(key.as_str()) {
-                    ">"
-                } else {
-                    " "
-                },
-                id,
-                if open { "v" } else { ">" },
-                content.len()
-            ),
-            Color::Yellow,
-            None,
-        )],
-    );
+    let marker = if open { "[-]" } else { "[+]" };
+    let bytes = content.len();
+    let label = if let Some(id) = standalone_id {
+        format!("{marker} Tool result [{id}] ({bytes} bytes)")
+    } else {
+        format!("{marker} Tool result ({bytes} bytes)")
+    };
+    let mut header = role_label(&label, Color::Yellow, None);
+    if focused == Some(key.as_str()) {
+        header = header.style(Style::default().add_modifier(Modifier::REVERSED));
+    }
+    transcript.plain(key.clone(), vec![header]);
     if open {
         transcript.literal(format!("{key}:body"), content, Style::default());
     }
@@ -821,13 +906,10 @@ impl ChatView {
     }
     fn tool_keys(&self) -> Vec<String> {
         let mut keys = Vec::new();
-        if let Some(page) = &self.page {
-            for record in &page.messages {
-                if let mf_chat::ChatMessage::ToolResult { tool_call_id, .. } =
-                    &record.message.payload
-                {
-                    keys.push(tool_key(&record.message.turn_id, tool_call_id));
-                }
+        for records in self.page.iter().flat_map(page_turns) {
+            let turn = &records[0].message.turn_id;
+            for group in message_groups(records.iter().map(|record| &record.message.payload)) {
+                keys.extend(group.result_ids().map(|id| tool_key(turn, id)));
             }
         }
         let turn = self
@@ -835,10 +917,8 @@ impl ChatView {
             .as_ref()
             .map_or("", |i| i.turn_id.as_str());
         if let Some(reply) = &self.reply {
-            for message in reply.result.display_messages() {
-                if let mf_chat::ChatMessage::ToolResult { tool_call_id, .. } = message {
-                    keys.push(tool_key(turn, tool_call_id));
-                }
+            for group in message_groups(reply.result.display_messages().iter()) {
+                keys.extend(group.result_ids().map(|id| tool_key(turn, id)));
             }
         }
         let mut seen = BTreeSet::new();
@@ -1088,53 +1168,37 @@ impl ChatView {
         };
         let mut transcript = self.transcript.borrow_mut();
         transcript.begin(body.width);
-        if let Some(page) = &self.page {
-            let usages: BTreeMap<_, _> = page
-                .messages
-                .iter()
-                .filter_map(|record| {
-                    record
-                        .usages
-                        .as_deref()
-                        .map(|usages| (record.message.turn_id.as_str(), usages))
-                })
-                .collect();
-            for (index, record) in page.messages.iter().enumerate() {
-                let key = format!("message:{}", record.message.id);
-                message(
+        for records in self.page.iter().flat_map(page_turns) {
+            let first = &records[0];
+            let turn = &first.message.turn_id;
+            for group in message_groups(records.iter().map(|record| &record.message.payload)) {
+                let key = format!("message:{}", records[group.index].message.id);
+                render_message_group(
                     &mut transcript,
                     &key,
-                    &record.message.payload,
-                    &record.message.turn_id,
+                    &group,
+                    turn,
                     &self.expanded_tools,
                     self.focused_tool.as_deref(),
                 );
-                let mut metadata = vec![];
-                let last_in_turn = page
-                    .messages
-                    .get(index + 1)
-                    .is_none_or(|next| next.message.turn_id != record.message.turn_id);
-                if last_in_turn {
-                    if let Some(usages) = usages.get(record.message.turn_id.as_str()) {
-                        let calls = crate::performance::conversation_calls(usages);
-                        metadata.push(Line::styled(
-                            crate::performance::footer(&calls, body.width),
-                            Style::default().fg(Color::DarkGray),
-                        ));
-                    }
-                    if matches!(
-                        record.turn_state.as_str(),
-                        "failed" | "cancelled" | "interrupted"
-                    ) {
-                        metadata.push(Line::styled(
-                            format!("[{}; model context unchanged]", record.turn_state),
-                            Style::default().fg(Color::Yellow),
-                        ));
-                    }
-                }
-                metadata.push(Line::default());
-                transcript.plain(format!("{key}:metadata"), metadata);
             }
+            let mut metadata = vec![];
+            if let Some(usages) = records.iter().find_map(|record| record.usages.as_deref()) {
+                let calls = crate::performance::conversation_calls(usages);
+                metadata.push(Line::styled(
+                    crate::performance::footer(&calls, body.width),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+            let state = &first.turn_state;
+            if matches!(state.as_str(), "failed" | "cancelled" | "interrupted") {
+                metadata.push(Line::styled(
+                    format!("[{state}; model context unchanged]"),
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
+            metadata.push(Line::default());
+            transcript.plain(format!("turn:{turn}:saved:metadata"), metadata);
         }
         let turn = self
             .latest_invocation
@@ -1155,19 +1219,16 @@ impl ChatView {
             transcript.plain(format!("turn:{turn}:you:metadata"), vec![Line::default()]);
         }
         if let Some(reply) = &self.reply {
-            for (index, record) in reply.result.display_messages().iter().enumerate() {
-                let key = format!("turn:{turn}:display:{index}");
-                message(
+            for group in message_groups(reply.result.display_messages().iter()) {
+                let key = format!("turn:{turn}:display:{}", group.index);
+                render_message_group(
                     &mut transcript,
                     &key,
-                    record,
+                    &group,
                     turn,
                     &self.expanded_tools,
                     self.focused_tool.as_deref(),
                 );
-                if index + 1 < reply.result.display_messages().len() {
-                    transcript.plain(format!("{key}:gap"), vec![Line::default()]);
-                }
             }
             let calls = crate::performance::conversation_calls(&reply.result.usages);
             let mut metadata = vec![Line::styled(
@@ -1370,13 +1431,31 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n")
     }
+    const TOOL_RESULT_BODY: &str = "**literal tool**\n![inert](tool.png)\n\u{1b}[31m";
+
+    fn assert_grouped_tools(screen: &str, second_open: bool, partial: bool) {
+        let headers: Vec<_> = screen
+            .lines()
+            .filter(|line| line.contains("Tool call") || line.contains("Tool result"))
+            .map(str::trim_end)
+            .collect();
+        let marker = if second_open { "[-]" } else { "[+]" };
+        let second = format!("{marker} Tool result ({} bytes)", TOOL_RESULT_BODY.len());
+        let mut expected = vec!["Tool call lookup [first]"];
+        if !partial {
+            expected.push("[+] Tool result (0 bytes)");
+        }
+        expected.extend(["Tool call calculate [second]", second.as_str()]);
+        assert_eq!(headers, expected, "{screen}");
+    }
+
     fn tool_result(replace: bool, failed: bool) -> mf_chat::ConversationResult {
         let mut display = serde_json::from_value::<Vec<mf_chat::ChatMessage>>(serde_json::json!([
             {"role":"assistant","content":"","tool_calls":[
                 {"id":"first","name":"lookup","arguments":{"text":"**argument**","image":"![inert](tool.png)"}},
                 {"id":"second","name":"calculate","arguments":[1,true,null]}
             ]},
-            {"role":"tool","tool_call_id":"second","content":"**literal tool**\n![inert](tool.png)\n\u{1b}[31m"},
+            {"role":"tool","tool_call_id":"second","content":TOOL_RESULT_BODY},
             {"role":"tool","tool_call_id":"first","content":""},
             {"role":"assistant","content":"**Final answer**"}
         ])).unwrap();
@@ -1506,20 +1585,21 @@ mod tests {
                 &controller,
             );
             let collapsed = render(&view, 140, 70);
-            assert_eq!(collapsed.matches("Tool call lookup [first]").count(), 1);
-            assert!(collapsed.contains("Tool result [second]"));
+            assert_grouped_tools(&collapsed, false, false);
             assert!(
                 !collapsed.contains("**preview argument**")
                     && !collapsed.contains("**literal tool**")
             );
             assert!(!collapsed.contains("[Completed]"));
             let toggle = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
+            let first = tool_key(&begun.invocation.turn_id, "first");
+            let second = tool_key(&begun.invocation.turn_id, "second");
+            assert_eq!(view.tool_keys(), [first.clone(), second.clone()]);
+            view.focus_tool(false);
             view.focus_tool(true);
-            view.focus_tool(true);
-            assert_eq!(
-                view.focused_tool.as_deref(),
-                Some(tool_key(&begun.invocation.turn_id, "second").as_str())
-            );
+            assert_eq!(view.focused_tool.as_ref(), Some(&first));
+            view.focus_tool(false);
+            assert_eq!(view.focused_tool.as_ref(), Some(&second));
             view.key(toggle, &controller);
             assert!(render(&view, 140, 70).contains("**literal tool**"));
             view.key(toggle, &controller);
@@ -1542,10 +1622,7 @@ mod tests {
                 let screen = render(&view, 140, 70);
                 assert_eq!(screen.matches("Original question").count(), 1, "{screen}");
                 assert_eq!(screen.matches("Assistant").count(), 2, "{screen}");
-                assert!(screen.contains("Tool call lookup [first]"), "{screen}");
-                assert!(screen.contains("Tool call calculate [second]"));
-                assert!(screen.contains("Tool result [second]"));
-                assert!(screen.contains("Tool result [first]"));
+                assert_grouped_tools(&screen, true, false);
                 assert!(screen.contains("**argument**") && screen.contains("**literal tool**"));
                 assert!(screen.contains("![inert](tool.png)"));
                 assert!(screen.contains("\\u{1b}[31m"));
@@ -1599,6 +1676,8 @@ mod tests {
                 &controller,
             );
             let loaded = render(&view, 140, 70);
+            assert_grouped_tools(&loaded, true, false);
+            assert_eq!(view.tool_keys(), [first, second]);
             assert_eq!(loaded.matches("Assistant").count(), 2);
             assert_eq!(loaded.matches("FTT").count(), 1);
             assert!(!loaded.contains("PRIVATE_CONTEXT_ONLY"));
@@ -1662,7 +1741,7 @@ mod tests {
             &controller,
         );
         let screen = render(&view, 120, 55);
-        assert!(screen.contains("Tool result [second]"));
+        assert_grouped_tools(&screen, false, true);
         assert!(screen.contains("[failed]") && screen.contains("[not saved]"));
         assert!(screen.contains("Model context unchanged"));
         assert!(!screen.contains("replacement pending"));
@@ -1682,7 +1761,7 @@ mod tests {
             .unwrap();
         view.event(ChatEvent::Loaded { session, page }, &controller);
         let screen = render(&view, 120, 55);
-        assert!(screen.contains("Tool result [second]"));
+        assert_grouped_tools(&screen, false, true);
         assert!(screen.contains("[failed"));
         assert!(screen.contains("Provider failed"));
         assert!(!screen.contains("not saved"));
@@ -1729,12 +1808,17 @@ mod tests {
             ._database
             .messages(&session.id, 2, Some(1))
             .unwrap();
-        assert_eq!(page.messages.len(), 2);
-        assert!(
-            page.messages
-                .iter()
-                .all(|record| record.message.role() == "tool")
-        );
+        let [second, first] = page.messages.as_slice() else {
+            panic!("expected two results on a page without their calls");
+        };
+        assert!(matches!(
+            &second.message.payload,
+            mf_chat::ChatMessage::ToolResult { tool_call_id, .. } if tool_call_id == "second"
+        ));
+        assert!(matches!(
+            &first.message.payload,
+            mf_chat::ChatMessage::ToolResult { tool_call_id, .. } if tool_call_id == "first"
+        ));
         view.event(
             ChatEvent::Loaded {
                 session: session.clone(),
@@ -1743,6 +1827,8 @@ mod tests {
             &controller,
         );
         let collapsed = render(&view, 120, 35);
+        assert!(collapsed.contains("[+] Tool result [second]"));
+        assert!(collapsed.contains("[+] Tool result [first] (0 bytes)"));
         assert!(!collapsed.contains("**literal tool**"));
         view.mode = Mode::Browse;
         view.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &controller);
@@ -1756,7 +1842,8 @@ mod tests {
         );
         let screen = render(&view, 120, 35);
         assert_eq!(screen.matches("Tool result").count(), 2);
-        assert!(screen.contains("[second]") && screen.contains("[first]"));
+        assert!(screen.contains("[-] Tool result [second]"));
+        assert!(screen.contains("[+] Tool result [first] (0 bytes)"));
         assert!(!screen.contains("lookup") && !screen.contains("calculate"));
         assert!(!screen.contains("Assistant") && !screen.lines().any(|line| line.trim() == "You"));
         assert!(screen.contains("**literal tool**") && screen.contains("![inert](tool.png)"));
@@ -1765,11 +1852,25 @@ mod tests {
             ._database
             .messages(&session.id, 50, None)
             .unwrap();
-        view.event(ChatEvent::Loaded { session, page }, &controller);
+        view.event(
+            ChatEvent::Loaded {
+                session: session.clone(),
+                page,
+            },
+            &controller,
+        );
         let screen = render(&view, 120, 70);
-        assert_eq!(screen.matches("Tool result").count(), 2);
+        assert_grouped_tools(&screen, true, false);
         assert_eq!(screen.matches("FTT").count(), 1);
         assert!(!screen.contains("PRIVATE_CONTEXT_ONLY"));
+        let page = controller
+            ._database
+            .messages(&session.id, 2, Some(0))
+            .unwrap();
+        view.event(ChatEvent::Loaded { session, page }, &controller);
+        let screen = render(&view, 120, 35);
+        assert_grouped_tools(&screen, true, true);
+        assert_eq!(screen.matches("FTT").count(), 1);
         assert_eq!(
             controller
                 ._database
@@ -1780,6 +1881,38 @@ mod tests {
             2
         );
         controller.close().unwrap();
+    }
+
+    #[test]
+    fn fold_marker_is_on_the_first_row_even_when_the_result_id_wraps() {
+        let id = "call_1234567890123456789012345678901234567890";
+        let key = tool_key("turn", id);
+        let mut terminal = Terminal::new(TestBackend::new(16, 1)).unwrap();
+        let mut transcript = super::super::transcript::Transcript::default();
+        let mut expanded = BTreeSet::new();
+        for prefix in ["[+] Tool result", "[-] Tool result"] {
+            transcript.begin(16);
+            render_tool_result(
+                &mut transcript,
+                key.clone(),
+                Some(id),
+                TOOL_RESULT_BODY,
+                &expanded,
+                Some(&key),
+            );
+            assert!(transcript.focus(&key));
+            terminal
+                .draw(|frame| {
+                    let area = frame.area();
+                    transcript.render_images(frame, area, 1, false);
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let row: String = (0..16).map(|x| buffer[(x, 0)].symbol()).collect();
+            assert_eq!(row.trim_end(), prefix);
+            assert!(buffer[(0, 0)].modifier.contains(Modifier::REVERSED));
+            expanded.insert(key.clone());
+        }
     }
 
     #[test]

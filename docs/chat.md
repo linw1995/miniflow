@@ -565,13 +565,13 @@ the resolved path without creating storage; unavailable user directories require
 `--chat` implies `--tui`, and both flags can be passed together.
 
 A new conversation is persisted only after its first submission. Resumed conversations keep their
-published context; original records remain visible after compaction. Every assistant message, call
-batch, and tool result has a separate message-scoped presentation key. A result page without its
-preceding call batch still shows the tool-call ID without inventing a name or relabeling it as user
-text. Tool arguments and results are inert literal data, never prompts, Markdown images, or commands.
-Live tool previews display argument fragments, not tool execution state. Tool results come from the
-authoritative display transcript and are collapsed by default. Expansion is keyed by turn and call
-ID and survives save and reload without editing stored messages.
+published context; original records remain visible after compaction. Each tool result is shown under
+its matching call on the current page, regardless of result arrival order. A page without the call
+still shows the result with its tool-call ID. Grouping changes only the display, not stored order.
+Tool arguments and results are inert literal data, never prompts, Markdown images, or commands.
+Live tool previews display argument fragments, not tool execution state. Authoritative results start
+collapsed (`[+]`) and show `[-]` when expanded. The marker leads the result header so it stays visible
+when a long ID wraps. Expansion is keyed by turn and call ID and survives save and reload.
 
 Assistant text supports Markdown in saved records, previews, and retained results: headings, emphasis,
 lists, tasks, quotes, links, tables, and code blocks. Headings show explicit levels `#1` through `#6`.
