@@ -14,7 +14,8 @@ use mf_compiler::{
     resolve_flows,
 };
 use mf_runtime::{
-    CompiledGraph, ExecutionContext, FlowRuntime, SnapshotOutcome, StreamOptions, WorkflowArguments,
+    CompiledGraph, ExecutionContext, FlowOutputs, FlowRuntime, SnapshotOutcome, StreamOptions,
+    WorkflowArguments, WorkflowRunError,
 };
 use mfn_llm::{
     flows::{agent_definition, agent_turn_definition},
@@ -91,7 +92,15 @@ fn arguments(inputs: Value) -> WorkflowArguments {
     WorkflowArguments::try_from(inputs).unwrap()
 }
 
-fn memory(mut definition: WorkflowDefinition, inputs: Value) -> (Value, Snapshots) {
+fn memory(definition: WorkflowDefinition, inputs: Value) -> (Value, Snapshots) {
+    let (result, recording) = memory_result(definition, inputs);
+    (serde_json::to_value(result.unwrap()).unwrap(), recording)
+}
+
+fn memory_result(
+    mut definition: WorkflowDefinition,
+    inputs: Value,
+) -> (Result<FlowOutputs, WorkflowRunError>, Snapshots) {
     // The same definition exposes a streaming answer. A synchronous consumer
     // deliberately subscribes only to its terminal outputs.
     definition.outputs.retain(|output| output.name != "answer");
@@ -102,8 +111,7 @@ fn memory(mut definition: WorkflowDefinition, inputs: Value) -> (Value, Snapshot
     let mut context = ExecutionContext::default();
     context.set_snapshot_recorder(recording.recorder());
     context.set_workflow_arguments(arguments(inputs));
-    let outputs = flow.execute_in_context(&mut context).unwrap();
-    (serde_json::to_value(outputs).unwrap(), recording)
+    (flow.execute_in_context(&mut context), recording)
 }
 
 fn finite_stream(mut definition: WorkflowDefinition, inputs: Value) -> Vec<Value> {
@@ -351,15 +359,28 @@ fn zero_one_and_three_tool_supersets_keep_the_same_agent_source_and_ports() {
     );
     let repeat = node("repeat");
     let shared_inputs = repeat["config"]["inputs"].as_object().unwrap();
-    assert_eq!(shared_inputs.len(), 6);
+    assert_eq!(shared_inputs.len(), 7);
+    assert_eq!(shared_inputs["prefix"], json!({"list":"object"}));
     assert_eq!(shared_inputs["tools"], json!({"map":"flow"}));
     assert_eq!(shared_inputs["tool_properties"], json!({"map":"object"}));
     assert_eq!(shared_inputs["tool_definitions"], json!({"list":"object"}));
     let variables = repeat["config"]["variables"].as_array().unwrap();
-    assert_eq!(variables.len(), 6);
+    assert_eq!(
+        variables
+            .iter()
+            .map(|variable| &variable["name"])
+            .collect::<Vec<_>>(),
+        [
+            &json!("generated"),
+            &json!("usages"),
+            &json!("text"),
+            &json!("outcome"),
+            &json!("error")
+        ]
+    );
     assert!(variables.iter().all(|variable| variable["type"] != "flow"));
     let body = &repeat["config"]["body"];
-    assert_eq!(body["outputs"].as_array().unwrap().len(), 6);
+    assert_eq!(body["outputs"].as_array().unwrap().len(), 5);
     assert!(
         body["nodes"]
             .as_array()
@@ -529,8 +550,25 @@ fn calculator_parallel_calls_preserve_provider_order_schema_and_usage_in_both_mo
             question
         ]);
         let output = if stream {
+            let mut definition = definition;
+            definition.outputs.push(serde_json::from_value(json!({
+                "name":"tool_call_delta", "node":"agent", "port":"tool_call_delta", "optional":true
+            })).unwrap());
             let outputs = finite_stream(definition, args.clone());
-            assert_success(terminal(&outputs), "Five and twelve", 2);
+            let terminal = terminal(&outputs);
+            assert_success(terminal, "Five and twelve", 2);
+            let deltas: Vec<_> = outputs
+                .iter()
+                .filter_map(|output| output.get("tool_call_delta"))
+                .collect();
+            assert_eq!(deltas.len(), 2);
+            for (index, delta) in deltas.into_iter().enumerate() {
+                assert_eq!(delta["model_call_id"], terminal["usages"][0]["call_id"]);
+                assert_eq!(delta["index"], index);
+                assert_eq!(delta["id"], calls[index]["id"]);
+                assert_eq!(delta["name"], calls[index]["function"]["name"]);
+                assert_eq!(delta["arguments"], calls[index]["function"]["arguments"]);
+            }
             assert_eq!(
                 outputs
                     .iter()
@@ -538,7 +576,7 @@ fn calculator_parallel_calls_preserve_provider_order_schema_and_usage_in_both_mo
                     .collect::<String>(),
                 "Five and twelve"
             );
-            terminal(&outputs).clone()
+            terminal.clone()
         } else {
             let (output, recording) = memory(definition, args.clone());
             assert_success(&output, "Five and twelve", 2);
@@ -590,6 +628,10 @@ fn empty_agent_completes_a_direct_answer_without_advertising_tools() {
         json!([{"role":"assistant","content":"Direct answer"}])
     );
     assert_catalog_once_outside_loop(&recording, 0);
+    let snapshot = recording.current();
+    let agent = snapshot.node(&[], "agent").unwrap();
+    assert_eq!(agent.outputs["messages"].as_str(), Some("[REDACTED]"));
+    assert!(agent.outputs["usages"].is_array());
     let requests = server.requests();
     assert_eq!(requests.len(), 1);
     assert!(
@@ -601,6 +643,72 @@ fn empty_agent_completes_a_direct_answer_without_advertising_tools() {
     assert_eq!(
         json!(messages(&requests[0])),
         inputs(&server)["params.messages"]
+    );
+}
+
+#[test]
+fn transcript_budget_failures_follow_the_provider_request_and_precede_tool_dispatch() {
+    let calls = json!([call(
+        "first",
+        "calculator",
+        json!({"operation":"add", "left":2.0, "right":3.0})
+    )]);
+    for oversized_prefix in [true, false] {
+        let reply = tool_reply(calls.clone(), false);
+        let reply = if oversized_prefix {
+            reply
+        } else {
+            // The new assistant alone fits, but the legacy append stage budgets
+            // both the full transcript and the generated additions.
+            let mut response: Value = serde_json::from_str(&reply.body).unwrap();
+            response["choices"][0]["message"]["content"] = "a".repeat(600 * 1024).into();
+            Reply::json(response)
+        };
+        let server = Server::start(vec![reply]);
+        let mut args = inputs(&server);
+        if oversized_prefix {
+            args["params.messages"][0]["content"] = "p".repeat(1024 * 1024).into();
+        }
+        let (result, recording) = memory_result(configured_agent(calculator_tools()), args);
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("append_assistant") && error.contains("JSON limit"),
+            "{error}"
+        );
+        assert_eq!(server.requests().len(), 1);
+        assert!(
+            recording
+                .history()
+                .iter()
+                .all(|entry| entry.node.as_ref() != "calculate")
+        );
+    }
+}
+
+#[test]
+fn near_limit_prefix_can_continue_after_a_tool_round() {
+    let server = Server::start(vec![
+        tool_reply(
+            json!([call(
+                "near-limit",
+                "calculator",
+                json!({"operation":"add", "left":2.0, "right":3.0})
+            )]),
+            false,
+        ),
+        Reply::text("Continued answer"),
+    ]);
+    let mut args = inputs(&server);
+    let long_prefix = "p".repeat(1024 * 1024 - 1024);
+    args["params.messages"][0]["content"] = long_prefix.clone().into();
+    let (output, _) = memory(configured_agent(calculator_tools()), args);
+    assert_success(&output, "Continued answer", 2);
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].body["messages"][0]["content"].as_str() == Some(long_prefix.as_str()));
+    assert_eq!(
+        requests[1].body["messages"][2],
+        json!({"role":"tool", "tool_call_id":"near-limit", "content":"5.0"})
     );
 }
 
@@ -869,24 +977,45 @@ fn unknown_and_invalid_tool_arguments_are_ordered_results_and_the_agent_can_reco
     assert_eq!(messages[7]["content"], "5.0");
 }
 
-#[test]
-fn secret_tool_results_reach_the_model_but_not_agent_snapshots_or_catalog() {
-    const SECRET: &str = "synthetic-private-agent-tool-result";
-    let tool = FlowTool {
+fn literal_tool_result(content: &str) -> FlowTool {
+    FlowTool {
         description: "Return a privately bound value.".into(),
         parameters: BTreeMap::new(),
         body: WorkflowDefinition::from_json(
             &json!({
                 "version":"2026-10-28", "nodes":[{
                     "id":"params", "kind":"builtin.parameters", "config":{"parameters":{
-                        "content":{"type":"string", "default":SECRET, "secret":true}
+                        "content":{"type":"string", "default":content, "secret":true}
                     }}
                 }], "outputs":[{"name":"content", "node":"params", "port":"content"}]
             })
             .to_string(),
         )
         .unwrap(),
-    };
+    }
+}
+
+#[test]
+fn tool_results_over_the_transcript_budget_do_not_trigger_another_model_request() {
+    let tool = literal_tool_result(&"t".repeat(600 * 1024));
+    let server = Server::start(vec![tool_reply(
+        json!([call("large-result", "large", json!({}))]),
+        false,
+    )]);
+    let definition = configured_agent(BTreeMap::from([("large".into(), tool)]));
+    let (result, _) = memory_result(definition, inputs(&server));
+    let error = result.unwrap_err().to_string();
+    assert!(
+        error.contains("append_tool_results") && error.contains("JSON limit"),
+        "{error}"
+    );
+    assert_eq!(server.requests().len(), 1);
+}
+
+#[test]
+fn secret_tool_results_reach_the_model_but_not_agent_snapshots_or_catalog() {
+    const SECRET: &str = "synthetic-private-agent-tool-result";
+    let tool = literal_tool_result(SECRET);
     let server = Server::start(vec![
         tool_reply(json!([call("private-result", "private", json!({}))]), false),
         Reply::text("Private result received"),

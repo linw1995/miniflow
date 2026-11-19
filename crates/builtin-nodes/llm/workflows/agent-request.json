@@ -1,0 +1,136 @@
+{
+  "version": "2026-10-28",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core"
+    },
+    "code": {
+      "package": "mfn-code"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "prefix": {
+            "type": {
+              "list": "object"
+            },
+            "secret": false
+          },
+          "generated": {
+            "type": {
+              "list": "object"
+            },
+            "secret": false
+          }
+        }
+      }
+    },
+    {
+      "id": "route",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "prefix_only",
+            "condition": {
+              "source": {
+                "output": "params.generated",
+                "path": "/0"
+              },
+              "operator": "not_exists"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "prefix_only",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "from": {
+            "node": "params",
+            "port": "prefix"
+          }
+        }
+      }
+    },
+    {
+      "id": "continue_request",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "prefix": {
+            "list": "object"
+          },
+          "generated": {
+            "list": "object"
+          }
+        },
+        "code": {
+          "messages": "prefix + generated"
+        }
+      },
+      "inputs": {
+        "prefix": {
+          "from": {
+            "node": "params",
+            "port": "prefix"
+          }
+        },
+        "generated": {
+          "from": {
+            "node": "params",
+            "port": "generated"
+          }
+        }
+      }
+    },
+    {
+      "id": "request",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "prefix_only",
+              "port": "value"
+            },
+            {
+              "node": "continue_request",
+              "port": "messages"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "params",
+      "to_node": "route"
+    },
+    {
+      "from_node": "route",
+      "from_output": "prefix_only",
+      "to_node": "prefix_only"
+    },
+    {
+      "from_node": "route",
+      "from_output": "else",
+      "to_node": "continue_request"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "messages",
+      "node": "request",
+      "port": "value"
+    }
+  ]
+}

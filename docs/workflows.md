@@ -533,10 +533,16 @@ workflow's directory. There is no runtime JSON catalog override or lexical `flow
 dispatch remains terminal-only; native dynamic Calls and existing observed-item nested-scope limits are
 unchanged.
 
-The Agent accepts complete `params.messages`, calls `mfn-llm.tool-catalog` once outside its eight-pass
-native Loop, then invokes `mfn-llm.agent-turn` and `mfn-llm.tool-uses`. The latter uses native parallel
-Iteration for ordered tool results. Generated assistant call batches precede their tool results, and
-the terminal assistant is included in the exported `messages` additions. Request history is not echoed.
+The Agent accepts complete `params.messages` as a read-only Loop prefix and calls `mfn-llm.tool-catalog`
+once outside its eight-pass native Loop. The Loop carries only the generated suffix. The
+[request Flow](../crates/builtin-nodes/llm/workflows/agent-request.json) forwards the prefix unchanged
+when the suffix is empty, so the first model request does not run a CEL size check. After a completed
+tool round, it joins the prefix and the generated messages with CEL. The existing bounded append
+steps still check the full transcript after the model and tool calls, without carrying it into the
+next pass. The Agent invokes `mfn-llm.agent-turn` for each request and `mfn-llm.tool-uses` for tool-call
+batches. The latter uses native parallel Iteration for ordered tool results. Generated assistant call
+batches precede their tool results, and the terminal assistant is included in the exported `messages`
+additions. Request history is not echoed.
 Completion also returns `status`, final `text`, `usages`, and `error`, while `answer` streams assistant
 text, including tool-call preambles. Captured provider failures and exhaustion retain completed rounds
 and their usages with failed status; an unresolved batch is permitted only at the end of a failed prefix.
@@ -1636,7 +1642,7 @@ retaining completed immediate assignments. A failed pass never publishes partial
 external side effects are not rolled back. Values retain their native identity and secret labels.
 TaskStream deltas remain separate under `stream_outputs` and cannot be selected as terminal updates.
 
-The built-in Agent uses this form for `messages`, `usages`, `text`, `outcome`, and `error`; no assignment
+The built-in Agent uses this form for `generated`, `usages`, `text`, `outcome`, and `error`; no assignment
 nodes are needed in its body. Streaming `answer` remains independent of those terminal updates.
 
 ### Forwarding child streams

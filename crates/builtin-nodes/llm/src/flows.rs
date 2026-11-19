@@ -13,6 +13,14 @@ pub fn tool_uses_definition() -> Result<WorkflowDefinition, DefinitionParseError
     WorkflowDefinition::from_json(include_str!(concat!(env!("OUT_DIR"), "/tool-uses.json")))
 }
 
+/// Assemble a request without applying the CEL budget to the initial prefix.
+fn agent_request_definition() -> Result<WorkflowDefinition, DefinitionParseError> {
+    WorkflowDefinition::from_json(include_str!(concat!(
+        env!("OUT_DIR"),
+        "/agent-request.json"
+    )))
+}
+
 /// Make one provider request with the shared chat/streaming contract.
 pub fn agent_turn_definition() -> Result<WorkflowDefinition, DefinitionParseError> {
     WorkflowDefinition::from_json(include_str!(concat!(env!("OUT_DIR"), "/agent-turn.json")))
@@ -26,6 +34,7 @@ pub fn agent_definition() -> Result<WorkflowDefinition, DefinitionParseError> {
 
 mf_runtime::register_builtin_flow!("tool-catalog", tool_catalog_definition);
 mf_runtime::register_builtin_flow!("tool-uses", tool_uses_definition);
+mf_runtime::register_builtin_flow!("agent-request", agent_request_definition);
 mf_runtime::register_builtin_flow!("agent-turn", agent_turn_definition);
 mf_runtime::register_builtin_flow!("agent", agent_definition);
 
@@ -58,11 +67,17 @@ mod tests {
             .find(|node| node.id.as_str() == "repeat")
             .unwrap();
         let loop_inputs = repeat.config["inputs"].as_object().unwrap();
-        assert_eq!(loop_inputs.len(), 6);
+        assert_eq!(loop_inputs.len(), 7);
+        assert_eq!(loop_inputs["prefix"], json!({"list":"object"}));
         assert_eq!(loop_inputs["tools"], json!({"map":"flow"}));
         assert_eq!(loop_inputs["tool_properties"], json!({"map":"object"}));
         let variables = repeat.config["variables"].as_array().unwrap();
-        assert_eq!(variables.len(), 6);
+        assert_eq!(variables.len(), 5);
+        assert!(
+            variables
+                .iter()
+                .all(|variable| variable["name"] != "messages")
+        );
         assert!(
             variables.iter().any(|variable| {
                 variable["name"] == "usages" && variable["initial"] == json!([])
@@ -125,6 +140,7 @@ mod tests {
         for definition in [
             tool_catalog_definition().unwrap(),
             tool_uses_definition().unwrap(),
+            agent_request_definition().unwrap(),
             agent_turn_definition().unwrap(),
             agent_definition().unwrap(),
         ] {
@@ -136,6 +152,7 @@ mod tests {
         for source in [
             include_str!("../workflows/tool-catalog.json"),
             include_str!("../workflows/tool-uses.json"),
+            include_str!("../workflows/agent-request.json"),
             include_str!("../workflows/agent-turn.json"),
             include_str!("../workflows/agent.json"),
         ] {
