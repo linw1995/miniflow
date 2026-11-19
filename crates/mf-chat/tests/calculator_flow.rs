@@ -53,7 +53,6 @@ fn calculator_profile_loads_real_tool_bodies_without_specialized_nodes() {
         std::collections::BTreeSet::from([
             "params",
             "calculator",
-            "calculator_properties",
             "tool_properties",
             "tools",
             "agent",

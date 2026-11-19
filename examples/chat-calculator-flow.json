@@ -43,26 +43,6 @@
           "api_key": {
             "type": "string",
             "env": "OPENAI_API_KEY"
-          },
-          "calculator_description": {
-            "type": "string",
-            "secret": false,
-            "default": "Perform add, subtract, multiply, or divide on two numeric operands. Division by zero returns an error message."
-          },
-          "calculator_parameters": {
-            "type": "object",
-            "secret": false,
-            "default": {
-              "operation": {
-                "description": "Operation to perform: add, subtract, multiply, or divide."
-              },
-              "left": {
-                "description": "Left operand."
-              },
-              "right": {
-                "description": "Right operand; must be nonzero for division."
-              }
-            }
           }
         }
       }
@@ -78,49 +58,22 @@
       }
     },
     {
-      "id": "calculator_properties",
-      "kind": "builtin.object",
+      "id": "tool_properties",
+      "kind": "builtin.code",
       "config": {
-        "fields": {
-          "description": "string",
-          "parameters": "object",
-          "interface": "object"
+        "language": "cel",
+        "inputs": {
+          "calculator_interface": "object"
+        },
+        "code": {
+          "value": "{\n  'calculator': {\n    'description': 'Set operation to add, subtract, multiply, or divide on the numeric operands left and right. Division by zero returns an error message.',\n    'interface': calculator_interface\n  }\n}"
         }
       },
       "inputs": {
-        "description": {
-          "from": {
-            "node": "params",
-            "port": "calculator_description"
-          }
-        },
-        "parameters": {
-          "from": {
-            "node": "params",
-            "port": "calculator_parameters"
-          }
-        },
-        "interface": {
+        "calculator_interface": {
           "from": {
             "node": "calculator",
             "port": "properties"
-          }
-        }
-      }
-    },
-    {
-      "id": "tool_properties",
-      "kind": "builtin.object",
-      "config": {
-        "fields": {
-          "calculator": "object"
-        }
-      },
-      "inputs": {
-        "calculator": {
-          "from": {
-            "node": "calculator_properties",
-            "port": "value"
           }
         }
       }
