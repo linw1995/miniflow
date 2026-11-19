@@ -5,6 +5,7 @@ use mf_chat::{
 use mf_runtime::{
     ExecutionContext, InputBinding, NodeValue, WorkflowArguments, WorkflowInput, WorkflowManifest,
 };
+use serde_json::json;
 use snafu::ResultExt;
 use std::sync::{
     Arc,
@@ -20,27 +21,41 @@ struct Runner {
 }
 
 impl Runner {
-    fn new(fail_after_reply: bool) -> Self {
-        let outputs: Vec<_> = ConversationResult::ports().into_iter()
-            .map(|port| serde_json::json!({
-                "name":port.name,"node":"remote","port":port.name,"optional":!port.required
-            })).chain([serde_json::json!({"name":"answer","node":"remote","port":"answer","optional":true})]).collect();
-        Self {
-            manifest: WorkflowManifest::from_graph(
-                &(mf_runtime::CompiledGraph {
-                    definition: serde_json::from_value(serde_json::json!({
-                        "version":"2026-10-28", "dependencies":{},
-                        "execution":{},
-                        "nodes":[{"id":"remote","kind":"unlinked.chat_provider"}],
-                        "outputs":outputs
-                    }))
-                    .unwrap(),
-                    execution_order: vec!["remote".into()],
-                    relations: Default::default(),
-                    children: Default::default(),
-                }),
-                mf_runtime::WorkflowInputSchema {
-                    inputs: [(
+    fn new(fail_after_reply: bool, tool_previews: bool) -> Self {
+        let preview = if tool_previews {
+            "tool_call_delta"
+        } else {
+            "answer"
+        };
+        let outputs: Vec<_> = ConversationResult::ports()
+            .into_iter()
+            .map(|port| {
+                json!({
+                    "name":port.name,"node":"remote","port":port.name,"optional":!port.required
+                })
+            })
+            .chain([json!({"name":preview,"node":"remote","port":preview,"optional":true})])
+            .collect();
+        let tool = json!({"version":"2026-10-28", "nodes":[]});
+        let mut definition = json!({
+            "version":"2026-10-28", "execution":{},
+            "nodes":[
+                {"id":"remote", "kind":"unlinked.chat_provider"},
+                {"id":"tool", "kind":"builtin.constant", "config":{"type":"flow", "value":tool}}
+            ],
+            "outputs":outputs
+        });
+        let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
+        let plan = mf_compiler::plan_resolved_definition(
+            &serde_json::from_value(definition.clone()).unwrap(),
+            &registry,
+        )
+        .unwrap();
+        let mut manifest = WorkflowManifest::from_graph(
+            &plan.graph,
+            mf_runtime::WorkflowInputSchema {
+                inputs: [
+                    (
                         "remote".into(),
                         ConversationInputs::ports()
                             .into_iter()
@@ -55,16 +70,28 @@ impl Runner {
                                 )
                             })
                             .collect(),
-                    )]
-                    .into(),
-                    stdin: Default::default(),
-                },
-            )
-            .unwrap(),
+                    ),
+                    ("tool".into(), Default::default()),
+                ]
+                .into(),
+                stdin: Default::default(),
+            },
+        )
+        .unwrap();
+        // Keep the authored resource separate from the inspection descriptor, as in a built runner.
+        definition["nodes"][1]["config"]["value"] = json!({"path":"tool.json"});
+        manifest.sources = [
+            (manifest.entry.clone(), definition.to_string()),
+            ("tool.json".into(), tool.to_string()),
+        ]
+        .into();
+        manifest.definition = serde_json::from_value(definition).unwrap();
+        Self {
+            manifest,
             parameters: Default::default(),
             calls: AtomicUsize::new(0),
             fail_after_reply,
-            tool_previews: false,
+            tool_previews,
         }
     }
 }
@@ -132,7 +159,7 @@ impl ConversationBackend for Runner {
 
 fn setup(fail_after_reply: bool) -> (tempfile::TempDir, ChatHost, String, Arc<Runner>) {
     let root = tempfile::tempdir().unwrap();
-    let runner = Arc::new(Runner::new(fail_after_reply));
+    let runner = Arc::new(Runner::new(fail_after_reply, false));
     let profile = WorkflowProfile::with_backend("runner", runner.clone()).unwrap();
     let host = ChatHost::open(root.path().join("chat.sqlite"), HostConfig::new(profile)).unwrap();
     let session = host
@@ -143,14 +170,16 @@ fn setup(fail_after_reply: bool) -> (tempfile::TempDir, ChatHost, String, Arc<Ru
 }
 
 #[test]
-fn registered_runner_streams_inside_a_call_without_linked_child_nodes() {
+fn registered_runner_streams_without_replanning_authored_tool_sources() {
     let (_root, host, session, runner) = setup(false);
     let (job, receiver) = host.submit_stream(&session, "first").unwrap();
-    assert!(
-        matches!(receiver.recv().unwrap().delta, mf_chat::PreviewDelta::Text { delta } if delta.text == "preview")
-    );
-    assert!(receiver.recv().is_err());
+    let preview = receiver.recv();
+    let closed = receiver.recv().is_err();
     assert_eq!(job.join().unwrap().result.final_text(), Some("first"));
+    assert!(
+        matches!(preview.unwrap().delta, mf_chat::PreviewDelta::Text { delta } if delta.text == "preview")
+    );
+    assert!(closed);
     assert_eq!(
         host.submit(&session, "second")
             .unwrap()
@@ -175,17 +204,7 @@ fn registered_runner_streams_inside_a_call_without_linked_child_nodes() {
 fn registered_tool_only_runners_share_preview_delivery_and_save_only_recovery() {
     for fail in [false, true] {
         let root = tempfile::tempdir().unwrap();
-        let mut runner = Runner::new(fail);
-        runner.tool_previews = true;
-        let outputs = &mut runner.manifest.definition.outputs;
-        outputs.retain(|output| output.name != "answer");
-        outputs.push(
-            serde_json::from_value(serde_json::json!({
-                "name":"tool_call_delta", "node":"remote", "port":"tool_call_delta", "optional":true
-            }))
-            .unwrap(),
-        );
-        let runner = Arc::new(runner);
+        let runner = Arc::new(Runner::new(fail, true));
         let profile = WorkflowProfile::with_backend("runner", runner.clone()).unwrap();
         let host =
             ChatHost::open(root.path().join("chat.sqlite"), HostConfig::new(profile)).unwrap();
