@@ -1208,13 +1208,14 @@ and HTTP errors, malformed responses, deadlines, or cancellation fail the invoca
 node outputs. Retry policy belongs to the enclosing Flow or host, which can account for the API's per-request
 billing and status-specific retry guidance.
 
-Checked Search/Fetch input errors and non-success HTTP statuses retain typed provider sources through
-`NodeExecutionError::BusinessFailed`. A standalone node or ordinary Call still fails without outputs;
-packed Router/tool calls convert these explicit domain failures into tool-result errors. The Agent can
-then choose another query or URL and produce a terminal answer, with the failed call retained in its
-transcript. Configuration, credential lookup, runtime initialization, cancellation/deadline, and
-response-decoding failures are not reclassified as recoverable tool results. No HTTP retry is added;
-any further tool request must be explicitly issued by the model or caller Flow.
+Checked Search/Fetch input errors, non-success HTTP statuses, and expiry of the node's own
+`timeout_ms` deadline use `NodeExecutionError::BusinessFailed` with a typed source. A standalone
+node or ordinary Call still fails without outputs. Packed Router/tool calls deliver these failures
+as tool-result errors, so the Agent can choose another query or URL and produce a terminal answer
+that retains the failed call in its transcript. Cancellation, other runtime failures, configuration,
+credential lookup, transport errors, and response-decoding failures remain execution errors. The
+HTTP client never retries automatically; any further tool request must come from the model or
+caller Flow.
 
 ### LLM tool calls
 
