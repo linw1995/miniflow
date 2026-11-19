@@ -559,14 +559,18 @@ nix develop --command cargo run -p mf-cli --features development-support -- comp
 nix develop --command cargo run -p mf-cli --features development-support -- run target/chat-calculator --chat --params.model your-model
 ```
 
-The [DeepSeek web Agent](../examples/chat-deepseek-flow.json) composes the same Agent with
+The [DeepSeek web Agent](../examples/chat-deepseek-flow.json) calls a reusable
+[tool-set Flow](../examples/agent-deepseek/tools.json) to prepare the
 [Search](../examples/agent-deepseek/search.json) and [Fetch](../examples/agent-deepseek/fetch.json)
-tool Flows. Independent searches can run in parallel; subsequent rounds can fetch a discovered URL
-before answering. Search returns structured results, and Fetch returns the page title and Markdown.
-The model sees only `query` and optional `count` for Search, or `url` for Fetch. Both wrappers keep
-credentials and the tool endpoint outside the model's argument schema. Each Flow constant configures
-those inputs from explicit root parameters with context templates before the unchanged Agent receives
-the tool maps.
+capabilities. The root passes its endpoint, credential, and overridable tool documentation into
+this Flow. Its `tools` and `tool_properties` outputs feed the unchanged Agent; preparing the maps
+makes no provider requests. The Agent still projects the model catalog and dispatches each tool call
+through a statically bound router.
+
+Independent searches can run in parallel; subsequent rounds can fetch a discovered URL before
+answering. Search returns structured results, and Fetch returns the page title and Markdown. The
+model sees only `query` and optional `count` for Search, or `url` for Fetch. The tool-set Flow binds
+the endpoint and credential on both Flow constants, keeping those inputs out of the model schema.
 
 The example exposes distinct settings for each provider:
 
@@ -587,9 +591,9 @@ nix develop --command cargo run -p mf-cli --features development-support -- run 
 ```
 
 `params.llm_api_key` and `params.deepseek_api_key` can also be supplied explicitly, although environment
-fallbacks avoid putting credentials in shell history and process arguments. Tool wrappers receive both
-settings as ordinary private Call inputs and do not independently read credential or endpoint variables.
-Compilation requires neither credential and makes no provider requests.
+fallbacks avoid putting credentials in shell history and process arguments. Tool wrappers receive
+configured values and do not independently read credential or endpoint variables. Compilation requires
+neither credential and makes no provider requests.
 
 For PiP observation, request two independent searches followed by fetching their useful sources.
 The running tool path ends at `builtin.deepseek.search` or `builtin.deepseek.fetch` beneath the

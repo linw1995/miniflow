@@ -111,6 +111,9 @@ fn search_result() -> Value {
     })
 }
 
+const DEEPSEEK_SEARCH_DESCRIPTION: &str = "Search for independently verifiable sources.";
+const DEEPSEEK_FETCH_URL_DESCRIPTION: &str = "The public page URL to retrieve.";
+
 fn deepseek_calls(fetch: bool) -> Value {
     if fetch {
         json!([{"id":"call_fetch","type":"function","function":{"name":"fetch","arguments":"{\"url\":\"https://example.com/release\"}"}}])
@@ -474,7 +477,9 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                     "params.llm_base_url":server.base_url,
                     "params.llm_api_key":"synthetic-llm-key",
                     "params.deepseek_base_url":deepseek_server.as_ref().unwrap().base_url,
-                    "params.deepseek_api_key":"synthetic-deepseek-key"
+                    "params.deepseek_api_key":"synthetic-deepseek-key",
+                    "params.search_description":DEEPSEEK_SEARCH_DESCRIPTION,
+                    "params.fetch_parameters":{"url":{"description":DEEPSEEK_FETCH_URL_DESCRIPTION}}
                 })
             } else if name.starts_with("chat-") {
                 json!({"params.messages":[{"role":"user","content":"Hello"}], "params.model":"example-model", "params.base_url":server.base_url})
@@ -679,8 +684,13 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                 let function = &tool["function"];
                 let properties = function["parameters"]["properties"].as_object().unwrap();
                 let expected = if function["name"] == "search" {
+                    assert_eq!(function["description"], DEEPSEEK_SEARCH_DESCRIPTION);
                     vec!["count", "query"]
                 } else {
+                    assert_eq!(
+                        properties["url"]["description"],
+                        DEEPSEEK_FETCH_URL_DESCRIPTION
+                    );
                     vec!["url"]
                 };
                 assert_eq!(

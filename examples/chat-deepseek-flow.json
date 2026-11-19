@@ -12,13 +12,12 @@
     "llm": {
       "package": "mfn-llm",
       "path": "../crates/builtin-nodes/llm"
-    },
-    "deepseek": {
-      "package": "mfn-deepseek",
-      "path": "../crates/builtin-nodes/deepseek"
     }
   },
   "flows": {
+    "deepseek-tools": {
+      "path": "agent-deepseek/tools.json"
+    },
     "agent": {
       "builtin": "mfn-llm.agent"
     }
@@ -93,147 +92,46 @@
       }
     },
     {
-      "id": "search",
-      "kind": "builtin.constant",
+      "id": "deepseek_tools",
+      "kind": "workflow.call",
       "config": {
-        "type": "flow",
-        "value": {
-          "path": "agent-deepseek/search.json"
-        },
-        "inputs": {
-          "api_key": {
-            "$ref": "params.deepseek_api_key"
-          },
-          "base_url": {
-            "$ref": "params.deepseek_base_url"
-          }
-        }
-      }
-    },
-    {
-      "id": "fetch",
-      "kind": "builtin.constant",
-      "config": {
-        "type": "flow",
-        "value": {
-          "path": "agent-deepseek/fetch.json"
-        },
-        "inputs": {
-          "api_key": {
-            "$ref": "params.deepseek_api_key"
-          },
-          "base_url": {
-            "$ref": "params.deepseek_base_url"
-          }
-        }
-      }
-    },
-    {
-      "id": "search_properties",
-      "kind": "builtin.object",
-      "config": {
-        "fields": {
-          "description": "string",
-          "parameters": "object",
-          "interface": "object"
-        }
+        "flow": "deepseek-tools"
       },
       "inputs": {
-        "description": {
+        "params.api_key": {
+          "from": {
+            "node": "params",
+            "port": "deepseek_api_key"
+          }
+        },
+        "params.base_url": {
+          "from": {
+            "node": "params",
+            "port": "deepseek_base_url"
+          }
+        },
+        "params.search_description": {
           "from": {
             "node": "params",
             "port": "search_description"
           }
         },
-        "parameters": {
+        "params.search_parameters": {
           "from": {
             "node": "params",
             "port": "search_parameters"
           }
         },
-        "interface": {
-          "from": {
-            "node": "search",
-            "port": "properties"
-          }
-        }
-      }
-    },
-    {
-      "id": "fetch_properties",
-      "kind": "builtin.object",
-      "config": {
-        "fields": {
-          "description": "string",
-          "parameters": "object",
-          "interface": "object"
-        }
-      },
-      "inputs": {
-        "description": {
+        "params.fetch_description": {
           "from": {
             "node": "params",
             "port": "fetch_description"
           }
         },
-        "parameters": {
+        "params.fetch_parameters": {
           "from": {
             "node": "params",
             "port": "fetch_parameters"
-          }
-        },
-        "interface": {
-          "from": {
-            "node": "fetch",
-            "port": "properties"
-          }
-        }
-      }
-    },
-    {
-      "id": "tool_properties",
-      "kind": "builtin.object",
-      "config": {
-        "fields": {
-          "search": "object",
-          "fetch": "object"
-        }
-      },
-      "inputs": {
-        "search": {
-          "from": {
-            "node": "search_properties",
-            "port": "value"
-          }
-        },
-        "fetch": {
-          "from": {
-            "node": "fetch_properties",
-            "port": "value"
-          }
-        }
-      }
-    },
-    {
-      "id": "tools",
-      "kind": "builtin.object",
-      "config": {
-        "fields": {
-          "search": "flow",
-          "fetch": "flow"
-        }
-      },
-      "inputs": {
-        "search": {
-          "from": {
-            "node": "search",
-            "port": "value"
-          }
-        },
-        "fetch": {
-          "from": {
-            "node": "fetch",
-            "port": "value"
           }
         }
       }
@@ -247,14 +145,14 @@
       "inputs": {
         "params.tools": {
           "from": {
-            "node": "tools",
-            "port": "value"
+            "node": "deepseek_tools",
+            "port": "tools"
           }
         },
         "params.tool_properties": {
           "from": {
-            "node": "tool_properties",
-            "port": "value"
+            "node": "deepseek_tools",
+            "port": "tool_properties"
           }
         },
         "params.messages": {
@@ -324,16 +222,6 @@
           }
         }
       }
-    }
-  ],
-  "edges": [
-    {
-      "from_node": "params",
-      "to_node": "search"
-    },
-    {
-      "from_node": "params",
-      "to_node": "fetch"
     }
   ],
   "outputs": [
