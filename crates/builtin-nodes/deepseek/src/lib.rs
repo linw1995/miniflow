@@ -9,8 +9,8 @@ pub use fetch::{FETCH_KIND, FetchInputs, FetchOutputs, prepare_fetch};
 pub use search::{SEARCH_KIND, SearchInputs, SearchOutputs, SearchResult, prepare_search};
 
 use mf_runtime::{
-    ConfigTemplate, ContextReference, ExecutionContext, FutureExecutionError, Inputs,
-    NodeBuildError, NodeExecutionError, Shared, deserialize_config,
+    ConfigTemplate, ContextReference, ExecutionContext, Inputs, NodeBuildError, NodeExecutionError,
+    Shared, deserialize_config,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -20,7 +20,6 @@ use std::{
     error::Error,
     fmt,
     sync::{Arc, OnceLock},
-    time::{Duration, Instant},
 };
 
 #[derive(mf_runtime::NodeInputs)]
@@ -231,12 +230,6 @@ pub enum DeepSeekExecutionError {
         operation: &'static str,
         source: serde_json::Error,
     },
-    #[snafu(display("DeepSeek {operation} request timed out after {timeout_ms} ms"))]
-    RequestTimeout {
-        operation: &'static str,
-        timeout_ms: u64,
-        source: FutureExecutionError,
-    },
     #[snafu(display("DeepSeek timeout exceeds the monotonic clock range"))]
     DeadlineRange,
     #[snafu(transparent)]
@@ -261,7 +254,6 @@ impl From<DeepSeekExecutionError> for NodeExecutionError {
             DeepSeekExecutionError::InvalidInput { .. }
                 | DeepSeekExecutionError::FetchUrl { .. }
                 | DeepSeekExecutionError::ProviderStatus { .. }
-                | DeepSeekExecutionError::RequestTimeout { .. }
         );
         let source = Box::<dyn Error + Send + Sync>::from(source);
         if business {
@@ -296,39 +288,18 @@ impl HttpClient {
 
     fn post<Request, Response>(
         &self,
-        config: &PreparedConfig,
+        config: &Config,
         operation: &'static str,
         body: &Request,
-        context: &ExecutionContext,
-    ) -> Result<Response, NodeExecutionError>
+    ) -> Result<
+        impl std::future::Future<Output = Result<Response, DeepSeekExecutionError>>,
+        DeepSeekExecutionError,
+    >
     where
         Request: Serialize + Sync,
         Response: DeserializeOwned,
     {
-        let origin = Instant::now();
-        let config = config
-            .resolve(context)
-            .map_err(DeepSeekExecutionError::from)?;
-        let timeout_ms = config.timeout_ms;
-        let deadline = origin
-            .checked_add(Duration::from_millis(timeout_ms))
-            .context(DeadlineRangeSnafu)?;
-        // Only this request's deadline is recoverable, not cancellation or other executor failures.
-        let request_limit = |source| -> NodeExecutionError {
-            match source {
-                FutureExecutionError::DeadlineExceeded => RequestTimeoutSnafu {
-                    operation,
-                    timeout_ms,
-                }
-                .into_error(source)
-                .into(),
-                other => other.into(),
-            }
-        };
-        context
-            .check_future_limits(Some(deadline))
-            .map_err(request_limit)?;
-        let request = transport::bind(async {
+        transport::bind(async move {
             let key = if let Some(key) = &config.api_key {
                 key.value()
                     .as_str()
@@ -368,14 +339,7 @@ impl HttpClient {
             );
             let body = response.bytes().await.context(RequestSnafu { operation })?;
             serde_json::from_slice(&body).context(DecodeResponseSnafu { operation })
-        })?;
-        let response = context
-            .execute_future(request, Some(deadline))
-            .map_err(request_limit)??;
-        context
-            .check_future_limits(Some(deadline))
-            .map_err(request_limit)?;
-        Ok(response)
+        })
     }
 }
 

@@ -5,7 +5,8 @@ use mf_runtime::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use snafu::ensure;
+use snafu::{OptionExt, ensure};
+use std::time::{Duration, Instant};
 
 pub const SEARCH_KIND: &str = "builtin.deepseek.search";
 
@@ -135,6 +136,15 @@ impl TypedTaskNode for SearchNode {
         context: &mut ExecutionContext,
     ) -> Result<TypedNodeResult<Self::Output>, NodeExecutionError> {
         Self::validate(&inputs)?;
+        let origin = Instant::now();
+        let config = self
+            .config
+            .resolve(context)
+            .map_err(DeepSeekExecutionError::from)?;
+        let deadline = origin
+            .checked_add(Duration::from_millis(config.timeout_ms))
+            .context(crate::DeadlineRangeSnafu)?;
+        context.check_future_limits(Some(deadline))?;
         let request = SearchRequest {
             query: &inputs.query,
             count: inputs.count,
@@ -142,9 +152,9 @@ impl TypedTaskNode for SearchNode {
             localization: inputs.localization.as_deref(),
             need_content: inputs.need_content,
         };
-        let response: SearchOutputs =
-            self.client
-                .post(&self.config, "search", &request, context)?;
+        let request = self.client.post(&config, "search", &request)?;
+        let response: SearchOutputs = context.execute_future(request, Some(deadline))??;
+        context.check_future_limits(Some(deadline))?;
         Ok(response.into())
     }
 }
