@@ -13,6 +13,14 @@ pub fn tool_uses_definition() -> Result<WorkflowDefinition, DefinitionParseError
     WorkflowDefinition::from_json(include_str!(concat!(env!("OUT_DIR"), "/tool-uses.json")))
 }
 
+/// Assemble a request without applying the CEL budget to the initial prefix.
+fn agent_request_definition() -> Result<WorkflowDefinition, DefinitionParseError> {
+    WorkflowDefinition::from_json(include_str!(concat!(
+        env!("OUT_DIR"),
+        "/agent-request.json"
+    )))
+}
+
 /// Make one provider request with the shared chat/streaming contract.
 pub fn agent_turn_definition() -> Result<WorkflowDefinition, DefinitionParseError> {
     WorkflowDefinition::from_json(include_str!(concat!(env!("OUT_DIR"), "/agent-turn.json")))
@@ -26,6 +34,7 @@ pub fn agent_definition() -> Result<WorkflowDefinition, DefinitionParseError> {
 
 mf_runtime::register_builtin_flow!("tool-catalog", tool_catalog_definition);
 mf_runtime::register_builtin_flow!("tool-uses", tool_uses_definition);
+mf_runtime::register_builtin_flow!("agent-request", agent_request_definition);
 mf_runtime::register_builtin_flow!("agent-turn", agent_turn_definition);
 mf_runtime::register_builtin_flow!("agent", agent_definition);
 
@@ -131,6 +140,7 @@ mod tests {
         for definition in [
             tool_catalog_definition().unwrap(),
             tool_uses_definition().unwrap(),
+            agent_request_definition().unwrap(),
             agent_turn_definition().unwrap(),
             agent_definition().unwrap(),
         ] {
@@ -142,6 +152,7 @@ mod tests {
         for source in [
             include_str!("../workflows/tool-catalog.json"),
             include_str!("../workflows/tool-uses.json"),
+            include_str!("../workflows/agent-request.json"),
             include_str!("../workflows/agent-turn.json"),
             include_str!("../workflows/agent.json"),
         ] {

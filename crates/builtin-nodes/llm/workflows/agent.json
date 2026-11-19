@@ -133,6 +133,9 @@
           "version": "2026-11-13",
           "dependencies": {},
           "flows": {
+            "agent-request": {
+              "builtin": "mfn-llm.agent-request"
+            },
             "agent-turn": {
               "builtin": "mfn-llm.agent-turn"
             },
@@ -143,15 +146,18 @@
           "nodes": [
             {
               "id": "request",
-              "kind": "llm.agent_request",
+              "kind": "workflow.call",
+              "config": {
+                "flow": "agent-request"
+              },
               "inputs": {
-                "prefix": {
+                "params.prefix": {
                   "from": {
                     "node": "%loop",
                     "port": "prefix"
                   }
                 },
-                "generated": {
+                "params.generated": {
                   "from": {
                     "node": "%loop",
                     "port": "generated"

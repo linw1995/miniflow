@@ -686,6 +686,33 @@ fn transcript_budget_failures_follow_the_provider_request_and_precede_tool_dispa
 }
 
 #[test]
+fn near_limit_prefix_can_continue_after_a_tool_round() {
+    let server = Server::start(vec![
+        tool_reply(
+            json!([call(
+                "near-limit",
+                "calculator",
+                json!({"operation":"add", "left":2.0, "right":3.0})
+            )]),
+            false,
+        ),
+        Reply::text("Continued answer"),
+    ]);
+    let mut args = inputs(&server);
+    let long_prefix = "p".repeat(1024 * 1024 - 1024);
+    args["params.messages"][0]["content"] = long_prefix.clone().into();
+    let (output, _) = memory(configured_agent(calculator_tools()), args);
+    assert_success(&output, "Continued answer", 2);
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].body["messages"][0]["content"].as_str() == Some(long_prefix.as_str()));
+    assert_eq!(
+        requests[1].body["messages"][2],
+        json!({"role":"tool", "tool_call_id":"near-limit", "content":"5.0"})
+    );
+}
+
+#[test]
 fn agent_turn_forwards_finite_stream_answer_and_terminal_usage() {
     let server = Server::start(vec![Reply::stream_text("Direct streamed answer")]);
     let mut definition = agent_turn_definition().unwrap();
