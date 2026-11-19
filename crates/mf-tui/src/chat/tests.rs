@@ -5,7 +5,7 @@ use std::{fs, time::Instant};
 
 fn chat_manifest() -> mf_runtime::WorkflowManifest {
     let mut manifest = crate::test_support::sample_manifest();
-    manifest.graph.definition = serde_json::from_value(json!({
+    manifest.definition = serde_json::from_value(json!({
         "version":"2026-10-03", "dependencies":{},
         "nodes":[{"id":"start","kind":"builtin.llm","config":{"model":"fixture-model"}}],
         "outputs":[
@@ -13,17 +13,27 @@ fn chat_manifest() -> mf_runtime::WorkflowManifest {
         ]
     }))
     .unwrap();
-    manifest.graph.execution_order = vec!["start".into()];
-    manifest.input_schema = serde_json::from_value(json!({"inputs":{"start":{
+    manifest.descriptor.description.execution_order = vec!["start".into()];
+    manifest.descriptor.input_schema = serde_json::from_value(json!({"inputs":{"start":{
         "messages":{"type":mf_runtime::ValueType::List(Box::new(mf_runtime::ValueType::Object)),"required":true}
     }},"stdin":{}})).unwrap();
+    manifest.descriptor.description = mf_runtime::describe_graph(&mf_runtime::CompiledGraph {
+        definition: manifest.definition.clone(),
+        execution_order: vec!["start".into()],
+        relations: Default::default(),
+        children: Default::default(),
+    })
+    .unwrap();
     manifest
 }
 
 fn live_manifest() -> mf_runtime::WorkflowManifest {
     let mut manifest = chat_manifest();
-    manifest.graph.definition.execution = Some(serde_json::from_value(json!({})).unwrap());
-    manifest.graph.definition.outputs.push(
+    manifest.descriptor.description.execution =
+        Some(mf_telemetry::description::ExecutionDescription {
+            mode: mf_telemetry::description::ExecutionMode::Stream,
+        });
+    manifest.definition.outputs.push(
         serde_json::from_value(json!({"name":"answer","node":"start","port":"delta"})).unwrap(),
     );
     manifest
@@ -458,7 +468,7 @@ fn live_launch(directory: &Path, mode: &str) -> (ChatLaunch, std::path::PathBuf)
     let mut manifest = live_manifest();
     let gate = directory.join("release");
     let prefix = if mode == "gated_tool_call" {
-        let output = manifest.graph.definition.outputs.last_mut().unwrap();
+        let output = manifest.definition.outputs.last_mut().unwrap();
         output.name = "tool_call_delta".into();
         output.port = "tool_call_delta".into();
         json!({"tool_call_delta":{"arguments":"{\"query\":","model_call_id":"model-call","index":0}})
@@ -709,8 +719,8 @@ fn invalid_terminal_records_invalidate_native_recovery_instead_of_saving_first()
 fn preview_selections_require_native_streaming_execution() {
     for name in ["answer", "tool_call_delta"] {
         let mut manifest = live_manifest();
-        manifest.graph.definition.execution = None;
-        manifest.graph.definition.outputs.last_mut().unwrap().name = name.into();
+        manifest.descriptor.description.execution = None;
+        manifest.definition.outputs.last_mut().unwrap().name = name.into();
         assert!(ChatContract::from_manifest(&manifest).is_err());
     }
 }

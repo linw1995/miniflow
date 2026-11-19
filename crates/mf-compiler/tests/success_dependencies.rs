@@ -764,9 +764,10 @@ fn standalone_success_dependencies_match_memory_and_preserve_manifests() {
         })).unwrap();
         let plan = compile_definition(&graph, &registry).unwrap();
         if graph.nodes.iter().any(|node| node.id.as_str() == "peer") {
-            let artifacts = plan.generate_runner_execution_plans(&registry).unwrap();
-            let typed: mf_compiler::TypedPlan =
-                serde_json::from_str(&artifacts.typed_plan_json).unwrap();
+            let artifacts = plan
+                .generate_artifacts(&registry, Default::default())
+                .unwrap();
+            let typed = artifacts.typed_plan;
             assert!(typed.connections.iter().any(|edge| edge.source == "source"
                 && edge.target == "target"
                 && edge.fallback.is_none()));
@@ -837,7 +838,11 @@ fn standalone_success_dependencies_match_memory_and_preserve_manifests() {
                 .output()
                 .unwrap();
             assert!(!rejected.status.success());
-            assert!(String::from_utf8_lossy(&rejected.stderr).contains("ordinary Tasks"));
+            let diagnostic = String::from_utf8_lossy(&rejected.stderr);
+            assert!(
+                diagnostic.contains("success-dependency capability differs"),
+                "{diagnostic}"
+            );
             assert!(
                 !path.exists(),
                 "preparation must reject drift before any side effect"

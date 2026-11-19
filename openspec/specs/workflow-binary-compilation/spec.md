@@ -995,17 +995,18 @@ selected build options, successful elapsed time, and retained generated-project 
 - **WHEN** the user invokes `mf compile flow.json --output ./flow --verbose`
 - **THEN** stderr includes compilation options and a successful completion summary without changing build validation
 
-### Requirement: Persist only manifest source facts
+### Requirement: Separate definition resources from inspection projections
 
-Manifest `2026-10-16` SHALL store the compiled definition, root and nested Loop execution orders, and prepared input
-schema. It MUST NOT persist derived description, interface, or workflow ID properties. The input schema SHALL retain
-provider-declared types, bindings, and stdin constraints absent from definition JSON. Full static configuration is
-included; invocation values MUST NOT be materialized. Existing framing and size bounds SHALL remain in force.
+Manifest `2026-11-18` SHALL retain original definition resources and a public inspection descriptor containing
+observation descriptions, workflow identity, actual execution mode, and prepared startup inputs. It MUST NOT persist
+compiler graphs, execution relationships, scheduling layouts, or typed optimization evidence. Provider-declared types,
+bindings, and stdin constraints SHALL remain readable without invoking providers or executing the runner. Full static
+configuration is included; invocation values MUST NOT be materialized. Existing framing and size bounds remain in force.
 
 #### Scenario: Serialize a current manifest
 
 - **WHEN** the compiler serializes a manifest from one provider preparation
-- **THEN** the payload contains the source facts without duplicated graph, interface, or identity views
+- **THEN** original resources and the public inspection projection come from the same validated build, without serializing compiler IR
 
 #### Scenario: Preserve provider input facts
 
@@ -1016,7 +1017,7 @@ included; invocation values MUST NOT be materialized. Existing framing and size 
 
 Runtime helpers SHALL derive graph, interface, and identity views without replanning or invoking providers. They SHALL
 borrow nodes by exact root ID and expose definition and input schema directly. Readers SHALL accept only the current
-manifest layout. Invalid orders, inconsistent input contracts, missing facts, and unexpected derived properties MUST
+manifest layout. Invalid observation orders, inconsistent input contracts, missing facts, and unknown payload properties MUST
 fail validation.
 
 #### Scenario: Read original node configuration

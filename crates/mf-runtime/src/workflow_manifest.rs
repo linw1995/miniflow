@@ -22,16 +22,27 @@ pub const MAX_MANIFEST_SECTION_BYTES: usize =
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkflowManifestVersion {
-    #[serde(rename = "2026-11-06")]
-    V2026_11_06,
+    #[serde(rename = "2026-11-18")]
+    V2026_11_18,
+}
+
+/// Read-only public projection, independent of compiler IR and executable layouts.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerDescriptor {
+    pub description: WorkflowDescription,
+    pub input_schema: WorkflowInputSchema,
+    pub node_targets: Vec<crate::NodeTarget>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowManifest {
     pub version: WorkflowManifestVersion,
-    pub graph: CompiledGraph,
-    pub input_schema: WorkflowInputSchema,
+    pub definition: crate::WorkflowDefinition,
+    pub entry: String,
+    pub sources: BTreeMap<String, String>,
+    pub descriptor: RunnerDescriptor,
 }
 
 /// Failures describing authoritative compiled graph facts without preparing providers.
@@ -59,6 +70,8 @@ pub enum GraphDescriptionError {
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowManifestError {
+    #[snafu(display("invalid runner inspection projection: {message}"))]
+    Projection { message: &'static str },
     #[snafu(display("compiled workflow interface drift at `{path}`: {component} differs"))]
     InterfaceDrift {
         path: String,
@@ -79,21 +92,48 @@ pub enum WorkflowManifestError {
 }
 
 impl WorkflowManifest {
-    /// Borrows an original root node without preparing or executing its provider.
+    pub fn from_graph(
+        graph: &CompiledGraph,
+        input_schema: WorkflowInputSchema,
+    ) -> Result<Self, WorkflowManifestError> {
+        let manifest = Self {
+            version: WorkflowManifestVersion::V2026_11_18,
+            definition: graph.definition.clone(),
+            entry: "workflow.json".into(),
+            sources: [(
+                "workflow.json".into(),
+                serde_json::to_string(&graph.definition).context(JsonSnafu)?,
+            )]
+            .into(),
+            descriptor: RunnerDescriptor {
+                description: describe_graph(graph).context(GraphSnafu)?,
+                input_schema,
+                node_targets: Vec::new(),
+            },
+        };
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    /// Borrows a root node without preparing or executing its provider.
     pub fn node_definition(&self, id: &str) -> Option<&crate::NodeDefinition> {
-        self.graph
-            .definition
+        self.definition
             .nodes
             .iter()
             .find(|node| node.id.as_str() == id)
     }
 
     pub fn workflow_id(&self) -> Result<WorkflowId, WorkflowManifestError> {
-        self.graph.workflow_id().context(GraphSnafu)
+        Ok(self.descriptor.description.workflow_id.clone())
     }
 
     pub fn description(&self) -> Result<WorkflowDescription, WorkflowManifestError> {
-        describe_graph(&self.graph).context(GraphSnafu)
+        self.descriptor
+            .description
+            .validate()
+            .context(ObservationSnafu)
+            .context(GraphSnafu)?;
+        Ok(self.descriptor.description.clone())
     }
 
     pub fn interface(&self) -> Result<WorkflowInterface, WorkflowManifestError> {
@@ -106,10 +146,8 @@ impl WorkflowManifest {
     }
 
     fn interface_for(&self, description: &WorkflowDescription) -> WorkflowInterface {
-        let mut schema = self.input_schema.clone();
-        if !self.graph.definition.version.supports_startup_inputs()
-            && description.execution.is_some()
-        {
+        let mut schema = self.descriptor.input_schema.clone();
+        if !self.definition.version.supports_startup_inputs() && description.execution.is_some() {
             // A newer child can require a newer observation schema, whose interface
             // describes every initial node. Preserve the old root's startup policy:
             // these declarations expose no input ports, bindings, or stdin ownership.
@@ -148,7 +186,7 @@ impl WorkflowManifest {
         &self,
         actual: &WorkflowInputSchema,
     ) -> Result<(), WorkflowManifestError> {
-        let expected = &self.input_schema;
+        let expected = &self.descriptor.input_schema;
         for node in expected.inputs.keys().chain(actual.inputs.keys()) {
             let path = pointer("", node);
             let (Some(expected), Some(actual)) =
@@ -205,7 +243,59 @@ impl WorkflowManifest {
     }
 
     pub fn validate(&self) -> Result<(), WorkflowManifestError> {
+        serde_json::to_writer(std::io::sink(), &self.definition)
+            .context(DefinitionSnafu)
+            .context(GraphSnafu)?;
         let description = self.description()?;
+        let mut targets = BTreeSet::new();
+        for target in &self.descriptor.node_targets {
+            let node = description.nodes.iter().find(|node| node.id == target.id);
+            ensure!(
+                targets.insert(&target.id)
+                    && target.original_workflow_id == description.workflow_id
+                    && target.description.nodes.len() == 1
+                    && node == target.description.nodes.first(),
+                ProjectionSnafu {
+                    message: "node target identity differs from the workflow projection"
+                }
+            );
+            let identity = description
+                .workflow_id
+                .for_node_target(&target.id)
+                .context(ObservationSnafu)
+                .context(GraphSnafu)?;
+            ensure!(
+                target.description.workflow_id == identity,
+                ProjectionSnafu {
+                    message: "node target observation identity differs from its isolated identity"
+                }
+            );
+            target
+                .description
+                .validate()
+                .context(ObservationSnafu)
+                .context(GraphSnafu)?;
+            for (name, value_type) in target.context.iter().chain(
+                target
+                    .outputs
+                    .iter()
+                    .map(|(name, port)| (name, &port.value_type)),
+            ) {
+                value_type
+                    .check_depth()
+                    .context(crate::WorkflowInputTypeDepthSnafu {
+                        path: pointer(&pointer("/node_targets", &target.id), name),
+                    })
+                    .context(InterfaceSnafu)?;
+            }
+            WorkflowInterface {
+                version: crate::WorkflowInterfaceVersion::for_schema(&target.inputs),
+                workflow_id: identity,
+                schema: target.inputs.clone(),
+            }
+            .validate_for_description(&target.description)
+            .context(InterfaceSnafu)?;
+        }
         self.interface_for(&description)
             .validate_for_description(&description)
             .context(InterfaceSnafu)

@@ -149,19 +149,18 @@ fn selected_record(
     let target = std::env::var_os("MF_TEST_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| project.join("target"));
-    for entry in fs::read_dir(target.join("release/build")).unwrap() {
-        let path = entry.unwrap().path().join("out/node-targets.json");
-        if let Ok(bytes) = fs::read(path) {
-            let records: Vec<mf_runtime::NodeTarget> = serde_json::from_slice(&bytes).unwrap();
-            if let Some(record) = records
-                .into_iter()
-                .find(|record| record.id == id && record.original_workflow_id == *workflow)
-            {
-                return record;
-            }
-        }
-    }
-    panic!("selected target record was not emitted");
+    let executable = target.join(format!(
+        "release/mf-generated-workflow{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    let manifest = mf_tui::manifest::read_manifest(&executable).unwrap();
+    assert_eq!(manifest.workflow_id().unwrap(), *workflow);
+    manifest
+        .descriptor
+        .node_targets
+        .into_iter()
+        .find(|record| record.id == id)
+        .expect("selected target record was not embedded")
 }
 
 fn command(executable: &Path) -> Command {

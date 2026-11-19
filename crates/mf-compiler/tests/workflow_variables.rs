@@ -488,11 +488,8 @@ fn callable_and_loop_state_remain_isolated_from_parent_root_state() {
 fn compiled_relations_are_authoritative_and_reject_corrupt_state() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&parse(definition()), &registry).unwrap();
-    let encoded = plan.to_json().unwrap();
-    let restored = mf_compiler::CompiledWorkflow::from_json(&encoded).unwrap();
-    assert_eq!(plan, restored);
     for mutation in 0..7 {
-        let mut changed = restored.clone();
+        let mut changed = plan.clone();
         let root = changed.graph.relations.root.as_mut().unwrap();
         match mutation {
             0 => root.input = "missing".into(),
@@ -526,7 +523,7 @@ fn compiled_relations_are_authoritative_and_reject_corrupt_state() {
         );
     }
     for dependency in ["data", "control", "success"] {
-        let mut changed = restored.clone();
+        let mut changed = plan.clone();
         let definition = &mut changed.graph.definition;
         match dependency {
             "data" => definition.edges.push(mf_runtime::EdgeDefinition {
@@ -567,7 +564,7 @@ fn compiled_relations_are_authoritative_and_reject_corrupt_state() {
         );
     }
     // Assignment instructions remain relation-driven; the synthetic source keeps its identity.
-    let mut renamed = restored.clone();
+    let mut renamed = plan.clone();
     for node in &mut renamed.graph.definition.nodes {
         if node.id.as_str() != mf_runtime::ROOT_SOURCE_ID
             && renamed.graph.relations.instruction(&node.id).is_some()
@@ -582,7 +579,7 @@ fn compiled_relations_are_authoritative_and_reject_corrupt_state() {
         .unwrap();
     assert_eq!(outputs["count"], json!(7));
     // The canonical synthetic source is not interchangeable with an authored node.
-    let mut forged = restored;
+    let mut forged = plan;
     for node in &mut forged.graph.definition.nodes {
         if node.id.as_str() == mf_runtime::ROOT_SOURCE_ID {
             node.kind = "unregistered.provider".into();
@@ -665,14 +662,12 @@ fn generated_root_constructors_follow_compiled_relations_not_authored_config() {
             node.config = json!({"opaque":true});
         }
     }
-    let artifacts = plan.generate_artifacts().unwrap();
+    let artifacts = plan
+        .generate_artifacts(&registry, Default::default())
+        .unwrap();
     assert!(artifacts.rust_source.contains("prepared_root_source"));
     assert!(artifacts.rust_source.contains("prepared_root_assign"));
     assert!(artifacts.rust_source.contains(".with_root_scope("));
-    assert_eq!(
-        mf_compiler::CompiledWorkflow::from_json(&artifacts.plan_json).unwrap(),
-        plan
-    );
 }
 
 #[cfg(feature = "codegen")]

@@ -27,12 +27,24 @@ fn parameters(contract: &ChatContract) -> WorkflowArguments {
 }
 
 fn add_provider_input(manifest: &mut WorkflowManifest, name: &str) {
-    let mut node = manifest.graph.definition.nodes[0].clone();
+    let mut node = manifest.definition.nodes[0].clone();
     node.id = "provider".into();
-    manifest.graph.definition.nodes.push(node);
-    manifest.graph.execution_order.insert(0, "provider".into());
-    let port = manifest.input_schema.inputs["params"][name].clone();
+    manifest.definition.nodes.push(node);
     manifest
+        .descriptor
+        .description
+        .execution_order
+        .insert(0, "provider".into());
+    manifest.descriptor.description.nodes.insert(
+        0,
+        mf_telemetry::description::NodeDescription {
+            id: "provider".into(),
+            kind: manifest.definition.nodes.last().unwrap().kind.clone(),
+        },
+    );
+    let port = manifest.descriptor.input_schema.inputs["params"][name].clone();
+    manifest
+        .descriptor
         .input_schema
         .inputs
         .insert("provider".into(), [(name.into(), port)].into());
@@ -43,6 +55,7 @@ fn builtin_titles_reuse_unique_resolved_provider_inputs_and_preserve_secrets() {
     let mut manifest = manifest();
     add_provider_input(&mut manifest, "api_key");
     manifest
+        .descriptor
         .input_schema
         .inputs
         .get_mut("params")
@@ -77,6 +90,7 @@ fn builtin_titles_skip_missing_ambiguous_wrongly_typed_or_empty_provider_inputs(
             match variant {
                 "missing" => {
                     manifest
+                        .descriptor
                         .input_schema
                         .inputs
                         .get_mut("params")
@@ -88,6 +102,7 @@ fn builtin_titles_skip_missing_ambiguous_wrongly_typed_or_empty_provider_inputs(
                 }
                 "type" => {
                     let port = manifest
+                        .descriptor
                         .input_schema
                         .inputs
                         .get_mut("params")
@@ -132,7 +147,7 @@ fn builtin_titles_accept_an_explicit_empty_key_without_losing_its_secret_marker(
 #[test]
 fn a_separate_title_output_is_not_an_ownership_hint() {
     let mut manifest = manifest();
-    manifest.graph.definition.outputs.push(
+    manifest.definition.outputs.push(
         serde_json::from_value(json!({
             "name":"title", "node":"chat", "port":"text", "optional":true
         }))
@@ -209,7 +224,11 @@ fn conversation_inputs_are_bound_separately_from_parameters() {
         }],
     };
     let arguments = contract.arguments(input, &parameters).unwrap();
-    manifest.input_schema.validate(&arguments).unwrap();
+    manifest
+        .descriptor
+        .input_schema
+        .validate(&arguments)
+        .unwrap();
     assert_eq!(
         serde_json::to_value(&arguments).unwrap()["params.messages"],
         json!([{"role":"user","content":"hello"}])
@@ -235,12 +254,15 @@ fn conversation_inputs_are_bound_separately_from_parameters() {
 #[test]
 fn contract_accepts_multiple_models_and_arbitrary_output_sources() {
     let mut manifest = manifest();
-    let mut second = manifest.graph.definition.nodes[1].clone();
+    let mut second = manifest.definition.nodes[1].clone();
     second.id = "another-model".into();
-    manifest.graph.definition.nodes.push(second);
-    manifest.graph.execution_order.push("another-model".into());
+    manifest.definition.nodes.push(second);
+    manifest
+        .descriptor
+        .description
+        .execution_order
+        .push("another-model".into());
     for mut edge in manifest
-        .graph
         .definition
         .edges
         .clone()
@@ -248,19 +270,33 @@ fn contract_accepts_multiple_models_and_arbitrary_output_sources() {
         .filter(|edge| edge.to_node.as_str() == "chat")
     {
         edge.to_node = "another-model".into();
-        manifest.graph.definition.edges.push(edge);
+        manifest.definition.edges.push(edge);
     }
     manifest
-        .graph
         .definition
         .outputs
         .iter_mut()
         .find(|output| output.name == "append")
         .unwrap()
         .node = "another-model".into();
+    manifest.descriptor.description = mf_runtime::describe_graph(&mf_runtime::CompiledGraph {
+        definition: manifest.definition.clone(),
+        execution_order: manifest
+            .descriptor
+            .description
+            .execution_order
+            .iter()
+            .map(|id| id.as_str().into())
+            .collect(),
+        relations: Default::default(),
+        children: Default::default(),
+    })
+    .unwrap();
+    // This fixture varies the whole-flow contract, not isolated-node interfaces.
+    manifest.descriptor.node_targets.clear();
     ChatContract::from_manifest(&manifest).unwrap();
-    manifest.graph.definition.nodes[1].kind = "custom.generator".into();
-    manifest.graph.definition.nodes[1].config = json!({});
+    manifest.definition.nodes[1].kind = "custom.generator".into();
+    manifest.definition.nodes[1].config = json!({});
     ChatContract::from_manifest(&manifest).unwrap();
 }
 
@@ -269,6 +305,7 @@ fn preflight_checks_transport_and_external_ports() {
     let original = manifest();
     let mut wrong_type = original.clone();
     wrong_type
+        .descriptor
         .input_schema
         .inputs
         .get_mut("params")
@@ -278,44 +315,48 @@ fn preflight_checks_transport_and_external_ports() {
         .value_type = mf_runtime::ValueType::Boolean;
     let mut missing = original.clone();
     missing
+        .descriptor
         .input_schema
         .inputs
         .get_mut("params")
         .unwrap()
         .remove("messages");
     let mut ambiguous = original.clone();
-    let mut source = ambiguous.graph.definition.nodes[0].clone();
+    let mut source = ambiguous.definition.nodes[0].clone();
     source.id = "other".into();
-    ambiguous.graph.definition.nodes.push(source);
-    ambiguous.graph.execution_order.insert(0, "other".into());
-    ambiguous.input_schema.inputs.insert(
+    ambiguous.definition.nodes.push(source);
+    ambiguous.descriptor.input_schema.inputs.insert(
         "other".into(),
-        original.input_schema.inputs["params"].clone(),
+        original.descriptor.input_schema.inputs["params"].clone(),
     );
     let mut stdin = original.clone();
     stdin
+        .descriptor
         .input_schema
         .stdin
         .insert("params".into(), mf_runtime::StdinRequirement::Always);
     let mut streaming = original.clone();
-    streaming.graph.definition.execution = Some(serde_json::from_value(json!({})).unwrap());
+    streaming.descriptor.description.execution =
+        Some(mf_telemetry::description::ExecutionDescription {
+            mode: mf_telemetry::description::ExecutionMode::Stream,
+        });
     assert!(ChatContract::from_manifest(&streaming).unwrap().streaming);
     assert!(!ChatContract::from_manifest(&original).unwrap().streaming);
     for invalid in [wrong_type, missing, ambiguous, stdin] {
         assert!(ChatContract::from_manifest(&invalid).is_err());
     }
     let mut missing_result = original.clone();
-    missing_result.graph.definition.outputs.clear();
+    missing_result.definition.outputs.clear();
     assert!(ChatContract::from_manifest(&missing_result).is_err());
     let mut both = original;
-    both.graph.definition.outputs.push(
+    both.definition.outputs.push(
         serde_json::from_value(json!({
             "name":"replace_context", "node":"result", "port":"value", "optional":true
         }))
         .unwrap(),
     );
     assert!(ChatContract::from_manifest(&both).is_err());
-    both.graph.definition.outputs[0].optional = true;
+    both.definition.outputs[0].optional = true;
     assert_eq!(
         ChatContract::from_manifest(&both).unwrap().alternatives,
         mf_chat::ResultAlternatives::Both
@@ -577,7 +618,7 @@ fn application_context_is_bound_by_the_common_contract_and_optional_titles_are_p
             None,
         )
         .unwrap();
-    let mut definition = manifest().graph.definition;
+    let mut definition = manifest().definition;
     definition.nodes[0].config["parameters"]["context"] = json!({"type":"object"});
     let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
     let manifest = mf_compiler::compile_definition(&definition, &registry)
@@ -593,7 +634,11 @@ fn application_context_is_bound_by_the_common_contract_and_optional_titles_are_p
     let arguments = contract
         .arguments(started.request.clone(), &parameters(&contract))
         .unwrap();
-    manifest.input_schema.validate(&arguments).unwrap();
+    manifest
+        .descriptor
+        .input_schema
+        .validate(&arguments)
+        .unwrap();
     let context = serde_json::to_value(&arguments).unwrap()["params.context"].clone();
     assert_eq!(
         context["title"],

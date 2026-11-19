@@ -32,24 +32,22 @@ fn identity_definition() -> WorkflowDefinition {
 fn source_wires_private_fields_with_static_constructor_proofs() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&text_definition(), &registry).unwrap();
-    let artifacts = plan.generate_runner_execution_plans(&registry).unwrap();
-    let report: mf_compiler::TypedPlan = serde_json::from_str(&artifacts.typed_plan_json).unwrap();
+    let artifacts = plan
+        .generate_artifacts(&registry, Default::default())
+        .unwrap();
+    let report = artifacts.typed_plan;
     assert_eq!(report.segments[0].positions, [0, 1, 2]);
     let renamed = fixture::renamed(json!({})).unwrap().prepared();
     assert_eq!(renamed.metadata.ports.inputs[0].name, "other");
     let source = artifacts.rust_source;
     assert_eq!(source.matches("GeneratedNodeResult::encoded").count(), 1);
     assert_eq!(source.matches("decode_inputs").count(), 1);
-    assert!(
-        !plan
-            .generate_artifacts()
-            .unwrap()
-            .rust_source
-            .contains("mf_prepare_generated_workflow!(")
-    );
+    assert!(!source.contains("macro_rules!"));
     let builtins = compile_definition(&identity_definition(), &registry).unwrap();
-    let artifacts = builtins.generate_runner_execution_plans(&registry).unwrap();
-    let report: mf_compiler::TypedPlan = serde_json::from_str(&artifacts.typed_plan_json).unwrap();
+    let artifacts = builtins
+        .generate_artifacts(&registry, Default::default())
+        .unwrap();
+    let report = artifacts.typed_plan;
     assert_eq!(report.segments[0].positions, [0, 1, 2]);
     assert!(
         report
@@ -191,13 +189,10 @@ fn generated_owned_values_preserve_contracts_and_installation() {
                 json!({"a.input":shared})
             };
         let plan = compile_definition(&definition, &registry).unwrap();
-        let report: mf_compiler::TypedPlan = serde_json::from_str(
-            &plan
-                .generate_runner_execution_plans(&registry)
-                .unwrap()
-                .typed_plan_json,
-        )
-        .unwrap();
+        let report = plan
+            .generate_artifacts(&registry, Default::default())
+            .unwrap()
+            .typed_plan;
         assert_eq!(report.segments.is_empty(), refined);
         if refined {
             assert!(
@@ -251,13 +246,10 @@ fn generated_owned_values_preserve_contracts_and_installation() {
     ] {
         definition = next;
         let plan = compile_definition(&definition, &registry).unwrap();
-        let report: mf_compiler::TypedPlan = serde_json::from_str(
-            &plan
-                .generate_runner_execution_plans(&registry)
-                .unwrap()
-                .typed_plan_json,
-        )
-        .unwrap();
+        let report = plan
+            .generate_artifacts(&registry, Default::default())
+            .unwrap()
+            .typed_plan;
         if has_segment {
             assert!(!report.segments.is_empty());
         }

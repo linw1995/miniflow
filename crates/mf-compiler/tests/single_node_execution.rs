@@ -61,14 +61,38 @@ fn plan(value: Value, registry: &NodeRegistry) -> CompiledWorkflow {
     let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
     compile_definition(&definition, registry).unwrap()
 }
+fn index(plan: &CompiledWorkflow, id: &str) -> usize {
+    plan.graph
+        .execution_order
+        .iter()
+        .position(|node| node.as_str() == id)
+        .unwrap()
+}
+fn bind_flow<'a>(
+    plan: &CompiledWorkflow,
+    record: &'a NodeTarget,
+    flow: &'a mf_runtime::Flow,
+) -> mf_runtime::PreparedTaskTarget<'a> {
+    record.bind_flow(flow, index(plan, &record.id)).unwrap()
+}
+fn bind_stream<'a>(
+    plan: &CompiledWorkflow,
+    record: &'a NodeTarget,
+    stream: &'a mf_runtime::PreparedStream,
+) -> mf_runtime::PreparedTaskTarget<'a> {
+    record.bind_stream(stream, index(plan, &record.id)).unwrap()
+}
 fn targets(plan: &CompiledWorkflow, registry: &NodeRegistry) -> Vec<NodeTarget> {
-    serde_json::from_str(
-        &plan
-            .generate_execution_plans(registry)
-            .unwrap()
-            .node_targets_json,
+    plan.generate_artifacts(
+        registry,
+        mf_compiler::CodegenOptions {
+            preserve_intermediate_outputs: true,
+        },
     )
     .unwrap()
+    .manifest
+    .descriptor
+    .node_targets
 }
 fn args(value: Value) -> WorkflowArguments {
     WorkflowArguments::try_from(value).unwrap()
@@ -103,10 +127,8 @@ fn finite_selection_bypasses_edges_domain_executors_and_aliases() {
                 },
             ) as std::sync::Arc<mf_runtime::GeneratedDomainExecutor>,
         )]);
-    let target = NodeTarget::find(&records, "target")
-        .unwrap()
-        .bind_flow(&flow)
-        .unwrap();
+    let record = NodeTarget::find(&records, "target").unwrap();
+    let target = bind_flow(&plan, record, &flow);
     let runtime = FlowRuntime::default();
     for value in [21, 43] {
         let outputs = runtime
@@ -155,16 +177,14 @@ fn streaming_selection_invokes_no_source_or_neighbor() {
     producer.kind = mf_runtime::NodeTargetKind::Task;
     assert!(
         producer
-            .bind_stream(&stream)
+            .bind_stream(&stream, index(&plan, &producer.id))
             .err()
             .unwrap()
             .to_string()
             .contains("executor category")
     );
-    let target = NodeTarget::find(&records, "target")
-        .unwrap()
-        .bind_stream(&stream)
-        .unwrap();
+    let record = NodeTarget::find(&records, "target").unwrap();
+    let target = bind_stream(&plan, record, &stream);
     assert_eq!(
         json!(
             FlowRuntime::default()
@@ -191,10 +211,8 @@ fn routers_read_only_explicit_context_and_omit_skipped_outputs() {
     );
     let records = targets(&plan, &registry);
     let flow = instantiate_compiled(&plan, &registry).unwrap();
-    let target = NodeTarget::find(&records, "route")
-        .unwrap()
-        .bind_flow(&flow)
-        .unwrap();
+    let record = NodeTarget::find(&records, "route").unwrap();
+    let target = bind_flow(&plan, record, &flow);
     for (value, expected) in [(1, json!({"yes":true})), (-1, json!({"else":true}))] {
         assert_eq!(
             json!(
@@ -238,10 +256,8 @@ fn selected_loops_keep_pass_and_stop_rules() {
         let records = targets(&plan, &registry);
         let flow = instantiate_compiled(&plan, &registry).unwrap();
         assert_eq!(json!(flow.execute().unwrap()), json!({"count":expected}));
-        let target = NodeTarget::find(&records, "repeat")
-            .unwrap()
-            .bind_flow(&flow)
-            .unwrap();
+        let record = NodeTarget::find(&records, "repeat").unwrap();
+        let target = bind_flow(&plan, record, &flow);
         let outputs = FlowRuntime::default()
             .execute_target(
                 &target,
@@ -313,10 +329,8 @@ fn selected_parallel_iteration_keeps_order_worker_bounds_and_error_policy() {
         );
         let records = targets(&plan, &registry);
         let flow = instantiate_compiled(&plan, &registry).unwrap();
-        let target = NodeTarget::find(&records, "iteration")
-            .unwrap()
-            .bind_flow(&flow)
-            .unwrap();
+        let record = NodeTarget::find(&records, "iteration").unwrap();
+        let target = bind_flow(&plan, record, &flow);
         let runtime = FlowRuntime::new(mf_runtime::RuntimeOptions {
             max_parallel_domains: std::num::NonZeroUsize::new(2).unwrap(),
         });
@@ -396,10 +410,8 @@ fn selected_resource_validation_uses_only_target_requirements() {
     );
     let records = targets(&plan, &registry);
     let flow = instantiate_compiled(&plan, &registry).unwrap();
-    let target = NodeTarget::find(&records, "read")
-        .unwrap()
-        .bind_flow(&flow)
-        .unwrap();
+    let record = NodeTarget::find(&records, "read").unwrap();
+    let target = bind_flow(&plan, record, &flow);
     let runtime = FlowRuntime::default();
     assert!(
         runtime
@@ -517,10 +529,8 @@ fn isolated_results_preserve_null_skips_empty_maps_and_transactional_publication
         );
         let records = targets(&plan, &registry);
         let flow = instantiate_compiled(&plan, &registry).unwrap();
-        let target = NodeTarget::find(&records, "result")
-            .unwrap()
-            .bind_flow(&flow)
-            .unwrap();
+        let record = NodeTarget::find(&records, "result").unwrap();
+        let target = bind_flow(&plan, record, &flow);
         assert_eq!(
             json!(
                 FlowRuntime::default()
@@ -571,7 +581,7 @@ fn isolated_identity_counts_spans_and_snapshots_follow_the_selected_task() {
             record.description.workflow_id,
             records
                 .iter()
-                .find(|target| target.id == "after")
+                .find(|node| node.id == "after")
                 .unwrap()
                 .description
                 .workflow_id
@@ -593,7 +603,7 @@ fn isolated_identity_counts_spans_and_snapshots_follow_the_selected_task() {
                     let input = args(json!({"target.input":value}));
                     if stream {
                         let prepared = mf_compiler::instantiate_stream(&plan, &registry)?;
-                        let target = record.bind_stream(&prepared)?;
+                        let target = record.bind_stream(&prepared, index(&plan, &record.id))?;
                         Ok(FlowRuntime::default().execute_target_in_context(
                             &target,
                             state,
@@ -602,7 +612,7 @@ fn isolated_identity_counts_spans_and_snapshots_follow_the_selected_task() {
                         )?)
                     } else {
                         let flow = instantiate_compiled(&plan, &registry)?;
-                        let target = record.bind_flow(&flow)?;
+                        let target = bind_flow(&plan, record, &flow);
                         Ok(FlowRuntime::default().execute_target_in_context(
                             &target,
                             state,
@@ -673,7 +683,7 @@ fn isolated_input_and_preparation_failures_emit_no_target_start() {
                     return Err(std::io::Error::other("unrelated factory unavailable").into());
                 }
                 let flow = instantiate_compiled(&plan, &registry)?;
-                let target = record.bind_flow(&flow)?;
+                let target = bind_flow(&plan, record, &flow);
                 FlowRuntime::default().execute_target_in_context(
                     &target,
                     state,
@@ -706,7 +716,16 @@ fn selected_loop_observation_counts_real_body_steps_without_neighbors() {
         .start_observation(&harness.observer(), mf_telemetry::identity::RunId::new())
         .unwrap();
     let flow = instantiate_compiled(&plan, &registry).unwrap();
-    let target = record.bind_flow(&flow).unwrap();
+    let target = record
+        .bind_flow(
+            &flow,
+            plan.graph
+                .execution_order
+                .iter()
+                .position(|id| id.as_str() == record.id)
+                .unwrap(),
+        )
+        .unwrap();
     FlowRuntime::default()
         .execute_target_with_observation(
             &target,
@@ -738,9 +757,18 @@ fn selected_metadata_excludes_values_and_snapshot_sink_failures_preserve_results
     ], "edges":[{"from_node":"source", "from_output":"value", "to_node":"copy", "to_input":"input"}]}),
         &registry,
     );
-    let artifacts = plan.generate_execution_plans(&registry).unwrap();
-    assert!(!artifacts.node_targets_json.contains("private-build-value"));
-    let records: Vec<NodeTarget> = serde_json::from_str(&artifacts.node_targets_json).unwrap();
+    let artifacts = plan
+        .generate_artifacts(
+            &registry,
+            mf_compiler::CodegenOptions {
+                preserve_intermediate_outputs: true,
+            },
+        )
+        .unwrap();
+    let manifest = artifacts.manifest.clone();
+    let metadata = serde_json::to_string(&manifest.descriptor.node_targets).unwrap();
+    assert!(!metadata.contains("private-build-value"));
+    let records: Vec<NodeTarget> = artifacts.manifest.descriptor.node_targets.clone();
     let record = NodeTarget::find(&records, "copy").unwrap();
     let harness = capture::Harness::new(true);
     let observation = record
@@ -755,7 +783,16 @@ fn selected_metadata_excludes_values_and_snapshot_sink_failures_preserve_results
     })
     .unwrap();
     let flow = instantiate_compiled(&plan, &registry).unwrap();
-    let target = record.bind_flow(&flow).unwrap();
+    let target = record
+        .bind_flow(
+            &flow,
+            plan.graph
+                .execution_order
+                .iter()
+                .position(|id| id.as_str() == record.id)
+                .unwrap(),
+        )
+        .unwrap();
     let result = mf_runtime::ExecutionContext::run(Some(observation), |state| {
         state.set_snapshot_recorder(snapshots.recorder());
         FlowRuntime::default().execute_target_in_context(
@@ -807,7 +844,16 @@ fn selected_stream_iteration_keeps_the_original_worker_ceiling() {
     let record = NodeTarget::find(&records, "iteration").unwrap();
     assert_eq!(record.worker_limit.unwrap().get(), 1);
     let stream = mf_compiler::instantiate_stream(&plan, &registry).unwrap();
-    let target = record.bind_stream(&stream).unwrap();
+    let target = record
+        .bind_stream(
+            &stream,
+            plan.graph
+                .execution_order
+                .iter()
+                .position(|id| id.as_str() == record.id)
+                .unwrap(),
+        )
+        .unwrap();
     let runtime = FlowRuntime::new(mf_runtime::RuntimeOptions {
         max_parallel_domains: std::num::NonZeroUsize::new(2).unwrap(),
     });
@@ -827,7 +873,7 @@ fn selected_stream_iteration_keeps_the_original_worker_ceiling() {
     changed.worker_limit = std::num::NonZeroUsize::new(2);
     assert!(
         changed
-            .bind_stream(&stream)
+            .bind_stream(&stream, index(&plan, &changed.id))
             .err()
             .unwrap()
             .to_string()

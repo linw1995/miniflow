@@ -137,7 +137,7 @@ impl RunnerInvocation<'_> {
         if let Some(error) = cancellation.failure() {
             return Err(error.into());
         }
-        let schema = &self.runner.manifest.input_schema;
+        let schema = &self.runner.manifest.descriptor.input_schema;
         let arguments = mf_runtime::resolve_workflow_inputs(schema, self.arguments, |name| {
             std::env::var_os(name)
         })?;

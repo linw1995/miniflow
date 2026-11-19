@@ -1,13 +1,11 @@
 use crate::{
     DefinitionId, EdgeDefinition, FlowConnection, FlowDependency, FlowNode, FlowOutput,
-    LoopVariableDefinition, NodeBuildError, NodeRegistry, ValueType, WorkflowOutputDefinition,
-    output_id,
+    NodeBuildError, NodeRegistry, WorkflowOutputDefinition, output_id,
 };
 use mf_runtime::{
     ExecutionDomain, ExecutionDomains, NodeExecution, NodeId, StdinRequirement, WorkflowInput,
     WorkflowInputError,
 };
-use serde_json::Value;
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
     borrow::Cow,
@@ -463,6 +461,10 @@ impl FlowBuilder {
         &self.input_schema
     }
 
+    pub fn nodes(&self) -> &[crate::FlowNode] {
+        &self.nodes
+    }
+
     /// Validates graph structure while retaining ownership of each prepared execution kind.
     pub fn prepare(
         nodes: Vec<FlowNode>,
@@ -850,30 +852,12 @@ pub enum WorkflowBuildError {
         kind: String,
     },
     #[snafu(
-        display("could not read embedded config for node `{definition_id}`: {source}"),
-        visibility(pub)
-    )]
-    InvalidEmbeddedConfig {
-        source: serde_json::Error,
-        definition_id: DefinitionId,
-    },
-    #[snafu(
         display("could not construct node `{definition_id}`: {source}"),
         visibility(pub)
     )]
     NodeConstruction {
         source: NodeBuildError,
         definition_id: DefinitionId,
-    },
-    #[snafu(display("invalid scope variables for node `{definition_id}`: {source}"))]
-    ScopeVariables {
-        definition_id: DefinitionId,
-        source: mf_runtime::LoopVariableError,
-    },
-    #[snafu(display("invalid scope variable descriptor for node `{definition_id}`: {source}"))]
-    ScopeVariableDescriptor {
-        definition_id: DefinitionId,
-        source: mf_runtime::TypeDescriptorError,
     },
     #[snafu(
         display("invalid definition for node `{definition_id}`: {message}"),
@@ -1021,137 +1005,6 @@ pub fn validate_scope_bindings<'a>(
     Ok(())
 }
 
-/// Validate the receiving registration and the compiled binding set before children
-/// are constructed. Configuration outside its declarations remains opaque.
-pub fn validate_node_flow_parameters(
-    registry: &NodeRegistry,
-    definition_id: &str,
-    kind: &str,
-    config_json: &str,
-    expected: &[&str],
-) -> Result<(), WorkflowBuildError> {
-    validated_node_config(registry, definition_id, kind, config_json, expected)?;
-    Ok(())
-}
-
-fn validated_node_config(
-    registry: &NodeRegistry,
-    definition_id: &str,
-    kind: &str,
-    config_json: &str,
-    expected: &[&str],
-) -> Result<(&'static mf_runtime::NodeRegistration, Value), WorkflowBuildError> {
-    let registration = registry.get(kind).with_context(|| UnknownKindSnafu {
-        definition_id: DefinitionId::from(definition_id),
-        kind: kind.to_owned(),
-    })?;
-    let node = crate::NodeDefinition {
-        id: definition_id.into(),
-        kind: kind.into(),
-        config: serde_json::from_str(config_json).context(InvalidEmbeddedConfigSnafu {
-            definition_id: DefinitionId::from(definition_id),
-        })?,
-    };
-    let fields = registration.compiled_bindings(&node.config);
-    ensure!(
-        fields
-            .iter()
-            .map(String::as_str)
-            .eq(expected.iter().copied()),
-        InvalidDefinitionSnafu {
-            definition_id: DefinitionId::from(definition_id),
-            message: "receiving Flow parameter declarations differ from the compiled binding set",
-        }
-    );
-    Ok((registration, node.config))
-}
-
-pub fn instantiate_node_with_metadata(
-    registry: &NodeRegistry,
-    definition_id: &str,
-    kind: &str,
-    config_json: &str,
-) -> Result<crate::FlowNode, WorkflowBuildError> {
-    let (registration, config) =
-        validated_node_config(registry, definition_id, kind, config_json, &[])?;
-    let node = registration
-        .instantiate(config)
-        .context(NodeConstructionSnafu {
-            definition_id: DefinitionId::from(definition_id),
-        })?;
-    Ok(crate::FlowNode::new(definition_id, node))
-}
-
-pub fn instantiate_subgraphs_with_metadata(
-    registry: &NodeRegistry,
-    definition_id: &str,
-    kind: &str,
-    config_json: &str,
-    arguments: BTreeMap<String, mf_runtime::PreparedSubgraph>,
-) -> Result<crate::FlowNode, WorkflowBuildError> {
-    let registration = registry.get(kind).with_context(|| UnknownKindSnafu {
-        definition_id: DefinitionId::from(definition_id),
-        kind: kind.to_owned(),
-    })?;
-    let config = serde_json::from_str(config_json).context(InvalidEmbeddedConfigSnafu {
-        definition_id: DefinitionId::from(definition_id),
-    })?;
-    let prepared = registration
-        .instantiate_subgraphs(definition_id, config, arguments)
-        .context(NodeConstructionSnafu {
-            definition_id: DefinitionId::from(definition_id),
-        })?;
-    Ok(crate::FlowNode::new(definition_id, prepared))
-}
-
-pub fn prepared_scope_source_from_json(
-    id: &str,
-    types_json: &str,
-) -> Result<FlowNode, WorkflowBuildError> {
-    let types: BTreeMap<String, ValueType> = serde_json::from_str(types_json)
-        .context(InvalidEmbeddedConfigSnafu { definition_id: id })?;
-    Ok(mf_runtime::prepared_scope_source(id, &types))
-}
-
-pub fn prepared_loop_source_from_json(
-    variables_json: &str,
-) -> Result<FlowNode, WorkflowBuildError> {
-    let variables: Vec<LoopVariableDefinition> =
-        serde_json::from_str(variables_json).context(InvalidEmbeddedConfigSnafu {
-            definition_id: crate::LOOP_SOURCE_ID,
-        })?;
-    let types = mf_runtime::loop_variable_types(&variables).context(ScopeVariablesSnafu {
-        definition_id: crate::LOOP_SOURCE_ID,
-    })?;
-    Ok(mf_runtime::prepared_loop_source_types(&types))
-}
-
-pub fn prepared_router_assign_from_json(
-    id: &str,
-    router: &str,
-    routes_json: &str,
-    enables_json: &str,
-) -> Result<FlowNode, WorkflowBuildError> {
-    let routes: Vec<String> = serde_json::from_str(routes_json)
-        .context(InvalidEmbeddedConfigSnafu { definition_id: id })?;
-    let enables: Vec<String> = serde_json::from_str(enables_json)
-        .context(InvalidEmbeddedConfigSnafu { definition_id: id })?;
-    Ok(mf_runtime::prepared_router_assign(
-        id, router, routes, enables,
-    ))
-}
-
-pub fn prepared_loop_assign_from_json(
-    id: &str,
-    variable: &str,
-    type_json: &str,
-) -> Result<FlowNode, WorkflowBuildError> {
-    let descriptor: Value = serde_json::from_str(type_json)
-        .context(InvalidEmbeddedConfigSnafu { definition_id: id })?;
-    let value_type = ValueType::parse_descriptor(&descriptor)
-        .context(ScopeVariableDescriptorSnafu { definition_id: id })?;
-    Ok(mf_runtime::prepared_loop_assign(id, variable, value_type))
-}
 #[derive(Debug, Snafu)]
 pub enum StreamBuildError {
     #[snafu(transparent)]
@@ -1817,36 +1670,6 @@ pub fn stream_workflow_inputs(
     )
 }
 
-pub fn bind_workflow_inputs(
-    flow: mf_runtime::Flow,
-    initial: &[bool],
-) -> Result<mf_runtime::Flow, WorkflowInputError> {
-    let order = flow.execution_order();
-    let dependencies = &flow.plan().dependencies;
-    let schema = workflow_input_schema(
-        flow.nodes().iter().enumerate().map(|(index, node)| {
-            (
-                node,
-                initial[order
-                    .iter()
-                    .position(|id| id.index() == index)
-                    .expect("ordered node")],
-            )
-        }),
-        |node, input| {
-            order
-                .iter()
-                .position(|id| flow.nodes()[id.index()].definition_id.as_str() == node)
-                .is_some_and(|position| {
-                    dependencies[position]
-                        .iter()
-                        .any(|dependency| dependency.input.as_deref() == Some(input))
-                })
-        },
-    )?;
-    Ok(flow.with_input_schema(schema))
-}
-
 pub fn validate_stream_limits(limits: &crate::StreamLimits) -> Result<(), StreamBuildError> {
     ensure!(
         ![limits.max_pending_messages, limits.workers].contains(&0),
@@ -1933,19 +1756,19 @@ pub fn prepare_stream(
 mod tests {
     #[test]
     fn router_assignment_constructor_parses_generated_bindings() {
-        let node = super::prepared_router_assign_from_json(
+        let node = mf_runtime::prepared_router_assign(
             "write",
             "choose",
-            r#"["first","second"]"#,
-            r#"["first"]"#,
-        )
-        .unwrap();
+            vec!["first".into(), "second".into()],
+            vec!["first".into()],
+        );
         assert_eq!(node.definition_id.as_str(), "write");
         assert_eq!(node.metadata.ports.inputs[0].name, "value");
     }
 
     use super::*;
     use crate::NodeExecutionError;
+    use mf_runtime::ValueType;
     use mf_runtime::{FlowOutputs, Inputs, Outputs, RuntimeOptions, TaskNode};
     use serde_json::json;
     use std::num::NonZeroUsize;
@@ -2019,13 +1842,9 @@ mod tests {
     }
 
     #[test]
-    fn scope_source_json_preserves_named_values_and_adds_implicit_index() {
+    fn scope_source_preserves_named_values_and_adds_implicit_index() {
         let types = BTreeMap::from([("item".to_owned(), ValueType::String)]);
-        let source = prepared_scope_source_from_json(
-            "custom-input",
-            &serde_json::to_string(&types).unwrap(),
-        )
-        .unwrap();
+        let source = mf_runtime::prepared_scope_source("custom-input", &types);
         assert_eq!(source.definition_id.as_str(), "custom-input");
         assert!(source.metadata.ports.inputs.is_empty());
         assert_eq!(source.metadata.ports.outputs.len(), 2);
@@ -2045,22 +1864,6 @@ mod tests {
                 .iter()
                 .any(|port| port.name == "index")
         );
-    }
-
-    #[test]
-    fn scope_source_json_preserves_parse_error_source() {
-        let error = prepared_scope_source_from_json("custom-input", "[]")
-            .err()
-            .unwrap();
-        let WorkflowBuildError::InvalidEmbeddedConfig {
-            definition_id,
-            source,
-        } = error
-        else {
-            panic!("expected the embedded configuration error");
-        };
-        assert_eq!(definition_id.as_str(), "custom-input");
-        assert!(source.is_data());
     }
 
     struct EmptyNode;

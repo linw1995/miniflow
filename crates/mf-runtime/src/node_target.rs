@@ -15,9 +15,9 @@ pub enum NodeTargetKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NodeTarget {
     pub id: String,
-    pub index: usize,
     pub kind: NodeTargetKind,
     #[serde(default)]
     pub worker_limit: Option<std::num::NonZeroUsize>,
@@ -44,7 +44,7 @@ pub enum NodeTargetError {
         key: String,
         source: crate::TypeMismatch,
     },
-    #[snafu(display("unknown top-level node target `{id}`"))]
+    #[snafu(display("unknown top-level node target `{id}`"), visibility(pub))]
     Unknown { id: String },
     #[snafu(display(
         "node target `{id}` is {kind:?}; isolated execution supports only top-level Tasks"
@@ -189,15 +189,6 @@ impl NodeTarget {
         Ok(())
     }
 
-    pub fn find<'a>(targets: &'a [Self], id: &str) -> Result<&'a Self, NodeTargetError> {
-        let target = targets
-            .iter()
-            .find(|target| target.id == id)
-            .context(UnknownSnafu { id })?;
-        target.require_task()?;
-        Ok(target)
-    }
-
     fn require_task(&self) -> Result<(), NodeTargetError> {
         ensure!(
             self.kind == NodeTargetKind::Task,
@@ -207,6 +198,17 @@ impl NodeTarget {
             }
         );
         Ok(())
+    }
+}
+
+impl NodeTarget {
+    pub fn find<'a>(targets: &'a [Self], id: &str) -> Result<&'a Self, NodeTargetError> {
+        let target = targets
+            .iter()
+            .find(|target| target.id == id)
+            .context(UnknownSnafu { id })?;
+        target.require_task()?;
+        Ok(target)
     }
 
     fn validate_metadata(&self, id: &str, metadata: &NodeMetadata) -> Result<(), NodeTargetError> {
@@ -304,8 +306,9 @@ impl NodeTarget {
     pub fn bind_flow<'a>(
         &'a self,
         flow: &'a Flow,
+        index: usize,
     ) -> Result<PreparedTaskTarget<'a>, NodeTargetError> {
-        let node = flow.nodes().get(self.index).context(DriftSnafu {
+        let node = flow.nodes().get(index).context(DriftSnafu {
             id: &self.id,
             component: "node index",
         })?;
@@ -321,6 +324,7 @@ impl NodeTarget {
     pub fn bind_stream<'a>(
         &'a self,
         stream: &'a PreparedStream,
+        index: usize,
     ) -> Result<PreparedTaskTarget<'a>, NodeTargetError> {
         ensure!(
             self.worker_limit.map(std::num::NonZeroUsize::get)
@@ -331,13 +335,13 @@ impl NodeTarget {
             }
         );
         let nodes = stream.plan().nodes();
-        let node = nodes.get(self.index).context(DriftSnafu {
+        let node = nodes.get(index).context(DriftSnafu {
             id: &self.id,
             component: "node index",
         })?;
         self.bind(
             node,
-            stream.task_node(self.index),
+            stream.task_node(index),
             nodes
                 .iter()
                 .map(|node| (node.definition_id.as_str(), &node.metadata)),

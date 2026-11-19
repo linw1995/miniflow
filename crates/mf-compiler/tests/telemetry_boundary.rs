@@ -77,7 +77,6 @@ fn generated_runner_exports_otel_without_terminal_dependencies() {
     )
     .unwrap();
     let lean = dependency_names(&lean_project);
-    assert!(lean.contains("mf-compiler"));
     for name in [
         "prettyplease",
         "opentelemetry_sdk",
@@ -88,6 +87,7 @@ fn generated_runner_exports_otel_without_terminal_dependencies() {
         assert!(!lean.contains(name), "lean runner contains {name}");
     }
     for name in [
+        "mf-compiler",
         "mf-tui",
         "ratatui",
         "ratatui-core",
@@ -97,7 +97,7 @@ fn generated_runner_exports_otel_without_terminal_dependencies() {
         "process-wrap",
     ] {
         assert!(
-            !minimal.contains(name) && !exporting.contains(name),
+            !minimal.contains(name) && !exporting.contains(name) && !lean.contains(name),
             "runner contains {name}"
         );
     }

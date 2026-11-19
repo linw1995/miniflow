@@ -147,6 +147,14 @@ pub struct SubgraphInputMetadata {
     pub flows: Vec<SubgraphFlowInputMetadata>,
 }
 
+/// Compiler-frozen callable interface, independent of executor initialization.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SubgraphInterface {
+    pub outputs: Vec<PortSpec>,
+    pub stream_outputs: Vec<PortSpec>,
+    pub input_metadata: SubgraphInputMetadata,
+}
+
 impl SubgraphInputMetadata {
     /// Partitions a prepared Flow without changing its flat runtime input binding.
     pub fn from_flow(flow: &Flow) -> Self {
@@ -353,17 +361,29 @@ impl PreparedSubgraph {
                 )
             })
             .collect();
-        let inputs = flow.input_schema().clone();
         let input_metadata = SubgraphInputMetadata::from_flow(&flow);
         let stream_outputs = flow.stream_output_ports();
+        Self::from_plan(
+            flow,
+            nodes,
+            SubgraphInterface {
+                outputs,
+                stream_outputs,
+                input_metadata,
+            },
+        )
+    }
+
+    /// Binds a compiler-validated interface without partitioning or inspecting the graph.
+    pub fn from_plan(flow: Flow, nodes: Vec<NodeIdentity>, interface: SubgraphInterface) -> Self {
         Self {
             nodes,
             origin: None,
-            inputs,
-            outputs,
-            stream_outputs,
+            inputs: flow.input_schema().clone(),
+            outputs: interface.outputs,
+            stream_outputs: interface.stream_outputs,
             relations: None,
-            input_metadata,
+            input_metadata: interface.input_metadata,
             body: PreparedSubgraphBody::Flow(flow),
         }
     }

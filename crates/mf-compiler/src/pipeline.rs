@@ -1,6 +1,5 @@
 use crate::{
-    BuildGuard, BuildInputs, RunnerOptions, SupportPackages, atomic_copy,
-    validate_runtime_identity, write_dependency_project_with_options,
+    BuildGuard, BuildInputs, RunnerOptions, SupportPackages, atomic_copy, validate_runtime_identity,
 };
 use snafu::{IntoError, ResultExt, Snafu};
 use std::{
@@ -98,10 +97,67 @@ pub fn compile_project_with_options(
             "created"
         }
     );
+    let mut resource_root = inputs
+        .definition
+        .parent()
+        .expect("root definition has a parent");
+    while !resolved
+        .sources
+        .iter()
+        .all(|source| source.starts_with(resource_root))
+    {
+        resource_root = resource_root.parent().ok_or_else(|| {
+            failure(
+                "definition resource identity",
+                &inputs.definition,
+                "definition resources must share a filesystem root",
+            )
+        })?;
+    }
+    let resource_name = |path: &Path| {
+        let components = path
+            .strip_prefix(resource_root)
+            .expect("checked resource root")
+            .components()
+            .map(|part| part.as_os_str().to_str())
+            .collect::<Option<Vec<_>>>();
+        at(
+            "definition resource identity",
+            path,
+            components.map(|parts| parts.join("/")).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "definition resource paths must be UTF-8",
+                )
+            }),
+        )
+    };
+    let mut resources = BTreeMap::new();
+    for path in &resolved.sources {
+        resources.insert(
+            resource_name(path)?,
+            at(
+                "definition resource capture",
+                path,
+                fs::read_to_string(path),
+            )?,
+        );
+    }
+    let resources = at(
+        "definition resource encoding",
+        &inputs.definition,
+        serde_json::to_string(&(resource_name(&inputs.definition)?, resources)),
+    )?;
     at(
         "project generation",
         &project,
-        write_dependency_project_with_options(&project, &plan, request.support, options),
+        crate::dependency_project::write_dependency_project_with_resources(
+            &project,
+            &plan,
+            request.support,
+            options,
+            &resources,
+        ),
     )?;
     let metadata = resolve_project(&project, &inputs.lock, request.locked)?;
     at(

@@ -55,10 +55,17 @@ fn target_records_reuse_preparation_and_bind_original_contracts() {
     let plan = compile_definition(&definition(), &registry).unwrap();
     CONSTRUCTIONS.store(0, Ordering::SeqCst);
     EXECUTIONS.store(0, Ordering::SeqCst);
-    let artifacts = plan.generate_execution_plans(&registry).unwrap();
+    let artifacts = plan
+        .generate_artifacts(
+            &registry,
+            mf_compiler::CodegenOptions {
+                preserve_intermediate_outputs: true,
+            },
+        )
+        .unwrap();
     assert_eq!(CONSTRUCTIONS.load(Ordering::SeqCst), 1);
     assert_eq!(EXECUTIONS.load(Ordering::SeqCst), 0);
-    let targets: Vec<NodeTarget> = serde_json::from_str(&artifacts.node_targets_json).unwrap();
+    let targets: Vec<NodeTarget> = artifacts.manifest.descriptor.node_targets.clone();
     assert_eq!(
         targets
             .iter()
@@ -76,7 +83,15 @@ fn target_records_reuse_preparation_and_bind_original_contracts() {
         mf_runtime::ValueType::Int64
     );
     let flow = instantiate_compiled(&plan, &registry).unwrap();
-    assert_eq!(copy.bind_flow(&flow).unwrap().contract(), copy);
+    let index = |id: &str| {
+        flow.nodes()
+            .iter()
+            .position(|node| node.definition_id.as_str() == id)
+            .unwrap()
+    };
+    let copy_index = index("copy");
+    let route_index = index("route");
+    assert_eq!(copy.bind_flow(&flow, copy_index).unwrap().contract(), copy);
     assert_eq!(
         NodeTarget::find(&targets, "route").unwrap().context["source.value"],
         mf_runtime::ValueType::Int64
@@ -111,7 +126,7 @@ fn target_records_reuse_preparation_and_bind_original_contracts() {
             .collect();
         let changed =
             mf_runtime::Flow::from_plan(nodes, flow.plan().clone(), flow.input_schema().clone());
-        let error = copy.bind_flow(&changed).err().unwrap();
+        let error = copy.bind_flow(&changed, copy_index).err().unwrap();
         assert!(error.to_string().contains("copy") && error.to_string().contains("drift"));
     }
 
@@ -122,7 +137,7 @@ fn target_records_reuse_preparation_and_bind_original_contracts() {
         .insert("source.value".into(), mf_runtime::ValueType::String);
     assert!(
         altered_reference
-            .bind_flow(&flow)
+            .bind_flow(&flow, route_index)
             .err()
             .unwrap()
             .to_string()
@@ -146,7 +161,7 @@ fn target_records_reuse_preparation_and_bind_original_contracts() {
         .collect();
     let reworded =
         mf_runtime::Flow::from_plan(nodes, flow.plan().clone(), flow.input_schema().clone());
-    assert!(route.bind_flow(&reworded).is_ok());
+    assert!(route.bind_flow(&reworded, route_index).is_ok());
 
     let mut unavailable = plan.clone();
     unavailable

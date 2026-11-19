@@ -13,6 +13,7 @@ mod flow_properties;
 mod flow_value;
 #[cfg(feature = "async")]
 mod future_execution;
+pub mod generated;
 mod iteration;
 mod loop_node;
 mod node;
@@ -97,19 +98,20 @@ pub use node::{
     BusinessFailedSnafu as NodeBusinessFailedSnafu, ContextReference,
     ExecutionFailedSnafu as NodeExecutionFailedSnafu, FactoryFailedSnafu as NodeFactoryFailedSnafu,
     Inputs, InvalidSubgraphSnafu as NodeInvalidSubgraphSnafu, NodeBuildError, NodeConfig,
-    NodeExecution, NodeExecutionError, NodeFactory, NodeMetadata, NodePortContract, NodePorts,
-    NodeRegistration, NodeValue, NodeValues, OutputDerivation, OutputDerivationError, Outputs,
-    PluginFailedSnafu as NodePluginFailedSnafu, PortSpec, PreparedNode, SubgraphScope, TaskNode,
-    TypeCompatibility, TypeDepthError, TypeDescriptorError, TypeMismatch, TypeMismatchDetails,
-    TypedTaskNode, ValueType, deserialize_config, encode_typed_result, execute_typed_task,
-    output_id, port_names_match, verify_generated_metadata,
+    NodeContract, NodeExecution, NodeExecutionError, NodeFactory, NodeMetadata, NodePortContract,
+    NodePorts, NodeRegistration, NodeValue, NodeValues, OutputDerivation, OutputDerivationError,
+    Outputs, PluginFailedSnafu as NodePluginFailedSnafu, PortSpec, PreparedNode, SubgraphScope,
+    TaskNode, TypeCompatibility, TypeDepthError, TypeDescriptorError, TypeMismatch,
+    TypeMismatchDetails, TypedTaskNode, ValueType, deserialize_config, encode_typed_result,
+    execute_typed_task, output_id, port_names_match, verify_generated_metadata,
 };
 pub use node::{
     TypedConstructor, TypedGeneration, TypedGenerationError, TypedNodeValue, TypedPort,
     TypedTaskHandle,
 };
 pub use node_target::{
-    NodeTarget, NodeTargetError, NodeTargetKind, PreparedTaskTarget, target_ports,
+    NodeTarget, NodeTargetError, NodeTargetKind, PreparedTaskTarget,
+    UnknownSnafu as NodeTargetUnknownSnafu, target_ports,
 };
 pub use number::{compare_json_numbers, number_to_f64, number_to_i64, number_to_u64};
 pub use registry::{
@@ -117,6 +119,8 @@ pub use registry::{
     NodeRegistryError, RegisteredFlow,
 };
 pub use runner::{NodeExecutionSnafu, SuccessDependencySnafu, WorkflowRunError};
+#[doc(hidden)]
+pub use serde_json as __serde_json;
 pub use stream::{
     BatchInfo, EventContext, EventEffects, EventEmission, EventNode, FlushReason, NodeEvent,
     StreamExecution, StreamLimits, StreamNode, TimerUpdate, TypedEventNode, TypedStreamNode,
@@ -134,8 +138,8 @@ pub use stream_plan::{
     StreamOutputSelector, StreamPlan, StreamProgram,
 };
 pub use subgraph::{
-    PreparedSubgraph, SubgraphFlowInputMetadata, SubgraphInputMetadata, SubgraphNode,
-    SubgraphOrigin, SubgraphStream, SubgraphStreamOutput, SubgraphStreamSender,
+    PreparedSubgraph, SubgraphFlowInputMetadata, SubgraphInputMetadata, SubgraphInterface,
+    SubgraphNode, SubgraphOrigin, SubgraphStream, SubgraphStreamOutput, SubgraphStreamSender,
 };
 pub use task_stream::{
     DiscardSink, EmissionSink, Emitter, TaskStreamExecutor, TaskStreamNode, TypedEmitter,
@@ -183,6 +187,6 @@ pub use workflow_inputs::{
 pub use workflow_manifest::{
     GraphDescriptionError, MANIFEST_FRAMING_VERSION, MANIFEST_HEADER_BYTES, MANIFEST_MAGIC,
     MAX_MANIFEST_PADDING_BYTES, MAX_MANIFEST_PAYLOAD_BYTES, MAX_MANIFEST_SECTION_BYTES,
-    ObservationSnafu as GraphObservationSnafu, WorkflowManifest, WorkflowManifestError,
-    WorkflowManifestVersion, describe_graph,
+    ObservationSnafu as GraphObservationSnafu, RunnerDescriptor, WorkflowManifest,
+    WorkflowManifestError, WorkflowManifestVersion, describe_graph,
 };

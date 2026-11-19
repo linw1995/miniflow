@@ -6,20 +6,7 @@ use std::{
 };
 
 const OWNER: &str = ".mf-owner.json";
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-enum BuildLayoutVersion {
-    #[serde(rename = "2026-09-26")]
-    V2026_09_26,
-    #[serde(rename = "2026-10-07")]
-    V2026_10_07,
-    #[serde(rename = "2026-10-16")]
-    V2026_10_16,
-}
-
-impl BuildLayoutVersion {
-    const CURRENT: Self = Self::V2026_10_16;
-}
+const BUILD_LAYOUT_VERSION: &str = "2026-11-18";
 
 #[derive(Debug, Snafu)]
 pub enum CacheError {
@@ -52,7 +39,7 @@ pub enum CacheError {
 struct Owner {
     definition: PathBuf,
     cli_version: String,
-    layout_version: BuildLayoutVersion,
+    layout_version: String,
 }
 
 pub struct BuildDirectory {
@@ -70,10 +57,7 @@ pub fn default_build_directory(cache_root: &Path, definition: &Path) -> PathBuf 
         .iter()
         .copied()
         .chain(env!("CARGO_PKG_VERSION").bytes())
-        .chain(
-            serde_json::to_vec(&BuildLayoutVersion::CURRENT)
-                .expect("layout version serializes to JSON"),
-        )
+        .chain(BUILD_LAYOUT_VERSION.bytes())
     {
         hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
     }
@@ -142,7 +126,7 @@ impl BuildDirectory {
         let expected = Owner {
             definition: definition.to_owned(),
             cli_version: env!("CARGO_PKG_VERSION").into(),
-            layout_version: BuildLayoutVersion::CURRENT,
+            layout_version: BUILD_LAYOUT_VERSION.into(),
         };
         let marker = path.join(OWNER);
         let reused = match fs::read(&marker) {

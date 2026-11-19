@@ -504,18 +504,13 @@ fn generated_tasks_share_startup_binding_and_validation() {
         &RunnerOptions { telemetry: false },
     )
     .unwrap();
-    fs::write(
-        project.join("src/workflow.rs"),
-        plan.generate_artifacts().unwrap().rust_source,
-    )
-    .unwrap();
     fs::write(project.join("src/main.rs"), r#"extern crate node_0 as _;
 mod workflow;
 fn main() {
     let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
     let arguments = mf_runtime::WorkflowArguments::from_json(std::env::args().nth(1).unwrap().as_bytes()).unwrap();
     let flow = workflow::prepare_workflow(&registry, None).unwrap();
-    match workflow::run_workflow_with_inputs(&flow, arguments) {
+    match flow.execute_with_inputs(arguments) {
         Ok(outputs) => println!("{}", serde_json::to_string(&outputs).unwrap()),
         Err(error) => { eprintln!("{error}"); std::process::exit(1); }
     }

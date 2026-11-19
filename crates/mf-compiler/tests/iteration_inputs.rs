@@ -72,8 +72,6 @@ fn compiled_iterations_share_strings_native_flows_and_secret_objects_without_cop
             let definition: WorkflowDefinition =
                 serde_json::from_value(definition(mode, port)).unwrap();
             let plan = compile_definition(&definition, &registry).unwrap();
-            // Reloading a compiled plan must retain the configured scope types.
-            let plan = mf_compiler::CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
             let flow = instantiate_compiled(&plan, &registry).unwrap();
             let outputs = flow.execute_with_inputs(arguments()).unwrap();
             let results = outputs["results"].as_array().unwrap();

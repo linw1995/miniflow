@@ -42,7 +42,7 @@ pub trait ConversationBackend: Send + Sync {
     }
 
     /// Exposes an executable Flow's interface for host registration through `workflow.call`.
-    /// Its node providers remain in the executable; `invoke` implements the call body.
+    /// `invoke` implements the call body; the host does not plan the executable's sources.
     fn registered_workflow(&self) -> Option<(&mf_runtime::WorkflowManifest, &WorkflowArguments)> {
         None
     }
@@ -97,7 +97,8 @@ impl WorkflowProfile {
         parameters: WorkflowArguments,
     ) -> Result<Self, ChatError> {
         let contract = ChatContract::from_manifest(&plan.manifest(registry)?)?;
-        let (nodes, _) = mf_compiler::prepare_definition(&plan.graph.definition, registry)?;
+        let (nodes, _) =
+            mf_compiler::prepare_compiled_graph_with_layouts(&plan.graph, registry, None)?;
         for output in plan
             .graph
             .definition
@@ -1083,12 +1084,12 @@ fn register_runner(
         .registered_workflow()
         .expect("executable Flow interface");
     let contract = ChatContract::from_manifest(manifest)?;
-    let definition = manifest.graph.definition.clone();
-    let inputs = manifest.input_schema.clone();
+    let inputs = manifest.descriptor.input_schema.clone();
     let outputs: Vec<_> = ConversationResult::ports()
         .into_iter()
         .filter_map(|mut port| {
-            let output = definition
+            let output = manifest
+                .definition
                 .outputs
                 .iter()
                 .find(|output| output.name == port.name)?;
@@ -1150,6 +1151,12 @@ fn register_runner(
                 })
         })
         .with_input_schema(inputs);
+    // Only the call boundary belongs to the host graph. The executable owns its
+    // internal nodes and observation, and its authored sources are not a plan.
+    let definition = serde_json::from_value(serde_json::json!({
+        "version": "2026-10-28", "nodes": []
+    }))
+    .context(JsonSnafu)?;
     registry.register_flow(RUNNER_FLOW, definition, body)?;
     Ok(())
 }
@@ -1164,10 +1171,10 @@ fn compose_conversation(
     registry: &NodeRegistry,
 ) -> Result<ConversationPlan, ChatError> {
     let contract = ChatContract::from_manifest(manifest)?;
-    let call = if registry.flow(RUNNER_FLOW).is_some() {
-        compile_call_wrapper(&manifest.graph.definition, RUNNER_FLOW, registry)?
+    let call = if let Some(runner) = registry.flow(RUNNER_FLOW) {
+        compile_call_wrapper(&runner.definition, RUNNER_FLOW, registry)?
     } else {
-        compile_call(&manifest.graph.definition, registry)?.context(InvalidSnafu {
+        compile_call(&manifest.definition, registry)?.context(InvalidSnafu {
             field: "embedded workflow",
             reason: "requires a finite Flow without internal stream dataflow",
         })?
@@ -1704,7 +1711,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            !serde_json::to_string(&composed.plan)
+            !serde_json::to_string(&composed.plan.graph.definition)
                 .unwrap()
                 .contains("private-credential")
         );

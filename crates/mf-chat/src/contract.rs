@@ -161,16 +161,17 @@ impl ChatContract {
     pub fn from_manifest(manifest: &WorkflowManifest) -> Result<Self, ChatError> {
         manifest.validate()?;
         ensure!(
-            manifest.input_schema.stdin.is_empty(),
+            manifest.descriptor.input_schema.stdin.is_empty(),
             InvalidSnafu {
                 field: "chat executable",
                 reason: "requires workflow execution without stdin"
             }
         );
-        let mut configuration = manifest.input_schema.clone();
+        let mut configuration = manifest.descriptor.input_schema.clone();
         let mut inputs = BTreeMap::new();
         for expected in crate::ConversationInputs::ports() {
             let candidates: Vec<_> = manifest
+                .descriptor
                 .input_schema
                 .inputs
                 .iter()
@@ -204,7 +205,7 @@ impl ChatContract {
                 );
             }
         }
-        let outputs = &manifest.graph.definition.outputs;
+        let outputs = &manifest.definition.outputs;
         let append = outputs.iter().find(|output| output.name == "append");
         let replace = outputs
             .iter()

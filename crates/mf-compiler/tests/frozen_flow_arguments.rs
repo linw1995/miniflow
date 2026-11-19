@@ -174,8 +174,10 @@ fn mixed_version_child_iterations_retain_body_paths_for_static_and_mapped_calls(
     assert_iteration_paths(plan.manifest(&registry).unwrap().description().unwrap());
     #[cfg(feature = "codegen")]
     {
-        let generated = plan.generate_runner_execution_plans(&registry).unwrap();
-        let manifest = mf_runtime::WorkflowManifest::from_bytes(&generated.manifest_bytes).unwrap();
+        let generated = plan
+            .generate_artifacts(&registry, Default::default())
+            .unwrap();
+        let manifest = generated.manifest;
         assert_iteration_paths(manifest.description().unwrap());
     }
     // Historical projection omits this Iteration body, but its actual compiled
@@ -265,7 +267,7 @@ fn old_root_preserves_new_child_features_in_every_observation_projection() {
             assert_eq!(body.clusters[0].nodes, ["before", "value"]);
         }
         let manifest = plan.manifest(&registry).unwrap();
-        assert_eq!(manifest.graph.definition.version, root.version);
+        assert_eq!(manifest.definition.version, root.version);
         assert_eq!(manifest.description().unwrap(), graph);
         let harness = capture::Harness::new(true);
         let observation = plan
@@ -287,10 +289,16 @@ fn old_root_preserves_new_child_features_in_every_observation_projection() {
         }
         #[cfg(feature = "codegen")]
         {
-            let generated = plan.generate_execution_plans(&registry).unwrap();
-            let embedded =
-                mf_runtime::WorkflowManifest::from_bytes(&generated.manifest_bytes).unwrap();
-            assert_eq!(embedded.graph.definition.version, root.version);
+            let generated = plan
+                .generate_artifacts(
+                    &registry,
+                    mf_compiler::CodegenOptions {
+                        preserve_intermediate_outputs: true,
+                    },
+                )
+                .unwrap();
+            let embedded = generated.manifest;
+            assert_eq!(embedded.definition.version, root.version);
             assert_eq!(embedded.description().unwrap(), graph);
         }
     }

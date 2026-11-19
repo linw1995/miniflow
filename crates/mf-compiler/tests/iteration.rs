@@ -8,10 +8,10 @@ extern crate mfn_code as _;
 extern crate mfn_core as _;
 
 use mf_compiler::{
-    CompileRequest, Inputs, NodeBuildError, NodeExecutionError, NodeRegistration, NodeRegistry,
-    Outputs, PortSpec, ScopeStructureError, SupportPackages, TaskNode, ValueType,
-    WorkflowCompileError, WorkflowDefinition, compile_definition, compile_project,
-    execute_compiled, instantiate_compiled, plan_definition,
+    CompileRequest, Inputs, NodeBuildError, NodeExecutionError, NodeRegistration, Outputs,
+    PortSpec, ScopeStructureError, SupportPackages, TaskNode, ValueType, WorkflowCompileError,
+    WorkflowDefinition, compile_definition, compile_project, execute_compiled,
+    instantiate_compiled, plan_definition,
 };
 use mf_telemetry::identity::RunId;
 use opentelemetry::trace::TraceContextExt;
@@ -116,7 +116,7 @@ fn definition(items: Value, mode: &str, on_error: &str) -> Value {
 
 fn execute(value: Value) -> Result<Value, String> {
     let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
-    let registry = NodeRegistry::from_inventory().unwrap();
+    let registry = mf_compiler::NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).map_err(|error| error.to_string())?;
     instantiate_compiled(&plan, &registry)
         .unwrap()
@@ -293,7 +293,7 @@ fn iteration_rejects_invalid_body_structure_and_result_ports() {
     let mut invalid = definition(json!([1]), "sequential", "terminate");
     invalid["nodes"][1]["config"]["body"]["outputs"][0]["port"] = json!("missing");
     let definition: WorkflowDefinition = serde_json::from_value(invalid).unwrap();
-    let registry = NodeRegistry::from_inventory().unwrap();
+    let registry = mf_compiler::NodeRegistry::from_inventory().unwrap();
     let error = compile_definition(&definition, &registry).unwrap_err();
     assert!(
         matches!(&error, WorkflowCompileError::ChildGraph { definition_id, source }
@@ -307,7 +307,7 @@ fn iteration_rejects_invalid_body_structure_and_result_ports() {
 
 #[test]
 fn iteration_rejects_legacy_item_references_for_all_definition_versions() {
-    let registry = NodeRegistry::from_inventory().unwrap();
+    let registry = mf_compiler::NodeRegistry::from_inventory().unwrap();
     for version in ["2026-09-26", "2026-09-29", "2026-10-02"] {
         let mut value = definition(json!([1]), "sequential", "terminate");
         value["version"] = json!(version);
@@ -358,18 +358,12 @@ fn iteration_body_order_is_canonical_in_the_compiled_plan() {
         .as_array_mut()
         .unwrap()
         .reverse();
-    let registry = NodeRegistry::from_inventory().unwrap();
+    let registry = mf_compiler::NodeRegistry::from_inventory().unwrap();
     let first: WorkflowDefinition = serde_json::from_value(first).unwrap();
     let reordered: WorkflowDefinition = serde_json::from_value(reordered).unwrap();
     assert_eq!(
-        compile_definition(&first, &registry)
-            .unwrap()
-            .to_json()
-            .unwrap(),
-        compile_definition(&reordered, &registry)
-            .unwrap()
-            .to_json()
-            .unwrap()
+        compile_definition(&first, &registry).unwrap(),
+        compile_definition(&reordered, &registry).unwrap()
     );
 }
 
@@ -381,7 +375,7 @@ fn parallel_iteration_reports_correlated_item_and_body_node_activity() {
         "continue_on_error",
     ))
     .unwrap();
-    let registry = NodeRegistry::from_inventory().unwrap();
+    let registry = mf_compiler::NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
     let harness = capture::Harness::new(true);
     let observation = plan
@@ -543,7 +537,7 @@ fn body_plugins_inherit_the_correlated_node_span() {
         "outputs": [{"name":"result", "node":"probe","port":"span"}]
     });
     let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
-    let registry = NodeRegistry::from_inventory().unwrap();
+    let registry = mf_compiler::NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
     let harness = capture::Harness::new(true);
     let observation = plan
@@ -571,7 +565,7 @@ fn body_plugins_inherit_the_correlated_node_span() {
 fn item_and_body_logs_remain_live_when_traces_are_unsampled() {
     let definition: WorkflowDefinition =
         serde_json::from_value(definition(json!([1, 0]), "parallel", "continue_on_error")).unwrap();
-    let registry = NodeRegistry::from_inventory().unwrap();
+    let registry = mf_compiler::NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
     let harness = capture::Harness::new(false);
     let observation = plan
@@ -636,7 +630,7 @@ fn skipped_body_nodes_report_their_item_and_dependency() {
         "outputs": [{"name":"result", "node":"copy","port":"value"}]
     });
     let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
-    let registry = NodeRegistry::from_inventory().unwrap();
+    let registry = mf_compiler::NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
     let harness = capture::Harness::new(true);
     let observation = plan
@@ -658,15 +652,6 @@ fn skipped_body_nodes_report_their_item_and_dependency() {
 }
 
 fn assert_generated_observation(project: &Path, scratch: &Path) {
-    let plan = mf_compiler::CompiledWorkflow::from_json(
-        &fs::read_to_string(project.join("workflow-plan.json")).unwrap(),
-    )
-    .unwrap();
-    fs::write(
-        project.join("src/workflow.rs"),
-        plan.generate_artifacts().unwrap().rust_source,
-    )
-    .unwrap();
     let manifest = fs::read_to_string(project.join("Cargo.toml")).unwrap();
     fs::write(
         project.join("Cargo.toml"),
@@ -689,12 +674,12 @@ mod workflow;
 mod observation_capture;
 
 fn main() {
-    let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json")).unwrap();
+    let manifest = mf_runtime::WorkflowManifest::from_bytes(include_bytes!(concat!(env!("OUT_DIR"), "/workflow-manifest.bin"))).unwrap();
     let harness = observation_capture::Harness::new(true);
-    let observation = plan.start_observation(&harness.observer(), mf_telemetry::identity::RunId::new()).unwrap();
+    let observation = harness.observer().start_with_description(manifest.description().unwrap(), mf_telemetry::identity::RunId::new()).unwrap();
     let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
     let flow = workflow::prepare_workflow(&registry, None).unwrap();
-    let result = workflow::run_workflow_with_observation(&flow, Some(observation)).unwrap();
+    let result = flow.execute_with_observation(Some(observation)).unwrap();
     let records = harness.records();
     let nested: Vec<_> = records.iter().filter(|record| record.scope == "mf.iteration").collect();
     let spans = harness.spans.get_finished_spans().unwrap();
@@ -909,7 +894,7 @@ fn loop_and_iteration_share_a_workflow_in_memory_and_generated_runners() {
     assert_eq!(execute(nested.clone()).unwrap(), nested_expected);
 
     let definition: WorkflowDefinition = serde_json::from_value(nested.clone()).unwrap();
-    let registry = NodeRegistry::from_inventory().unwrap();
+    let registry = mf_compiler::NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
     let harness = capture::Harness::new(true);
     let observation = plan
@@ -1005,7 +990,7 @@ fn snapshots_retain_every_iteration_item_in_sequential_and_parallel_runs() {
         let definition: WorkflowDefinition =
             serde_json::from_value(definition(json!([1, 0, 3]), mode, "continue_on_error"))
                 .unwrap();
-        let registry = NodeRegistry::from_inventory().unwrap();
+        let registry = mf_compiler::NodeRegistry::from_inventory().unwrap();
         let plan = compile_definition(&definition, &registry).unwrap();
         let flow = instantiate_compiled(&plan, &registry).unwrap();
         let recorder = Snapshots::memory();

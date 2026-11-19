@@ -31,19 +31,9 @@ fn references_normalize_before_every_compiler_entry() {
     let result = mf_compiler::execute_compiled(&prepared, &registry, None).unwrap();
     assert_eq!(serde_json::to_value(result).unwrap(), json!({"result":42}));
     assert_eq!(definition, original);
-    let encoded = serde_json::to_value(&prepared).unwrap();
-    assert!(
-        encoded["graph"]["definition"]
-            .get("control_edges")
-            .is_none()
-    );
-    assert!(
-        encoded["graph"]["definition"]["nodes"][1]
-            .get("inputs")
-            .is_some()
-    );
-    let decoded: mf_compiler::CompiledWorkflow = serde_json::from_value(encoded).unwrap();
-    assert_eq!(decoded, prepared);
+    let encoded = serde_json::to_value(&prepared.graph.definition).unwrap();
+    assert!(encoded.get("control_edges").is_none());
+    assert!(encoded["nodes"][1].get("inputs").is_some());
 }
 
 #[test]
@@ -226,8 +216,10 @@ fn redundant_success_prerequisites_do_not_consume_typed_payloads() {
     })).unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
-    let artifacts = plan.generate_runner_execution_plans(&registry).unwrap();
-    let report: mf_compiler::TypedPlan = serde_json::from_str(&artifacts.typed_plan_json).unwrap();
+    let artifacts = plan
+        .generate_artifacts(&registry, Default::default())
+        .unwrap();
+    let report = artifacts.typed_plan;
     assert!(
         report.connections.iter().any(|edge| edge.source == "source"
             && edge.target == "target"

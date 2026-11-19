@@ -66,24 +66,29 @@ A constant such as `[1, "x"]` connected to a `List(Int64)` input fails build val
 branch. No validation process is launched after compilation.
 
 The generated executable embeds the graph metadata and node configuration. Node configuration is emitted as Rust string
-literals in the generated workflow source. Normal execution resolves type metadata along fixed bindings, then uses
-generated node calls and prints selected outputs as JSON. It does not require the definition, lock, plugin sources, or
+literals in the generated workflow source. Normal execution checks provider declarations, attaches compiler-proved
+output types, binds fixed plans, and uses generated node calls to print selected outputs as JSON. It does not require the definition, lock, plugin sources, or
 Cargo at runtime. The embedded manifest contains a date-versioned JSON graph record with workflow identity,
 node IDs/kinds, named data/control edges, and execution order. Loop-capable runners use description version
 `2026-09-29` and also describe each nested body's path and local graph. The record excludes configuration and business
 values. Edge names identify connected ports; the complete list of dynamic or unconnected ports is unavailable in this record.
 
 The generated Cargo build prepares the selected providers once to produce immutable execution layouts and a versioned
-workflow manifest containing the original definition, frozen execution orders, and prepared input schema. Both artifacts use the same validated preparation,
+workflow manifest containing original definition resources and a read-only inspection descriptor. The descriptor contains
+the actual observation graph, workflow identity, execution mode, and prepared input schema, not compiler IR or execution layouts.
+Both artifacts use the same validated preparation,
 including configured input types and conditional stdin requirements. The manifest is generated before linking during
 the existing runner build; it does not require a second compilation. Its wire format is documented in
-[observability](observability.md#embedded-manifest-format). The generated-project layout version is `2026-10-16`;
+[observability](observability.md#embedded-manifest-format). The generated-project layout version is `2026-11-18`;
 explicit build directories owned by an older layout must be recreated at a compatible location.
 The runner links the manifest into a dedicated ELF or Mach-O section and needs no manifest sidecar after installation.
-Runtime helpers derive graph and interface views; generated runners use them directly for observation and inspection.
+Runtime helpers read graph and interface views from the descriptor; generated runners use them for observation and inspection.
 TUI preflight reads the section directly without constructing providers. Missing or corrupt manifests and unsupported
 executable formats are rejected without launching an inspection process; older runners must be recompiled.
-Normal execution compares freshly prepared startup declarations with the manifest before dispatch.
+The standalone runner has no normal dependency on `mf-compiler`. Startup does not parse a compiled graph, infer types,
+partition execution domains, or derive child interfaces. Generated Rust contains the fixed layouts, contracts, and typed
+fast paths; providers are initialized once and checked structurally against their build-time declarations.
+Normal execution compares freshly prepared startup declarations with the inspection descriptor before dispatch.
 Changes to input identities, types, required flags, or stdin conditions fail with node/port/resource context.
 Runtime initialization failures and interface drift are reported at startup, before business execution or source consumption.
 
@@ -154,7 +159,7 @@ See [DeepSeek web search and fetch](workflows.md#deepseek-web-search-and-fetch).
 
 ## Build failures
 
-Diagnostics identify the failed stage: input parsing, graph validation, dependency resolution, runtime compatibility, compilation, lock persistence, or installation. Cargo diagnostics remain visible. Failures after project creation report its retained location for inspection, including `Cargo.toml`, `workflow-plan.json`, generated source, and build artifacts.
+Diagnostics identify the failed stage: input parsing, graph validation, dependency resolution, runtime compatibility, compilation, lock persistence, or installation. Cargo diagnostics remain visible. Failures after project creation report its retained location for inspection, including `Cargo.toml`, the build-only `workflow-plan.rs`, captured definition resources, generated source, and build artifacts.
 
 A failed build never replaces an existing executable. If editing a constant introduces a known type
 conflict, build validation reports the source and target ports, their types, and a nested JSON
@@ -308,11 +313,11 @@ the normal schema and graph rules.
 
 ## Execute an isolated task
 
-The generated build emits `node-targets.json` alongside execution layouts, using the same validated
-provider preparation. Each target retains its compiled index, resolved port types, external context
-references, stdin conditions, and a finite operation description. `NodeTarget::bind_flow` and
-`NodeTarget::bind_stream` bind a top-level task to that frozen contract and reject contract drift before
-business execution. Inference still follows the original graph, including forwarding output types.
+The embedded inspection descriptor includes `node_targets` from the same validated provider preparation.
+Each public target describes resolved port types, external context references, stdin conditions, and a finite operation.
+Generated Rust maps target IDs to fixed node indices; those indices are not serialized or exposed by inspection.
+`NodeTarget::bind_flow` and `NodeTarget::bind_stream` bind a top-level task to that frozen contract and reject
+contract drift before business execution. Type inference follows the original graph at build time, including forwarding output types.
 
 Isolated task support reuses whole-plan preparation. An unrelated provider factory can still fail during
 initialization and prevent selection from running; preparation does not call business methods or consume

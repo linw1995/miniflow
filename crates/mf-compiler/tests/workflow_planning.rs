@@ -87,7 +87,12 @@ fn domain_snapshots_include_all_ancestor_ports_but_exclude_siblings() {
     #[cfg(feature = "codegen")]
     {
         let generated = compiled
-            .generate_execution_plans(&registry)
+            .generate_artifacts(
+                &registry,
+                mf_compiler::CodegenOptions {
+                    preserve_intermediate_outputs: true,
+                },
+            )
             .unwrap()
             .rust_source;
         assert!(generated.contains("OutputVisibility::Borrowed"));

@@ -81,65 +81,57 @@ fn generates_layouts_and_configured_interfaces_from_one_preparation() {
         let definition = WorkflowDefinition::from_json(&definition.to_string()).unwrap();
         let plan = plan_definition(&definition).unwrap();
         let before = PREPARATIONS.load(Ordering::SeqCst);
-        let artifacts = plan.generate_execution_plans(&registry).unwrap();
+        let artifacts = plan
+            .generate_artifacts(&registry, Default::default())
+            .unwrap();
         assert_eq!(PREPARATIONS.load(Ordering::SeqCst), before + 1);
         syn::parse_file(&artifacts.rust_source).unwrap();
-        let manifest = WorkflowManifest::from_bytes(&artifacts.manifest_bytes).unwrap();
+        let manifest = &artifacts.manifest;
+        assert_eq!(
+            WorkflowManifest::from_bytes(&manifest.to_bytes().unwrap()).unwrap(),
+            *manifest
+        );
         let before = PREPARATIONS.load(Ordering::SeqCst);
-        assert_eq!(plan.manifest(&registry).unwrap(), manifest);
+        assert_eq!(plan.manifest(&registry).unwrap(), *manifest);
         assert_eq!(PREPARATIONS.load(Ordering::SeqCst), before + 1);
         let mut expected = plan.graph.definition.clone();
         expected.execution = stream.then(mf_runtime::StreamExecution::default);
-        assert_eq!(manifest.graph.definition, expected);
+        assert_eq!(manifest.definition, expected);
         assert_eq!(
             manifest.node_definition("source./~").unwrap().config,
             plan.graph.definition.nodes[0].config
         );
         assert_eq!(manifest.description().unwrap().is_streaming(), stream);
         assert_eq!(
-            manifest.input_schema,
+            manifest.descriptor.input_schema,
             describe_workflow_inputs(&plan, &registry).unwrap()
         );
         if version == "2026-10-03" {
             assert_eq!(
-                manifest.input_schema.inputs["source./~"]["path./~"].value_type,
+                manifest.descriptor.input_schema.inputs["source./~"]["path./~"].value_type,
                 ValueType::String
             );
             assert_eq!(
-                manifest.input_schema.stdin["source./~"],
+                manifest.descriptor.input_schema.stdin["source./~"],
                 StdinRequirement::UnlessInput("path./~".into())
             );
         } else {
-            assert_eq!(manifest.input_schema, Default::default());
+            assert_eq!(manifest.descriptor.input_schema, Default::default());
         }
-        let repeated = plan.generate_execution_plans(&registry).unwrap();
+        let repeated = plan
+            .generate_artifacts(&registry, Default::default())
+            .unwrap();
         assert_eq!(artifacts, repeated);
-
-        let before = PREPARATIONS.load(Ordering::SeqCst);
-        let embedded = plan.generate_embedded_artifacts().unwrap();
-        assert_eq!(PREPARATIONS.load(Ordering::SeqCst), before);
-        let syntax = syn::parse_file(&embedded.rust_source).unwrap();
-        let functions: Vec<_> = syntax
-            .items
-            .iter()
-            .filter_map(|item| {
-                if let syn::Item::Fn(function) = item {
-                    Some(function.sig.ident.to_string())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        assert_eq!(
-            functions,
-            ["plan", "manifest", "prepare_stream", "prepare_workflow"]
-        );
-        assert!(embedded.rust_source.contains("instantiate_stream"));
-        assert!(
-            embedded
-                .rust_source
-                .contains("instantiate_compiled_with_observation")
-        );
-        assert_eq!(embedded.plan_json, plan.to_json().unwrap());
+        for source in [&artifacts.rust_source] {
+            syn::parse_file(source).unwrap();
+            for forbidden in [
+                "mf_compiler",
+                "TypeInferenceState",
+                "CompiledGraph",
+                "workflow_input_schema",
+            ] {
+                assert!(!source.contains(forbidden), "{forbidden}: {source}");
+            }
+        }
     }
 }

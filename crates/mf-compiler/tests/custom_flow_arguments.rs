@@ -278,21 +278,19 @@ fn external_registration_supports_both_plain_and_prepared_factories() {
 fn generated_constructor_preserves_the_custom_kind_and_local_binding_bodies() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition(caller()), &registry).unwrap();
-    let generated = plan.generate_artifacts().unwrap();
+    let generated = plan
+        .generate_artifacts(&registry, Default::default())
+        .unwrap();
     syn::parse_file(&generated.rust_source).unwrap();
-    assert!(
-        generated
-            .rust_source
-            .contains("instantiate_subgraphs_with_metadata")
-    );
     assert!(generated.rust_source.contains(KIND));
-    assert!(
+    assert_eq!(
         generated
             .rust_source
-            .contains("PreparedSubgraph::from_flow")
+            .matches("PreparedSubgraph::from_plan")
+            .count(),
+        2
     );
-    let execution = plan.generate_execution_plans(&registry).unwrap();
-    let manifest = mf_runtime::WorkflowManifest::from_bytes(&execution.manifest_bytes).unwrap();
+    let manifest = generated.manifest;
     let custom = manifest.node_definition("custom").unwrap();
     assert_eq!(custom.kind, KIND);
     assert_eq!(custom.config, plan.graph.definition.nodes[1].config);
@@ -492,22 +490,20 @@ fn ambient_registry_alias_cannot_capture_a_direct_parameter() {
 
 #[test]
 fn generated_flow_argument_constructor_reports_missing_provider_and_invalid_config() {
-    use mf_compiler::{WorkflowBuildError, instantiate_subgraphs_with_metadata};
-
     let registry = NodeRegistry::from_inventory().unwrap();
     let construct = |kind, config| {
-        instantiate_subgraphs_with_metadata(&registry, "custom", kind, config, BTreeMap::new())
-            .err()
-            .unwrap()
+        mf_runtime::generated::configuration(&registry, "custom", kind, config, &[]).unwrap_err()
     };
     assert!(matches!(
         construct("missing.provider", "{}"),
-        WorkflowBuildError::UnknownKind { definition_id, kind }
+        mf_runtime::generated::BindError::Unknown { definition_id, kind }
             if definition_id.as_str() == "custom" && kind == "missing.provider"
     ));
+    let error =
+        mf_runtime::generated::configuration(&registry, "custom", KIND, "{", &[]).unwrap_err();
     assert!(matches!(
-        construct(KIND, "{"),
-        WorkflowBuildError::InvalidEmbeddedConfig { definition_id, .. }
+        error,
+        mf_runtime::generated::BindError::Configuration { definition_id, .. }
             if definition_id.as_str() == "custom"
     ));
 }
@@ -686,10 +682,20 @@ fn codegen_uses_the_actual_child_graph_instead_of_reparsing_duplicate_json() {
     body.nodes[0].kind = mf_runtime::LOOP_KIND.into();
     body.nodes[0].config = json!({});
     plan.graph.definition.nodes[1].config["left"] = serde_json::to_value(body).unwrap();
-    let generated = plan.generate_artifacts().unwrap();
+    let generated = plan
+        .generate_artifacts(
+            &registry,
+            mf_compiler::CodegenOptions {
+                preserve_intermediate_outputs: true,
+            },
+        )
+        .unwrap();
     syn::parse_file(&generated.rust_source).unwrap();
     let manifest = plan.manifest(&registry).unwrap();
-    assert_eq!(manifest.graph.children, plan.graph.children);
+    assert_eq!(
+        manifest.description().unwrap(),
+        mf_runtime::describe_graph(&plan.graph).unwrap()
+    );
     assert_eq!(
         instantiate_compiled(&plan, &registry)
             .unwrap()

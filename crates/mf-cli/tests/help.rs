@@ -4,8 +4,7 @@ use mf_runtime::WorkflowManifest;
 use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
 
 fn manifest() -> WorkflowManifest {
-    serde_json::from_value(serde_json::json!({
-        "version": "2026-11-06",
+    let fixture = serde_json::json!({
         "graph": {
             "relations": {},
             "definition": {
@@ -22,7 +21,16 @@ fn manifest() -> WorkflowManifest {
             "type": "string", "required": true,
             "binding": {"env": "FLOW_PATH", "default": "hidden-default", "secret": true}
         }}}, "stdin": {}}
-    }))
+    });
+    WorkflowManifest::from_graph(
+        &mf_runtime::CompiledGraph {
+            definition: serde_json::from_value(fixture["graph"]["definition"].clone()).unwrap(),
+            execution_order: vec!["source".into(), "transform".into()],
+            relations: Default::default(),
+            children: Default::default(),
+        },
+        serde_json::from_value(fixture["input_schema"].clone()).unwrap(),
+    )
     .unwrap()
 }
 

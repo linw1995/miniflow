@@ -379,41 +379,28 @@ fn frozen_plans_and_manifests_reject_missing_corrupt_or_cyclic_call_bodies() {
     missing.graph.children.clear();
     let error = instantiate_compiled(&missing, &registry).err().unwrap();
     common::assert_receiver_binding_preflight(&error, "invoke");
-    // Structural generators have no selected receiver contract to interpret.
-    missing.generate_artifacts().unwrap();
-    missing.generate_runner_artifacts().unwrap();
-    for error in [
-        missing.generate_execution_plans(&registry).unwrap_err(),
-        missing
-            .generate_runner_execution_plans(&registry)
-            .unwrap_err(),
-    ] {
-        let mf_compiler::PlanError::Compilation { source } = error else {
-            panic!("expected generated receiver-binding preflight, got {error:?}");
-        };
-        common::assert_receiver_binding_preflight(source.as_ref(), "invoke");
-    }
+    let error = missing
+        .generate_artifacts(&registry, Default::default())
+        .unwrap_err();
+    let mf_compiler::PlanError::Compilation { source } = error else {
+        panic!("expected generated receiver-binding preflight, got {error:?}");
+    };
+    common::assert_receiver_binding_preflight(source.as_ref(), "invoke");
 
     let mut manifest = plan.manifest(&registry).unwrap();
     let description = manifest.description().unwrap();
-    manifest.graph.definition.nodes[0]
+    manifest.definition.nodes[0]
         .config
         .as_object_mut()
         .unwrap()
         .remove("body");
-    // Offline inspection trusts the compiled graph, not the authoring config.
+    // Offline inspection reads the frozen projection, not authoring configuration.
     assert_eq!(
         manifest.description().unwrap().loop_bodies,
         description.loop_bodies
     );
     manifest.validate().unwrap();
-    manifest
-        .graph
-        .children
-        .get_mut(&"invoke".into())
-        .unwrap()
-        .get_mut("body")
-        .unwrap()
+    manifest.descriptor.description.loop_bodies[0]
         .execution_order
         .clear();
     assert!(manifest.validate().is_err());
@@ -434,11 +421,15 @@ fn frozen_plans_and_manifests_reject_missing_corrupt_or_cyclic_call_bodies() {
             to_node: "input".into(),
             to_input: "value".into(),
         });
-    let error = invalid.generate_runner_artifacts().unwrap_err();
     assert!(
-        matches!(&error, mf_compiler::PlanError::Description {
-            source: mf_compiler::DescriptionError::DescriptionOrder { path, source },
-        } if path == &["invoke"]
+        invalid
+            .generate_artifacts(&registry, Default::default())
+            .is_err()
+    );
+    let error = mf_compiler::describe_compiled(&invalid).unwrap_err();
+    assert!(
+        matches!(&error, mf_compiler::DescriptionError::DescriptionOrder { path, source }
+            if path == &["invoke"]
             && matches!(source.as_ref(), mf_compiler::WorkflowCompileError::ChildGraph {
                 definition_id, source,
             } if definition_id.as_str() == "invoke"
@@ -523,7 +514,7 @@ fn child_secret_contract_redacts_the_call_boundary_before_observation() {
     let plan = compile_definition(&definition, &registry).unwrap();
     let manifest = plan.manifest(&registry).unwrap();
     assert!(
-        manifest.input_schema.inputs["call"]["input.value"]
+        manifest.descriptor.input_schema.inputs["call"]["input.value"]
             .binding
             .secret
     );
@@ -895,25 +886,24 @@ fn generated_calls_match_memory_without_flow_sources() {
         .unwrap()
         .execute()
         .unwrap();
-    let execution = plan.generate_runner_execution_plans(&registry).unwrap();
+    let execution = plan
+        .generate_artifacts(&registry, Default::default())
+        .unwrap();
     assert!(
         execution
             .rust_source
-            .contains("PreparedSubgraph::from_flow")
+            .contains("PreparedSubgraph::from_plan")
     );
-    let frozen = mf_runtime::WorkflowManifest::from_bytes(&execution.manifest_bytes).unwrap();
-    assert_eq!(frozen.graph.definition, plan.graph.definition);
-    let targets: Vec<mf_runtime::NodeTarget> =
-        serde_json::from_str(&execution.node_targets_json).unwrap();
-    assert_eq!(targets[0].id, "outer");
-    let artifacts = plan.generate_artifacts().unwrap();
     assert!(
-        artifacts
+        !execution
             .rust_source
             .contains("PreparedSubgraph::from_flow")
     );
-    let runner_artifacts = plan.generate_runner_artifacts().unwrap();
-    assert!(!runner_artifacts.rust_source.is_empty());
+    let frozen = &execution.manifest;
+    assert_eq!(frozen.definition, plan.graph.definition);
+    let targets = &execution.manifest.descriptor.node_targets;
+    assert_eq!(targets[0].id, "outer");
+
     let project = root.path().join("build");
     mf_compiler::write_dependency_project(
         &project,

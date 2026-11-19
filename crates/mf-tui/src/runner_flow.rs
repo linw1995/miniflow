@@ -222,14 +222,21 @@ mod tests {
         let path = root.path().join("runner");
         let gate = root.path().join("release");
         let mut manifest = crate::test_support::sample_manifest();
-        manifest.graph.definition = serde_json::from_value(serde_json::json!({
+        manifest.definition = serde_json::from_value(serde_json::json!({
             "version":"2026-10-28", "dependencies":{}, "execution":{},
             "nodes":[{"id":"source", "kind":"builtin.constant", "config":{"value":1}}],
             "outputs":[{"name":"value", "node":"source", "port":"value"}]
         }))
         .unwrap();
-        manifest.graph.execution_order = vec!["source".into()];
+        manifest.descriptor.description = mf_runtime::describe_graph(&mf_runtime::CompiledGraph {
+            definition: manifest.definition.clone(),
+            execution_order: vec!["source".into()],
+            relations: Default::default(),
+            children: Default::default(),
+        })
+        .unwrap();
         manifest
+            .descriptor
             .input_schema
             .inputs
             .insert("source".into(), Default::default());

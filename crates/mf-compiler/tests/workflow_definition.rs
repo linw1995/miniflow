@@ -143,9 +143,6 @@ fn normalization_inserts_each_canonical_scope_source_once_and_preserves_child_ve
     let round_trip =
         WorkflowDefinition::from_json(&serde_json::to_string(&definition).unwrap()).unwrap();
     assert_eq!(plan_definition(&round_trip).unwrap(), normalized);
-    // Compiled graphs retain source instructions; replay does not lower them as authoring.
-    let replay = mf_compiler::CompiledWorkflow::from_json(&normalized.to_json().unwrap()).unwrap();
-    assert_eq!(replay, normalized);
 }
 
 #[test]

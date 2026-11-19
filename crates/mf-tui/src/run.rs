@@ -179,9 +179,13 @@ impl RunOptions {
 
 fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, RunError> {
     let manifest = read_manifest(path).context(ManifestSnafu)?;
-    let arguments = options.workflow_arguments(&manifest.input_schema)?;
+    let arguments = options.workflow_arguments(&manifest.descriptor.input_schema)?;
     let description = manifest.description()?;
-    let needs_stdin = manifest.input_schema.stdin_owner(&arguments)?.is_some();
+    let needs_stdin = manifest
+        .descriptor
+        .input_schema
+        .stdin_owner(&arguments)?
+        .is_some();
     if needs_stdin {
         return option_error(
             "TUI execution cannot supply workflow stdin; provide source parameters or run the executable directly",
@@ -5800,19 +5804,19 @@ mod tests {
         if let Some(resource) = resource {
             stdin.insert("source/id".into(), serde_json::json!(resource));
         }
-        let manifest = mf_runtime::WorkflowManifest {
-            version: mf_runtime::WorkflowManifestVersion::V2026_11_06,
-            graph: mf_runtime::CompiledGraph {
+        let manifest = mf_runtime::WorkflowManifest::from_graph(
+            &(mf_runtime::CompiledGraph {
                 definition: serde_json::from_value(definition).unwrap(),
                 execution_order: vec!["source/id".into()],
                 relations: Default::default(),
                 children: Default::default(),
-            },
-            input_schema: serde_json::from_value(serde_json::json!({
+            }),
+            serde_json::from_value(serde_json::json!({
                 "inputs":{"source/id":{"path":{"type":"string", "required":true}}}, "stdin":stdin
             }))
             .unwrap(),
-        };
+        )
+        .unwrap();
         fs::write(
             &runner,
             crate::test_support::elf(Some(&manifest.to_bytes().unwrap()), 1),
@@ -6081,6 +6085,7 @@ mod tests {
         );
         let mut manifest = read_manifest(&runner).unwrap();
         manifest
+            .descriptor
             .input_schema
             .inputs
             .get_mut("source/id")

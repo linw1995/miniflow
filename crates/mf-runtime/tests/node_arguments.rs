@@ -4,8 +4,8 @@ use std::ffi::OsString;
 
 fn target() -> NodeTarget {
     let id = mf_telemetry::identity::WorkflowId::from_definition(&json!({}), &[]).unwrap();
-    serde_json::from_value(json!({
-        "id":"copy.part", "index":0, "kind":"Task", "outputs":{}, "context":{},
+    serde_json::from_value::<NodeTarget>(json!({
+        "id":"copy.part", "kind":"Task", "outputs":{}, "context":{},
         "original_workflow_id":id,
         "description":{"version":"2026-09-29", "workflow_id":id, "nodes":[{"id":"copy.part", "kind":"test.task"}], "data_edges":[], "control_edges":[], "execution_order":["copy.part"]},
         "inputs":{"inputs":{"copy.part":{

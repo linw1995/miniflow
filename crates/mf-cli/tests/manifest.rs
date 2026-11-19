@@ -70,6 +70,14 @@ fn moved_task_stream_and_nested_runners_keep_manifest_and_execution_contracts() 
         )
         .unwrap();
         let manifest = read_manifest(&installed).unwrap();
+        assert_eq!(manifest.sources[&manifest.entry], definition.to_string());
+        assert_eq!(
+            manifest.definition,
+            mf_runtime::WorkflowDefinition::from_json(&definition.to_string()).unwrap()
+        );
+        let payload = serde_json::to_value(&manifest).unwrap();
+        assert!(payload.get("graph").is_none());
+        assert!(payload["descriptor"].get("relations").is_none());
         if scenario == "ordered" {
             assert_eq!(manifest.description().unwrap().order_edges.len(), 1);
             assert_eq!(
@@ -222,7 +230,7 @@ fn release_lto_and_strip_preserve_standalone_factory_free_manifest() {
             .unwrap_or_else(|| project.join("target"));
         fs::copy(target.join("release/mf-generated-workflow"), &runner).unwrap();
         let before = read_manifest(&runner).unwrap();
-        assert_eq!(before.graph.definition, plan.graph.definition);
+        assert_eq!(before.definition, plan.graph.definition);
         assert_eq!(
             before.node_definition("a").unwrap().config,
             json!({"print":true})

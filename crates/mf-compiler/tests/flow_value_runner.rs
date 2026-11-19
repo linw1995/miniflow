@@ -145,7 +145,6 @@ fn same_callee_receives_different_flow_values_over_edges_and_saved_plans_keep_or
         plan.graph.children[&"first".into()]["body"].definition,
         plan.graph.children[&"second".into()]["body"].definition,
     );
-    let plan = mf_compiler::CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
     root.close().unwrap();
 
     let description = mf_compiler::describe_compiled(&plan).unwrap();

@@ -211,7 +211,7 @@ fixed configuration, use a Flow-valued edge as described below.
 Source loading calls the selected receiver's `flow_parameters` callback, resolves only the returned
 child values, and merges child dependencies for standalone compilation. Missing/null optional
 fields produce no executable scopes; required fields still fail provider decoding. Planning freezes the selected
-child tree as explicit `CompiledGraph.children`; saved plans do not rediscover children from JSON.
+child tree as explicit `CompiledGraph.children`; preparation does not rediscover children from JSON.
 Resolved child graphs are compiled into executable Flow objects and injected into those fields. JSON shape alone grants no executable
 authority; ordinary fields containing `definition` or `path` remain ordinary data.
 Missing required fields and malformed values fail configuration validation;

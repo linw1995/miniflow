@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use mf_runtime::{WorkflowInputSchema, WorkflowManifest, WorkflowManifestVersion};
+use mf_runtime::{WorkflowInputSchema, WorkflowManifest};
 
 /// An executable fixture with the same embedded-manifest boundary as a built
 /// runner. Its script is replaceable independently of the manifest-bearing host.
@@ -45,9 +45,8 @@ pub fn write_runner(path: &std::path::Path, manifest: &WorkflowManifest, script:
 }
 
 pub fn sample_manifest() -> WorkflowManifest {
-    WorkflowManifest {
-        version: WorkflowManifestVersion::V2026_11_06,
-        graph: mf_runtime::CompiledGraph {
+    WorkflowManifest::from_graph(
+        &(mf_runtime::CompiledGraph {
             definition: serde_json::from_value(serde_json::json!({
                 "version": "2026-10-03", "dependencies": {}, "nodes": []
             }))
@@ -55,9 +54,10 @@ pub fn sample_manifest() -> WorkflowManifest {
             execution_order: vec![],
             relations: Default::default(),
             children: Default::default(),
-        },
-        input_schema: WorkflowInputSchema::default(),
-    }
+        }),
+        WorkflowInputSchema::default(),
+    )
+    .unwrap()
 }
 
 pub fn put16(bytes: &mut [u8], offset: usize, value: u16) {

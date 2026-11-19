@@ -23,6 +23,7 @@ pub fn crates_dir() -> PathBuf {
         .unwrap()
         .to_owned()
 }
+
 pub fn fixture_definition() -> WorkflowDefinition {
     WorkflowDefinition::from_json(&serde_json::json!({
         "version":"2026-09-26", "dependencies": {"arbitrary.alias": {"package":"fixture-multi-nodes", "path": PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/multi-nodes"), "features":["double"], "default-features":false}},

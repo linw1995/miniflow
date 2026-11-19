@@ -82,7 +82,7 @@ fn resolves_instance_ports_and_transitive_references() {
     let mut value = graph();
     value["outputs"] = json!([{"name":"result","node":"c","port":"yes"}]);
     let definition = definition(value);
-    let registry = NodeRegistry::from_inventory().unwrap();
+    let registry = mf_compiler::NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
     assert_eq!(
         plan.graph
@@ -99,7 +99,7 @@ fn resolves_instance_ports_and_transitive_references() {
 }
 #[test]
 fn factories_run_once_per_preparation() {
-    let registry = NodeRegistry::from_inventory().unwrap();
+    let registry = mf_compiler::NodeRegistry::from_inventory().unwrap();
     let mut value = graph();
     for node in value["nodes"].as_array_mut().unwrap() {
         node["config"]["count"] = json!(true);
@@ -138,7 +138,7 @@ fn generated_body_snapshots_reuse_prepared_factories_and_preserve_dotted_keys() 
     let plan = plan_definition(&definition).unwrap();
     BODY_CONSTRUCTIONS.store(0, Ordering::SeqCst);
     let generated = plan
-        .generate_execution_plans(&NodeRegistry::from_inventory().unwrap())
+        .generate_artifacts(&NodeRegistry::from_inventory().unwrap(), Default::default())
         .unwrap();
     assert_eq!(BODY_CONSTRUCTIONS.load(Ordering::SeqCst), 3);
     assert!(generated.rust_source.contains("\"a.part.value.part\""));
@@ -177,7 +177,7 @@ fn validates_sparse_references_in_a_deep_shared_graph() {
         nodes[index]["config"]["reference"] = json!("n0000.value");
     }
     let mut value = json!({"version": "2026-09-26", "dependencies": {}, "nodes": nodes, "control_edges": controls});
-    let registry = NodeRegistry::from_inventory().unwrap();
+    let registry = mf_compiler::NodeRegistry::from_inventory().unwrap();
     validate_definition(&definition(value.clone()), &registry).unwrap();
     value["nodes"][3999]["config"]["reference"] = json!("isolated.value");
     assert!(error(value).contains("explicit dependency"));
@@ -261,5 +261,15 @@ fn plans_union_dependencies_once_and_rejects_mixed_cycles() {
     );
     let mut invalid_order = plan;
     invalid_order.graph.execution_order.reverse();
-    assert!(invalid_order.generate_artifacts().is_err());
+    let registry = NodeRegistry::from_inventory().unwrap();
+    assert!(
+        invalid_order
+            .generate_artifacts(
+                &registry,
+                mf_compiler::CodegenOptions {
+                    preserve_intermediate_outputs: true
+                }
+            )
+            .is_err()
+    );
 }

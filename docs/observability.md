@@ -6,7 +6,7 @@
 
 `mf-tui` contains the local OTLP receiver, state reducer, graph renderer, and CLI-only process supervisor used by `mf run <executable> --tui`.
 
-`mf-runtime` depends on the minimal telemetry package. `mf-cli` depends on the separate `mf-tui` package for bounded description preflight and local reception. Neither the compiler nor runtime depends on `mf-tui`. Generated runners enable OTLP export support by default, while `mf compile --no-telemetry` omits the SDK and HTTP client. Neither runner includes terminal dependencies or the compiler's code generation feature.
+`mf-runtime` depends on the minimal telemetry package. `mf-cli` depends on the separate `mf-tui` package for bounded description preflight and local reception. Neither the compiler nor runtime depends on `mf-tui`. Generated runners enable OTLP export support by default, while `mf compile --no-telemetry` omits the SDK and HTTP client. Neither runner includes terminal dependencies or `mf-compiler` in its normal dependency closure. The compiler remains a build dependency only.
 
 The `mf-telemetry/otlp` feature selects the OTel SDK and OTLP/HTTP protobuf exporters with an explicit blocking HTTP client and TLS support. Enabling the feature alone does not initialize an exporter. The generated runner owns provider initialization and bounded shutdown; libraries do not install global providers for callers.
 
@@ -20,19 +20,19 @@ nix develop --command cargo test -p mf-compiler --test telemetry_boundary
 
 `Observer::new(&traces, &logs)` obtains workflow instruments from application-owned OTel providers without installing globals. `CompiledWorkflow::start_observation(&observer, run_id)` computes the canonical workflow identity, creates one run scope, and emits `mf.workflow.started`. Keep the providers alive for the entire run and flush/shut them down in the application after either success or handled failure.
 
-Use `execute_compiled(&plan, &registry, Some(observation))` to cover node construction, dependency resolution, invocation, publication, and output selection in memory. `Flow::execute_with_observation(Some(observation))` covers execution of nodes that have already been constructed; it cannot report construction that happened before the run. Existing `Flow::execute()` and generated `run_workflow()` remain unobserved entry points.
+Use `execute_compiled(&plan, &registry, Some(observation))` to cover node construction, dependency resolution, invocation, publication, and output selection in memory. `Flow::execute_with_observation(Some(observation))` covers execution of nodes that have already been constructed; it cannot report construction that happened before the run. Use `Flow::execute()` when observation is not needed.
 
-Source from `CompiledWorkflow::generate_artifacts()` provides `prepare_workflow(registry, observation)` to construct a validated Flow and
-`run_workflow_with_observation(&flow, Some(observation))` to execute it. Construction errors use
-`WorkflowBuildError`; execution errors use `WorkflowRunError`. For applications that need
-registry initialization inside the run, use `ExecutionContext::run(Some(observation), |state| ...)` and call generated
-`run_workflow_in_context(&flow, state)` or `Flow::execute_in_context(state)`. These low-level context entry points
-execute one matching plan per fresh scope; the surrounding scope owns the terminal event. An early error before a node
-is identified becomes a workflow preparation failure.
+Source from `CompiledWorkflow::generate_artifacts(&registry, options)` provides
+`prepare_workflow(registry, observation)` to bind a fixed layout. Binding errors use
+`mf_runtime::generated::BindError`; execution errors use `WorkflowRunError`. Execute with `FlowRuntime`
+and the ordinary input, observation, and context APIs. Initialize the registry inside
+`ExecutionContext::run` to observe preparation and execution in one scope. An early error before a
+node is identified becomes a workflow preparation failure.
 
-Standalone projects use `CompiledWorkflow::generate_runner_artifacts()` to emit only the entry points their runner calls:
-`prepare_workflow` and `run_workflow_in_context` for task workflows, or `prepare_stream` for streaming workflows.
-Custom runners that need the convenience functions above can use `generate_artifacts()` instead.
+`CodegenOptions::default()` enables eligible typed segments for standalone runners. Set
+`preserve_intermediate_outputs` for hosts that inspect intermediate values through execution contexts.
+Streaming workflows expose `prepare_stream`. Both modes use the same fixed binding backend and do
+not compile graphs at startup.
 
 The runnable example uses in-memory SDK exporters and performs no network export:
 
@@ -127,14 +127,14 @@ Graph-relative event validation checks workflow/node identity, position, sequenc
 
 ## Embedded manifest format
 
-Manifest payload version `2026-11-06` stores an explicit compiled `graph` and prepared `input_schema`.
-Each graph contains its `definition`, canonical `execution_order`, and child graphs keyed by receiving node ID and
-field name. Parameter-type schemas and separate `loop_orders` are not persisted. Graph descriptions, interface wrappers,
-and workflow IDs are not duplicated in the payload. `description()`, `interface()`, and `workflow_id()` derive those views
-from the stored graph without scanning configuration for children, planning a DAG, or preparing providers.
-The original definition is accessible through `graph.definition` (or field dereferencing), and the input schema is a direct field;
-`node_definition(id)` borrows a root node by exact ID. Input contracts remain stored because provider-declared ports,
-bindings, and stdin requirements cannot be inferred from definition JSON alone.
+Manifest payload version `2026-11-18` separates original definition resources from a public inspection projection.
+`definition` retains the root declaration; `entry` and `sources` identify the captured UTF-8 definition resources.
+The `descriptor` contains the validated observation `description` and prepared `input_schema`, including workflow identity,
+actual execution mode, child observation scopes, provider-declared types, bindings, and conditional stdin ownership.
+`node_targets` exposes isolated task interfaces and observation identities without compiled node indices.
+Compiler IR, graph relationships, scheduling layouts, and typed optimization evidence are not persisted.
+`description()`, `interface()`, and `workflow_id()` read this projection without planning or preparing providers;
+`node_definition(id)` borrows a root declaration by exact ID. The same build preparation supplies execution and inspection.
 The definition contains full static configuration, including private literals, parameter defaults, and dependencies.
 Configuration expressions remain unresolved; invocation values and environment-derived values are not materialized.
 Execution descriptions store the mode; `event_schema_version()` derives the event protocol without a duplicate field.

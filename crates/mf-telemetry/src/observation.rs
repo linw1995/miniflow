@@ -226,8 +226,8 @@ impl Observer {
     ) -> Result<RunObservation, ContractError> {
         description.validate()?;
         crate::require(
-            description.version.supports_loops() && !description.is_streaming(),
-            "Loop observation requires the new description version",
+            !description.is_streaming(),
+            "Task observation requires a finite description",
         )?;
         let nodes = description
             .nodes
@@ -238,12 +238,9 @@ impl Observer {
                 path: Vec::new(),
             })
             .collect();
-        self.start_inner(
-            description.workflow_id.clone(),
-            run_id,
-            nodes,
-            Some(description),
-        )
+        let workflow_id = description.workflow_id.clone();
+        let scoped = description.version.supports_loops();
+        self.start_inner(workflow_id, run_id, nodes, scoped.then_some(description))
     }
 
     fn start_inner(

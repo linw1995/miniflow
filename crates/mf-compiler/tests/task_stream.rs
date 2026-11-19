@@ -766,7 +766,12 @@ fn generated_streams_bind_executable_functions_without_runtime_domain_tables() {
         let plan =
             compile_definition(&serde_json::from_value(definition).unwrap(), &registry).unwrap();
         let source = plan
-            .generate_execution_plans(&registry)
+            .generate_artifacts(
+                &registry,
+                mf_compiler::CodegenOptions {
+                    preserve_intermediate_outputs: true,
+                },
+            )
             .unwrap()
             .rust_source;
         syn::parse_file(&source).unwrap();

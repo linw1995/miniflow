@@ -1,5 +1,7 @@
 //! Receiver declarations, not JSON shape or schema version, authorize executable children.
 extern crate mfn_core as _;
+#[cfg(feature = "codegen")]
+mod common;
 
 use mf_compiler::{NodeRegistry, WorkflowDefinition, compile_definition, instantiate_compiled};
 use mf_runtime::{
@@ -34,8 +36,10 @@ fn manifest(
     plan: &mf_compiler::CompiledWorkflow,
     registry: &NodeRegistry,
 ) -> mf_runtime::WorkflowManifest {
-    let artifacts = plan.generate_runner_execution_plans(registry).unwrap();
-    mf_runtime::WorkflowManifest::from_bytes(&artifacts.manifest_bytes).unwrap()
+    let artifacts = plan
+        .generate_artifacts(registry, Default::default())
+        .unwrap();
+    artifacts.manifest
 }
 
 fn plain(config: Value) -> Result<PreparedNode, NodeBuildError> {
@@ -85,12 +89,19 @@ fn plain_provider_configuration_remains_opaque() {
     execute(&plan, &registry);
     #[cfg(feature = "codegen")]
     {
-        let generated = plan.generate_artifacts().unwrap();
+        let generated = plan
+            .generate_artifacts(
+                &registry,
+                mf_compiler::CodegenOptions {
+                    preserve_intermediate_outputs: true,
+                },
+            )
+            .unwrap();
         syn::parse_file(&generated.rust_source).unwrap();
         assert!(
             !generated
                 .rust_source
-                .contains("instantiate_subgraphs_with_metadata")
+                .contains("PreparedSubgraph::from_plan")
         );
         let manifest = manifest(&plan, &registry);
         assert_eq!(
@@ -177,51 +188,18 @@ fn subgraph_capable_providers_without_selected_children_keep_plain_factory_seman
         assert_eq!(plan.graph.execution_order[0].as_str(), "before");
         assert!(plan.graph.children.is_empty());
         assert!(OptionalFlowConfig::flow_parameters(&config).is_empty());
-        assert!(!plan.to_json().unwrap().contains("parameter_types"));
-        let saved = mf_compiler::CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
-        assert_eq!(saved, plan);
-        assert_eq!(
-            mf_compiler::describe_compiled(&saved).unwrap(),
-            mf_compiler::describe_compiled(&plan).unwrap()
-        );
-        execute(&saved, &registry);
+        execute(&plan, &registry);
         #[cfg(feature = "codegen")]
         {
-            // This path has no registry argument: confirmed compiled children are authoritative.
-            let generated = saved.generate_artifacts().unwrap();
-            assert_eq!(generated, plan.generate_artifacts().unwrap());
-            use quote::ToTokens as _;
-            let syntax = syn::parse_file(&generated.rust_source).unwrap();
-            let prepare = syntax
-                .items
-                .iter()
-                .find_map(|item| match item {
-                    syn::Item::Fn(function) if function.sig.ident == "prepare_workflow" => {
-                        Some(function)
-                    }
-                    _ => None,
-                })
-                .unwrap()
-                .to_token_stream()
-                .to_string();
-            let preflight = prepare.find("validate_compiled_graph").unwrap();
-            let inference = prepare.find("TypeInferenceState").unwrap();
-            let constructor = prepare.find("instantiate_node_with_metadata").unwrap();
-            assert!(preflight < inference && inference < constructor);
-            assert!(!prepare.contains("ConfigParameterType"));
-            assert!(!prepare.contains("validate_parameter_types"));
-            assert!(
-                generated
-                    .rust_source
-                    .contains("instantiate_node_with_metadata")
-            );
-            assert!(
-                !generated
-                    .rust_source
-                    .contains("instantiate_subgraphs_with_metadata")
-            );
-            let manifest = manifest(&plan, &registry);
-            assert_eq!(manifest.graph.definition, plan.graph.definition);
+            let generated = plan
+                .generate_artifacts(&registry, Default::default())
+                .unwrap();
+            let source = &generated.rust_source;
+            let check = source.find("mf_runtime::generated::configuration").unwrap();
+            let constructor = source.find("mf_runtime::generated::instantiate").unwrap();
+            assert!(check < constructor);
+            assert!(!source.contains("PreparedSubgraph::from_plan"));
+            assert_eq!(generated.manifest.definition, plan.graph.definition);
         }
     }
 }
@@ -305,12 +283,19 @@ fn same_json_only_prepares_children_for_the_declared_receiver_on_the_same_versio
         execute(&plan, &registry);
         #[cfg(feature = "codegen")]
         {
-            let generated = plan.generate_artifacts().unwrap();
+            let generated = plan
+                .generate_artifacts(
+                    &registry,
+                    mf_compiler::CodegenOptions {
+                        preserve_intermediate_outputs: true,
+                    },
+                )
+                .unwrap();
             syn::parse_file(&generated.rust_source).unwrap();
             assert_eq!(
                 generated
                     .rust_source
-                    .contains("instantiate_subgraphs_with_metadata"),
+                    .contains("PreparedSubgraph::from_plan"),
                 executable
             );
             let manifest = manifest(&plan, &registry);
@@ -330,7 +315,7 @@ fn resolved_planning_uses_selected_contracts_instead_of_ambient_host_metadata() 
         "nodes": [{"id": "owner", "kind": "test.declared_flow_owner", "config": {
             "body": {"version": "2026-10-28", "dependencies": {}, "nodes": [
                 {"id": "child", "kind": "builtin.constant", "config": {"value": 42}}
-            ]}
+            ], "outputs": [{"name": "value", "node": "child", "port": "value"}]}
         }}]
     }))
     .unwrap();
@@ -350,7 +335,7 @@ fn resolved_planning_uses_selected_contracts_instead_of_ambient_host_metadata() 
         1
     );
     for (plan, children) in [(ordinary, 0), (typed, 1)] {
-        let saved = mf_compiler::CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
+        let saved = plan.clone();
         assert_eq!(saved.graph.children.len(), children);
         let mut expected = authored.nodes[0].config.clone();
         if children != 0 {
@@ -366,14 +351,22 @@ fn resolved_planning_uses_selected_contracts_instead_of_ambient_host_metadata() 
             children
         );
         #[cfg(feature = "codegen")]
-        assert_eq!(
-            saved
-                .generate_artifacts()
-                .unwrap()
-                .rust_source
-                .contains("instantiate_subgraphs_with_metadata"),
-            children != 0
-        );
+        {
+            let generated = saved.generate_artifacts(&registry, Default::default());
+            if children == 0 {
+                let mf_compiler::PlanError::Compilation { source } = generated.unwrap_err() else {
+                    panic!("expected a receiver-binding error");
+                };
+                common::assert_receiver_binding_preflight(&source, "owner");
+            } else {
+                assert!(
+                    generated
+                        .unwrap()
+                        .rust_source
+                        .contains("PreparedSubgraph::from_plan")
+                );
+            }
+        }
     }
     let mut malformed = authored;
     malformed.nodes[0].config["body"] = json!("not a workflow");
@@ -418,7 +411,7 @@ fn saved_loop_preparation_and_codegen_use_the_compiled_child_not_its_raw_copy() 
         .find(|node| node.id.as_str() == "repeat")
         .unwrap()
         .config["body"] = json!({"path": "must-not-be-opened.json"});
-    let saved = mf_compiler::CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
+    let saved = plan.clone();
     assert_eq!(saved.graph.children, children);
     assert_eq!(
         mf_compiler::describe_compiled(&saved)
@@ -436,22 +429,51 @@ fn saved_loop_preparation_and_codegen_use_the_compiled_child_not_its_raw_copy() 
     );
     #[cfg(feature = "codegen")]
     {
-        syn::parse_file(&saved.generate_artifacts().unwrap().rust_source).unwrap();
-        syn::parse_file(&saved.generate_embedded_artifacts().unwrap().rust_source).unwrap();
-        assert_eq!(manifest(&saved, &registry).graph.children, children);
+        syn::parse_file(
+            &saved
+                .generate_artifacts(
+                    &registry,
+                    mf_compiler::CodegenOptions {
+                        preserve_intermediate_outputs: true,
+                    },
+                )
+                .unwrap()
+                .rust_source,
+        )
+        .unwrap();
+        assert_eq!(
+            manifest(&saved, &registry).description().unwrap(),
+            mf_runtime::describe_graph(&saved.graph).unwrap()
+        );
         assert_eq!(
             saved
-                .generate_execution_plans(&registry)
+                .generate_artifacts(
+                    &registry,
+                    mf_compiler::CodegenOptions {
+                        preserve_intermediate_outputs: true
+                    }
+                )
                 .unwrap()
-                .manifest_bytes,
+                .manifest,
             saved
-                .generate_runner_execution_plans(&registry)
+                .generate_artifacts(&registry, Default::default())
                 .unwrap()
-                .manifest_bytes
+                .manifest
         );
         let mut streaming = saved.clone();
         streaming.graph.definition.execution = Some(Default::default());
-        syn::parse_file(&streaming.generate_artifacts().unwrap().rust_source).unwrap();
+        syn::parse_file(
+            &streaming
+                .generate_artifacts(
+                    &registry,
+                    mf_compiler::CodegenOptions {
+                        preserve_intermediate_outputs: true,
+                    },
+                )
+                .unwrap()
+                .rust_source,
+        )
+        .unwrap();
     }
 }
 
@@ -483,10 +505,7 @@ fn undeclared_fields_stay_opaque_even_when_the_factory_accepts_other_flow_fields
 
 #[test]
 fn generated_receiving_contracts_reject_stale_binding_sets_before_factories() {
-    use mf_compiler::{
-        WorkflowBuildError, instantiate_subgraphs_with_metadata, validate_compiled_graph,
-        validate_node_flow_parameters,
-    };
+    use mf_compiler::{WorkflowBuildError, validate_compiled_graph};
     use std::error::Error;
 
     let registry = NodeRegistry::from_inventory().unwrap();
@@ -521,7 +540,7 @@ fn generated_receiving_contracts_reject_stale_binding_sets_before_factories() {
         }))
         .unwrap();
         let plan = mf_compiler::plan_resolved_definition(&definition, &registry).unwrap();
-        let saved = mf_compiler::CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
+        let saved = plan.clone();
         assert_eq!(saved.graph.execution_order[0].as_str(), "a_before");
         let error = validate_compiled_graph(&registry, &saved.graph).unwrap_err();
         let missing = if nested {
@@ -550,47 +569,43 @@ fn generated_receiving_contracts_reject_stale_binding_sets_before_factories() {
     }})
     .to_string();
     // This registration's prepared factory panics: declaration validation must not invoke it.
-    validate_node_flow_parameters(&registry, "owner", kind, &config, &["body"]).unwrap();
+    mf_runtime::generated::configuration(&registry, "owner", kind, &config, &["body"]).unwrap();
     for (config, expected) in [(config.as_str(), vec![]), ("{}", vec!["body"])] {
         let error =
-            validate_node_flow_parameters(&registry, "owner", kind, config, &expected).unwrap_err();
+            mf_runtime::generated::configuration(&registry, "owner", kind, config, &expected)
+                .unwrap_err();
         assert!(
-            matches!(error, WorkflowBuildError::InvalidDefinition { definition_id, message }
-            if definition_id.as_str() == "owner" && message.contains("compiled binding set"))
+            matches!(error, mf_runtime::generated::BindError::Bindings { definition_id } if definition_id.as_str() == "owner")
         );
     }
     for construct in [false, true] {
         let error = if construct {
-            instantiate_subgraphs_with_metadata(
-                &registry,
-                "owner",
-                "missing.receiver",
-                "{}",
-                BTreeMap::new(),
-            )
-            .err()
-            .unwrap()
+            let (registration, config) =
+                mf_runtime::generated::configuration(&registry, "owner", kind, &config, &["body"])
+                    .unwrap();
+            mf_runtime::generated::instantiate(registration, "owner", config, BTreeMap::new())
+                .err()
+                .unwrap()
         } else {
-            validate_node_flow_parameters(&registry, "owner", "missing.receiver", "{}", &[])
-                .unwrap_err()
+            mf_runtime::generated::configuration(&registry, "owner", "missing.receiver", "{}", &[])
+                .err()
+                .unwrap()
         };
-        assert!(
-            matches!(error, WorkflowBuildError::UnknownKind { definition_id, kind }
-            if definition_id.as_str() == "owner" && kind == "missing.receiver")
-        );
+        if construct {
+            assert!(
+                matches!(error, mf_runtime::generated::BindError::Node { definition_id, .. } if definition_id.as_str() == "owner")
+            );
+        } else {
+            assert!(
+                matches!(error, mf_runtime::generated::BindError::Unknown { definition_id, kind } if definition_id.as_str() == "owner" && kind == "missing.receiver")
+            );
+        }
     }
-    let error = instantiate_subgraphs_with_metadata(&registry, "owner", kind, "{", BTreeMap::new())
-        .err()
-        .unwrap();
+    let error =
+        mf_runtime::generated::configuration(&registry, "owner", kind, "{", &["body"]).unwrap_err();
     assert!(matches!(
         error,
-        WorkflowBuildError::InvalidEmbeddedConfig { .. }
+        mf_runtime::generated::BindError::Configuration { .. }
     ));
     assert!(error.source().unwrap().is::<serde_json::Error>());
-    let error =
-        instantiate_subgraphs_with_metadata(&registry, "owner", kind, &config, BTreeMap::new())
-            .err()
-            .unwrap();
-    assert!(matches!(error, WorkflowBuildError::NodeConstruction { .. }));
-    assert!(error.source().unwrap().is::<NodeBuildError>());
 }

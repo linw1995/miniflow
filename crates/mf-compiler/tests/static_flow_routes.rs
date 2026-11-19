@@ -232,7 +232,6 @@ fn compiler_binds_router_children_without_rewriting_authored_nodes_or_data_edges
     assert_eq!(restored.description().unwrap(), description);
     assert_eq!(
         restored
-            .graph
             .definition
             .nodes
             .iter()

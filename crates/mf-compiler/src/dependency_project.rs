@@ -39,13 +39,18 @@ pub enum DependencyProjectError {
     },
     #[snafu(display("could not generate runner code: {source}"))]
     Plan { source: crate::PlanError },
+    #[snafu(display("could not encode definition resources: {source}"))]
+    Sources { source: serde_json::Error },
     #[snafu(display("could not write generated project at {path:?}: {source}"))]
     Write { path: PathBuf, source: io::Error },
 }
 
 const BUILD: &str = r#"
+include!("workflow-plan.rs");
+
 fn main() {
-    println!("cargo:rerun-if-changed=workflow-plan.json");
+    println!("cargo:rerun-if-changed=workflow-plan.rs");
+    println!("cargo:rerun-if-changed=workflow-sources.json");
     println!("cargo:rustc-check-cfg=cfg(mf_streaming)");
     if let Err(error) = generate() {
         eprintln!("{error}");
@@ -55,22 +60,22 @@ fn main() {
 
 fn generate() -> Result<(), Box<dyn std::error::Error>> {
     let registry = mf_runtime::NodeRegistry::from_inventory()?;
-    let workflow = mf_compiler::CompiledWorkflow::from_json(include_str!("workflow-plan.json"))?;
-    let artifacts = workflow.generate_runner_execution_plans(&registry)?;
-    let manifest = mf_runtime::WorkflowManifest::from_bytes(&artifacts.manifest_bytes)?;
-    // The manifest has resolved execution modes; its sources are already frozen.
-    // Retain the validated order without running source resolution a second time.
-    let workflow = mf_compiler::CompiledWorkflow { graph: manifest.graph };
-    if workflow.graph.definition.execution.is_some() {
+    let artifacts = compiled_workflow()?.generate_artifacts(&registry, mf_compiler::CodegenOptions::default())?;
+    let mut manifest = artifacts.manifest;
+    if manifest.definition.execution.is_some() {
         println!("cargo:rustc-cfg=mf_streaming");
     }
-    let source = workflow.generate_runner_artifacts()?;
     let output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo output directory"));
-    std::fs::write(output.join("workflow.rs"), source.rust_source)?;
-    std::fs::write(output.join("flow-plans.rs"), artifacts.rust_source)?;
-    std::fs::write(output.join("workflow-manifest.bin"), artifacts.manifest_bytes)?;
-    std::fs::write(output.join("typed-fast-paths.json"), artifacts.typed_plan_json)?;
-    std::fs::write(output.join("node-targets.json"), artifacts.node_targets_json)?;
+    std::fs::write(output.join("workflow.rs"), artifacts.rust_source)?;
+    let (entry, sources): (String, std::collections::BTreeMap<String, String>) =
+        serde_json::from_str(include_str!("workflow-sources.json"))?;
+    manifest.definition = mf_runtime::WorkflowDefinition::from_json(
+        sources.get(&entry).ok_or("missing root definition resource")?,
+    )?;
+    manifest.entry = entry;
+    manifest.sources = sources;
+    std::fs::write(output.join("workflow-manifest.bin"), manifest.to_bytes()?)?;
+    std::fs::write(output.join("typed-fast-paths.json"), serde_json::to_vec_pretty(&artifacts.typed_plan)?)?;
     Ok(())
 }
 "#;
@@ -114,12 +119,9 @@ fn main() -> std::process::ExitCode {
 }
 
 fn run(#[cfg(unix)] signals: &mut mf_runtime::RunnerSignals) -> Result<(), Box<dyn std::error::Error>> {
-    let manifest = workflow_manifest()?;
-    let targets: Vec<mf_runtime::NodeTarget> = serde_json::from_str(
-        include_str!(concat!(env!("OUT_DIR"), "/node-targets.json")),
-    )?;
+    let targets = workflow_manifest()?.descriptor.node_targets;
     let invocation = mf_runtime::RunnerInvocation::parse(
-        std::env::args_os().skip(1), &manifest.input_schema, &targets,
+        std::env::args_os().skip(1), &workflow::compiled_input_schema(), &targets,
     )?;
     if let Some(id) = invocation.node.as_deref() {
         let target = mf_runtime::NodeTarget::find(&targets, id)?;
@@ -187,15 +189,14 @@ fn execute_selected(
                 if let Some(observation) = state.observation_mut() { observation.preparation_failed_unattributed(error.to_string()); }
             })?;
             workflow_manifest()?.validate_prepared_schema(prepared.plan().input_schema())?;
-            workflow::verify_stream_metadata(&prepared)?;
-            let task = target.bind_stream(&prepared)?;
+            let task = target.bind_stream(&prepared, workflow::compiled_node_index(&target.id)?)?;
             mf_runtime::FlowRuntime::default().execute_target_in_context(&task, state, inputs, context)?
         };
         #[cfg(not(mf_streaming))]
         let outputs = {
             let flow = workflow::prepare_workflow(&registry, state.observation_mut())?;
             workflow_manifest()?.validate_prepared_schema(flow.input_schema())?;
-            let task = target.bind_flow(&flow)?;
+            let task = target.bind_flow(&flow, workflow::compiled_node_index(&target.id)?)?;
             mf_runtime::FlowRuntime::default().execute_target_in_context(&task, state, inputs, context)?
         };
         stdio.write_json(&outputs).inspect_err(|error| {
@@ -259,7 +260,6 @@ fn execute_stream(arguments: mf_runtime::WorkflowArguments, verbose: u8, #[cfg(u
             if let Some(observation) = &observation { observation.preparation_failed(error.to_string()); }
         })?;
         workflow_manifest()?.validate_prepared_schema(prepared.plan().input_schema())?;
-        workflow::verify_stream_metadata(&prepared)?;
         prepared.plan().input_schema().validate(&arguments)?;
         let needs_stdin = prepared.plan().input_schema().stdin_owner(&arguments)?.is_some();
         let stdin = if needs_stdin { stdio.take_input() } else { None };
@@ -328,15 +328,7 @@ fn execute(arguments: mf_runtime::WorkflowArguments, verbose: u8, #[cfg(unix)] s
         #[cfg(feature = "telemetry")]
         let workflow_id = description.workflow_id.clone();
         let run_id = run_id();
-        let started = if description.version.supports_loops() {
-            observer.start_with_description(description, run_id)
-        } else {
-            let nodes = description.nodes.into_iter().map(|node| mf_runtime::NodeIdentity {
-                id: node.id, kind: node.kind, path: Vec::new(),
-            }).collect();
-            observer.start(description.workflow_id, run_id, nodes)
-        };
-        let observation = match started {
+        let observation = match observer.start_with_description(description, run_id) {
             Ok(observation) => Some(observation),
             Err(error) => { eprintln!("telemetry observation unavailable: {error}"); None }
         };
@@ -401,7 +393,7 @@ fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: 
         #[cfg(unix)]
         {
             let manifest = workflow_manifest()?;
-            let definition = &manifest.graph.definition;
+            let definition = &manifest.definition;
             if definition.version.supports_startup_inputs() {
                 state.set_stdin(mf_runtime::TextInput::claim()?);
             }
@@ -410,7 +402,7 @@ fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: 
         let registry = mf_runtime::NodeRegistry::from_inventory()?;
         let flow = workflow::prepare_workflow(&registry, state.observation_mut())?;
         workflow_manifest()?.validate_prepared_schema(flow.input_schema())?;
-        Ok(workflow::run_workflow_in_context(&flow, state)?)
+        Ok(mf_runtime::FlowRuntime::default().execute_in_context(&flow, state)?)
     });
     if let Some(snapshots) = snapshots {
         snapshots.finish();
@@ -450,8 +442,26 @@ pub fn write_dependency_project_with_options(
     support: &SupportPackages,
     options: &RunnerOptions,
 ) -> Result<(), DependencyProjectError> {
-    let plan_json = plan.to_json().context(PlanSnafu)?;
-    let (manifest, imports) = project_manifest(&plan.graph.definition, support, options)?;
+    let sources = serde_json::to_string(&(
+        "workflow.json",
+        std::collections::BTreeMap::from([(
+            "workflow.json",
+            serde_json::to_string(&plan.graph.definition).context(SourcesSnafu)?,
+        )]),
+    ))
+    .context(SourcesSnafu)?;
+    write_dependency_project_with_resources(project, plan, support, options, &sources)
+}
+
+pub fn write_dependency_project_with_resources(
+    project: &Path,
+    plan: &CompiledWorkflow,
+    support: &SupportPackages,
+    options: &RunnerOptions,
+    sources: &str,
+) -> Result<(), DependencyProjectError> {
+    let plan_source = plan.generate_plan_source().context(PlanSnafu)?;
+    let (manifest, imports) = project_manifest(&plan.graph.definition, support, options, false)?;
     let build = format!("{imports}{BUILD}");
     let main = format!("{imports}{MAIN}");
     write_project_files(
@@ -464,7 +474,8 @@ pub fn write_dependency_project_with_options(
                 "src/workflow.rs",
                 "include!(concat!(env!(\"OUT_DIR\"), \"/workflow.rs\"));\n",
             ),
-            ("workflow-plan.json", &plan_json),
+            ("workflow-plan.rs", &plan_source),
+            ("workflow-sources.json", sources),
         ],
     )
 }
@@ -473,6 +484,7 @@ fn project_manifest(
     definition: &crate::WorkflowDefinition,
     support: &SupportPackages,
     options: &RunnerOptions,
+    compiler_runtime: bool,
 ) -> Result<(String, String), DependencyProjectError> {
     let mut features = Vec::new();
     if options.telemetry {
@@ -482,7 +494,7 @@ fn project_manifest(
     let mut manifest = format!(
         "[package]\nname = \"mf-generated-workflow\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n\n[features]\ndefault = [{default_features}]\ntelemetry = [\"mf-telemetry/otlp\"]\n\n[dependencies]\nserde_json = \"1.0.151\"\nsnafu = \"0.9.2\"\n"
     );
-    let mut build_dependencies = String::from("\n[build-dependencies]\n");
+    let mut build_dependencies = String::from("\n[build-dependencies]\nserde_json = \"1.0.151\"\n");
     for package in ["mf-runtime", "mf-compiler", "mf-telemetry"] {
         let source = match support {
             SupportPackages::Registry => format!(
@@ -494,9 +506,11 @@ fn project_manifest(
                 quoted(&path_string(&crates_dir.join(package))?)
             ),
         };
-        manifest.push_str(&format!(
-            "{package} = {{ {source}, default-features = false }}\n"
-        ));
+        if package != "mf-compiler" || compiler_runtime {
+            manifest.push_str(&format!(
+                "{package} = {{ {source}, default-features = false }}\n"
+            ));
+        }
         if package == "mf-compiler" {
             build_dependencies.push_str(&format!(
                 "{package} = {{ {source}, default-features = false, features = [\"codegen\"] }}\n"
@@ -551,7 +565,7 @@ pub fn write_resolution_project(
     support: &SupportPackages,
     options: &RunnerOptions,
 ) -> Result<(), DependencyProjectError> {
-    let (manifest, imports) = project_manifest(definition, support, options)?;
+    let (manifest, imports) = project_manifest(definition, support, options, true)?;
     let main = format!(
         "{imports}{}",
         r#"

@@ -188,16 +188,15 @@ impl FlowValue {
     ) -> Result<Self, NodeBuildError> {
         manifest.validate().context(ManifestSnafu)?;
         ensure!(
-            outputs.len() == manifest.graph.definition.outputs.len()
+            outputs.len() == manifest.definition.outputs.len()
                 && outputs.iter().all(|port| manifest
-                    .graph
                     .definition
                     .outputs
                     .iter()
                     .any(|output| output.name == port.name && output.optional != port.required)),
             ManifestOutputsSnafu
         );
-        let (outputs, stream_outputs) = if manifest.graph.definition.execution.is_some() {
+        let (outputs, stream_outputs) = if manifest.descriptor.description.is_streaming() {
             (
                 Vec::new(),
                 outputs
@@ -212,8 +211,7 @@ impl FlowValue {
             (outputs, Vec::new())
         };
         let body = PreparedSubgraph::streaming(Vec::new(), outputs, stream_outputs, execute)
-            .with_input_schema(manifest.input_schema.clone())
-            .with_relations(manifest.graph.relations.clone());
+            .with_input_schema(manifest.descriptor.input_schema.clone());
         let mut value = Self::new(body)?;
         value.1 = InvocationBoundary::External;
         Ok(value)
@@ -758,9 +756,8 @@ mod tests {
     }
 
     fn external_manifest() -> crate::WorkflowManifest {
-        crate::WorkflowManifest {
-            version: crate::WorkflowManifestVersion::V2026_11_06,
-            graph: crate::CompiledGraph {
+        crate::WorkflowManifest::from_graph(
+            &(crate::CompiledGraph {
                 definition: serde_json::from_value(json!({
                     "version":"2026-10-28", "dependencies":{},
                     "nodes":[{"id":"params", "kind":"builtin.parameters", "config":{
@@ -772,13 +769,14 @@ mod tests {
                 execution_order: vec!["params".into()],
                 relations: Default::default(),
                 children: Default::default(),
-            },
-            input_schema: serde_json::from_value(json!({
+            }),
+            serde_json::from_value(json!({
                 "inputs":{"params":{"text":{"type":"string", "required":true}}},
                 "stdin":{}
             }))
             .unwrap(),
-        }
+        )
+        .unwrap()
     }
 
     #[test]
@@ -789,7 +787,7 @@ mod tests {
             panic!("preparation must not execute")
         })
         .unwrap();
-        assert_eq!(flow.body().inputs, manifest.input_schema);
+        assert_eq!(flow.body().inputs, manifest.descriptor.input_schema);
         assert!(flow.body().nodes.is_empty());
         assert!(flow.body().origin().is_none());
         assert!(matches!(
@@ -798,7 +796,10 @@ mod tests {
             ),
             FlowValueBuildError::ManifestOutputs
         ));
-        manifest.graph.definition.execution = Some(serde_json::from_value(json!({})).unwrap());
+        manifest.descriptor.description.execution =
+            Some(mf_telemetry::description::ExecutionDescription {
+                mode: mf_telemetry::description::ExecutionMode::Stream,
+            });
         let streaming =
             FlowValue::external(&manifest, outputs.clone(), |_, _| unreachable!()).unwrap();
         assert!(streaming.output_ports().is_empty());
@@ -806,28 +807,8 @@ mod tests {
             streaming.stream_output_ports(),
             [PortSpec::new("answer", ValueType::String, false)]
         );
-        manifest.graph.definition.execution = None;
-        manifest.graph.relations.scope = Some(crate::ScopeRelations {
-            input: "params".into(),
-            values: Default::default(),
-            state_outputs: Default::default(),
-            writes: Default::default(),
-            exits: Default::default(),
-        });
-        let scoped = FlowValue::external(&manifest, outputs.clone(), |_, _| {
-            panic!("an external implicit-scope body must not execute")
-        })
-        .unwrap();
-        assert_eq!(
-            scoped.body().relations.as_ref(),
-            Some(&manifest.graph.relations)
-        );
-        assert!(matches!(
-            scoped.invoke("call", Default::default(), &mut Default::default()),
-            Err(WorkflowRunError::Context { .. })
-        ));
-        manifest.graph.relations.scope = None;
-        manifest.graph.execution_order.clear();
+        assert!(streaming.body().relations.is_none());
+        manifest.descriptor.description.execution_order.clear();
         assert!(matches!(
             business_error(
                 &FlowValue::external(&manifest, outputs, |_, _| unreachable!()).unwrap_err()
@@ -1143,8 +1124,8 @@ mod tests {
     #[test]
     fn external_invocation_validates_outputs_including_required_presence() {
         let mut manifest = external_manifest();
-        manifest.graph.definition.outputs[0].name = "value".into();
-        manifest.graph.definition.outputs.push(
+        manifest.definition.outputs[0].name = "value".into();
+        manifest.definition.outputs.push(
             serde_json::from_value(json!({
                 "name":"optional", "node":"params", "port":"text", "optional":true
             }))

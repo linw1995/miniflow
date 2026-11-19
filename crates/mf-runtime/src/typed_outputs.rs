@@ -293,7 +293,7 @@ fn escape_pointer(value: &str) -> String {
 }
 
 /// Closed Rust representations for which direct transfer has a runtime-owned codec proof.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RustValueType {
     Boolean,
     Int64,
