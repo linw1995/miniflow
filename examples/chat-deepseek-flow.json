@@ -15,9 +15,6 @@
     }
   },
   "flows": {
-    "deepseek-tools": {
-      "path": "agent-deepseek/tools.json"
-    },
     "agent": {
       "builtin": "mfn-llm.agent"
     }
@@ -56,82 +53,94 @@
           "deepseek_api_key": {
             "type": "string",
             "env": "DEEPSEEK_API_KEY"
-          },
-          "search_description": {
-            "type": "string",
-            "secret": false,
-            "default": "Search the web using DeepSeek. Returns structured results with titles, URLs, snippets, and summaries. Use fetch to read a promising result. Independent queries can run in parallel."
-          },
-          "search_parameters": {
-            "type": "object",
-            "secret": false,
-            "default": {
-              "query": {
-                "description": "A nonblank search query of 1-128 Unicode characters."
-              },
-              "count": {
-                "description": "Number of results, from 1 to 50; defaults to 5."
-              }
-            }
-          },
-          "fetch_description": {
-            "type": "string",
-            "secret": false,
-            "default": "Fetch a web page using DeepSeek. Returns its title and Markdown content. Use the returned content to ground the answer and cite the source URL."
-          },
-          "fetch_parameters": {
-            "type": "object",
-            "secret": false,
-            "default": {
-              "url": {
-                "description": "An absolute HTTP or HTTPS page URL, without embedded credentials."
-              }
-            }
           }
         }
       }
     },
     {
-      "id": "deepseek_tools",
-      "kind": "workflow.call",
+      "id": "search",
+      "kind": "builtin.constant",
       "config": {
-        "flow": "deepseek-tools"
+        "type": "flow",
+        "value": {
+          "path": "agent-deepseek/search.json"
+        },
+        "inputs": {
+          "api_key": {
+            "$ref": "params.deepseek_api_key"
+          },
+          "base_url": {
+            "$ref": "params.deepseek_base_url"
+          }
+        }
+      }
+    },
+    {
+      "id": "fetch",
+      "kind": "builtin.constant",
+      "config": {
+        "type": "flow",
+        "value": {
+          "path": "agent-deepseek/fetch.json"
+        },
+        "inputs": {
+          "api_key": {
+            "$ref": "params.deepseek_api_key"
+          },
+          "base_url": {
+            "$ref": "params.deepseek_base_url"
+          }
+        }
+      }
+    },
+    {
+      "id": "tool_properties",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "search_interface": "object",
+          "fetch_interface": "object"
+        },
+        "code": {
+          "value": "{\n  'search': {\n    'description': 'Search the web using DeepSeek. Use a nonblank query of 1-128 Unicode characters and an optional count of 1-50 results (default 5). Returns titles, URLs, snippets, and summaries. Independent queries can run in parallel.',\n    'interface': search_interface\n  },\n  'fetch': {\n    'description': 'Fetch a web page at an absolute HTTP or HTTPS URL without embedded credentials. Returns the page title and Markdown. Use this after search to read a promising result and cite the source URL.',\n    'interface': fetch_interface\n  }\n}"
+        }
       },
       "inputs": {
-        "params.api_key": {
+        "search_interface": {
           "from": {
-            "node": "params",
-            "port": "deepseek_api_key"
+            "node": "search",
+            "port": "properties"
           }
         },
-        "params.base_url": {
+        "fetch_interface": {
           "from": {
-            "node": "params",
-            "port": "deepseek_base_url"
+            "node": "fetch",
+            "port": "properties"
+          }
+        }
+      }
+    },
+    {
+      "id": "tools",
+      "kind": "builtin.object",
+      "config": {
+        "fields": {
+          "search": "flow",
+          "fetch": "flow"
+        }
+      },
+      "inputs": {
+        "search": {
+          "from": {
+            "node": "search",
+            "port": "value"
           }
         },
-        "params.search_description": {
+        "fetch": {
           "from": {
-            "node": "params",
-            "port": "search_description"
-          }
-        },
-        "params.search_parameters": {
-          "from": {
-            "node": "params",
-            "port": "search_parameters"
-          }
-        },
-        "params.fetch_description": {
-          "from": {
-            "node": "params",
-            "port": "fetch_description"
-          }
-        },
-        "params.fetch_parameters": {
-          "from": {
-            "node": "params",
-            "port": "fetch_parameters"
+            "node": "fetch",
+            "port": "value"
           }
         }
       }
@@ -145,14 +154,14 @@
       "inputs": {
         "params.tools": {
           "from": {
-            "node": "deepseek_tools",
-            "port": "tools"
+            "node": "tools",
+            "port": "value"
           }
         },
         "params.tool_properties": {
           "from": {
-            "node": "deepseek_tools",
-            "port": "tool_properties"
+            "node": "tool_properties",
+            "port": "value"
           }
         },
         "params.messages": {
@@ -222,6 +231,16 @@
           }
         }
       }
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "params",
+      "to_node": "search"
+    },
+    {
+      "from_node": "params",
+      "to_node": "fetch"
     }
   ],
   "outputs": [

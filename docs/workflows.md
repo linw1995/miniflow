@@ -464,13 +464,13 @@ definition, Loop variables, catalog nodes, or dispatch ports. The Rust `agent_de
 `tool_catalog_definition()` and `tool_uses_definition()` APIs return those same fixed definitions; none
 accepts a tool list or generates per-tool graph IDs.
 
-Both maps are ordinary native-value construction: one `builtin.constant` per tool, an inner
-`builtin.object` joining its `properties` with the caller's documentation, and outer `builtin.object`
-nodes with one field per business name. A fixed catalog Iteration visits the properties map, using each
-business key as the tool name, and projects a model definition with a CEL `builtin.code` node. Three
-assertions validate the whole catalog before any model request, including when no tools are called:
-exactly one startup node with a terminal interface and no stdin, at most declared inputs are documented,
-and no public input is runtime-only. Dispatch consumes original calls and the same properties map.
+One `builtin.constant` per tool supplies both the Flow and its properties. A `builtin.object` builds the
+native `Map(Flow)`. The matching properties map is JSON and can be assembled with `builtin.object` or
+CEL. A fixed catalog Iteration visits the properties map, using each business key as the tool name, and
+projects a model definition with a CEL `builtin.code` node. Three assertions validate the whole
+catalog before any model request, including when no tools are called: each tool has exactly one startup
+node with a terminal interface and no stdin, only declared inputs are documented, and no public input
+is runtime-only. Dispatch consumes original calls and the same properties map.
 
 `mfn-llm.tool-uses` is an ordinary composed Flow. Per call it classifies the request with CEL, then a
 `builtin.if_else` activates an explicitly authored `builtin.router` or a small CEL error producer.
@@ -544,33 +544,28 @@ The same Agent handles empty, single-tool, and multi-tool collections. For no to
 `tools` and `tool_properties` objects with `builtin.object` and `fields: {}`; there is no separate
 empty-Agent definition.
 
-The [calculator chat Flow](../examples/chat-calculator-flow.json) is a small caller: `params`,
-`calculator`, `calculator_properties`, `tools`, `tool_properties`, `agent`, and a terminal result object. A Flow constant loads
-[the calculator](../examples/agent-calculator/calculator.json) and publishes its own interface. The
-inner `calculator_properties` object joins that interface with the `calculator_description` and
-`calculator_parameters` defaults; the outer `tools` object builds `Map(Flow)` and `tool_properties`
-builds the matching `Map(Object)`. A normal Call passes both maps into the unchanged `mfn-llm.agent`
-source; the compiler binds its router children without requiring caller-generated Agent JSON. The final
-ordinary object exports a self-contained `append` result with status, generated messages, usages, and error.
-The calculator supports add/subtract/multiply/divide and plain-text numeric results. Compile and run it with `--chat`:
+The [calculator chat Flow](../examples/chat-calculator-flow.json) loads
+[the calculator](../examples/agent-calculator/calculator.json) as a Flow constant. The `tools` object
+holds the native Flow, and one CEL node assembles `tool_properties` from its `properties` output and a
+fixed description. The Agent derives argument names, types, and requiredness from the interface;
+the example needs no separate parameter documentation map or CLI settings for tool text. The
+calculator supports add, subtract, multiply, and divide and returns a plain-text numeric result. The
+chat Flow exports status, generated messages, usages, and error in `append`. Compile and run it with
+`--chat`:
 
 ```sh
 nix develop --command cargo run -p mf-cli --features development-support -- compile examples/chat-calculator-flow.json --output target/chat-calculator
 nix develop --command cargo run -p mf-cli --features development-support -- run target/chat-calculator --chat --params.model your-model
 ```
 
-The [DeepSeek web Agent](../examples/chat-deepseek-flow.json) calls a reusable
-[tool-set Flow](../examples/agent-deepseek/tools.json) to prepare the
-[Search](../examples/agent-deepseek/search.json) and [Fetch](../examples/agent-deepseek/fetch.json)
-capabilities. The root passes its endpoint, credential, and overridable tool documentation into
-this Flow. Its `tools` and `tool_properties` outputs feed the unchanged Agent; preparing the maps
-makes no provider requests. The Agent still projects the model catalog and dispatches each tool call
-through a statically bound router.
+The [DeepSeek web Agent](../examples/chat-deepseek-flow.json) follows the same pattern with
+[Search](../examples/agent-deepseek/search.json) and [Fetch](../examples/agent-deepseek/fetch.json).
+Both Flow constants bind the DeepSeek endpoint and credential, keeping those inputs out of the model
+schema.
 
 Independent searches can run in parallel; subsequent rounds can fetch a discovered URL before
 answering. Search returns structured results, and Fetch returns the page title and Markdown. The
-model sees only `query` and optional `count` for Search, or `url` for Fetch. The tool-set Flow binds
-the endpoint and credential on both Flow constants, keeping those inputs out of the model schema.
+model sees only `query` and optional `count` for Search, or `url` for Fetch.
 
 The example exposes distinct settings for each provider:
 

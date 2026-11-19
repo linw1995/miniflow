@@ -30,7 +30,7 @@ fn nested_title_usage() -> Value {
     usage
 }
 
-const CALCULATOR_DESCRIPTION: &str = "Perform add, subtract, multiply, or divide on two numeric operands. Division by zero returns an error message.";
+const CALCULATOR_DESCRIPTION: &str = "Set operation to add, subtract, multiply, or divide on the numeric operands left and right. Division by zero returns an error message.";
 const CALCULATOR_PROMPT: &str = "Calculate 2 + 3 and 3 * 4.";
 const CALCULATOR_ANSWER: &str = "The results are 5 and 12.";
 const CALCULATOR_SUMMARY: &str = "Calculator findings: 2 + 3 = 5; 3 * 4 = 12.";
@@ -110,9 +110,6 @@ fn search_result() -> Value {
         "site_icon":null,"date":null,"authority":3
     })
 }
-
-const DEEPSEEK_SEARCH_DESCRIPTION: &str = "Search for independently verifiable sources.";
-const DEEPSEEK_FETCH_URL_DESCRIPTION: &str = "The public page URL to retrieve.";
 
 fn deepseek_calls(fetch: bool) -> Value {
     if fetch {
@@ -477,9 +474,7 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                     "params.llm_base_url":server.base_url,
                     "params.llm_api_key":"synthetic-llm-key",
                     "params.deepseek_base_url":deepseek_server.as_ref().unwrap().base_url,
-                    "params.deepseek_api_key":"synthetic-deepseek-key",
-                    "params.search_description":DEEPSEEK_SEARCH_DESCRIPTION,
-                    "params.fetch_parameters":{"url":{"description":DEEPSEEK_FETCH_URL_DESCRIPTION}}
+                    "params.deepseek_api_key":"synthetic-deepseek-key"
                 })
             } else if name.starts_with("chat-") {
                 json!({"params.messages":[{"role":"user","content":"Hello"}], "params.model":"example-model", "params.base_url":server.base_url})
@@ -660,9 +655,9 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                         "parameters":{
                             "type":"object",
                             "properties":{
-                                "left":{"type":"number", "description":"Left operand."},
-                                "operation":{"type":"string", "description":"Operation to perform: add, subtract, multiply, or divide."},
-                                "right":{"type":"number", "description":"Right operand; must be nonzero for division."}
+                                "left":{"type":"number"},
+                                "operation":{"type":"string"},
+                                "right":{"type":"number"}
                             },
                             "required":["left","operation","right"],
                             "additionalProperties":false
@@ -680,24 +675,40 @@ fn documented_examples_compile_and_produce_expected_outputs() {
             }
             let tools = requests[0].body["tools"].as_array().unwrap();
             assert_eq!(tools.len(), 2);
-            for tool in tools {
-                let function = &tool["function"];
-                let properties = function["parameters"]["properties"].as_object().unwrap();
-                let expected = if function["name"] == "search" {
-                    assert_eq!(function["description"], DEEPSEEK_SEARCH_DESCRIPTION);
-                    vec!["count", "query"]
-                } else {
-                    assert_eq!(
-                        properties["url"]["description"],
-                        DEEPSEEK_FETCH_URL_DESCRIPTION
-                    );
-                    vec!["url"]
-                };
-                assert_eq!(
-                    properties.keys().map(String::as_str).collect::<Vec<_>>(),
-                    expected
+            for (name, description_prefix, properties, required) in [
+                (
+                    "search",
+                    "Search the web",
+                    json!({"count":{"type":"integer"}, "query":{"type":"string"}}),
+                    "query",
+                ),
+                (
+                    "fetch",
+                    "Fetch a web page",
+                    json!({"url":{"type":"string"}}),
+                    "url",
+                ),
+            ] {
+                let function = &tools
+                    .iter()
+                    .find(|tool| tool["function"]["name"] == name)
+                    .unwrap_or_else(|| panic!("missing tool {name}"))["function"];
+                assert!(
+                    function["description"]
+                        .as_str()
+                        .is_some_and(|text| text.starts_with(description_prefix)),
+                    "unexpected description for {name}: {}",
+                    function["description"]
                 );
-                assert_eq!(function["parameters"]["additionalProperties"], false);
+                assert_eq!(
+                    function["parameters"],
+                    json!({
+                        "type":"object",
+                        "properties":properties,
+                        "required":[required],
+                        "additionalProperties":false
+                    })
+                );
             }
             for request in &requests {
                 let body = request.body.to_string();
