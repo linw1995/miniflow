@@ -15,7 +15,7 @@ use mf_compiler::{
 use mf_runtime::{ExecutionContext, WorkflowArguments};
 use mfn_deepseek::test_support::{Reply, Server};
 use serde_json::{Value, json};
-use std::{fs, path::Path, process::Command};
+use std::{fs, path::Path, process::Command, time::Duration};
 
 fn definition() -> Value {
     json!({
@@ -105,7 +105,7 @@ fn run(executable: &Path, inputs: &Value) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
-fn web_agent(server: &Server) -> Value {
+fn web_agent(server: &Server, fetch_timeout_ms: u64) -> Value {
     use std::collections::BTreeMap;
     use tool_values::{FlowTool, configured_agent};
 
@@ -114,7 +114,7 @@ fn web_agent(server: &Server) -> Value {
         ("search", "query", vec!["results"]),
         ("fetch", "url", vec!["title", "content"]),
     ] {
-        let body = json!({
+        let mut body = json!({
             "version":"2026-10-28",
             "nodes":[
                 {"id":"params","kind":"builtin.parameters","config":{"parameters":{
@@ -129,6 +129,9 @@ fn web_agent(server: &Server) -> Value {
             ],
             "outputs":outputs.into_iter().map(|port| json!({"name":port,"node":name,"port":port})).collect::<Vec<_>>()
         });
+        if name == "fetch" {
+            body["nodes"][1]["config"]["timeout_ms"] = fetch_timeout_ms.into();
+        }
         tools.insert(
             name.into(),
             FlowTool {
@@ -178,6 +181,23 @@ fn model_tool_call(id: &str, name: &str, arguments: Value) -> mfn_llm::test_supp
 
 #[test]
 fn checked_fetch_failure_reaches_agent_and_explicit_alternate_source_without_private_bindings() {
+    let mut missing = Reply::json(json!({"error":{"message":"synthetic-tool-key remote-secret"}}));
+    missing.status = 404;
+    check_fetch_failure_recovery(missing, 60_000, "HTTP 404 Not Found");
+}
+
+#[test]
+fn fetch_request_timeout_reaches_agent_and_explicit_alternate_source() {
+    let mut stalled = Reply::fetch("Unavailable", "remote-secret");
+    stalled.body_delay = Duration::from_millis(1_500);
+    check_fetch_failure_recovery(
+        stalled,
+        1_000,
+        "DeepSeek fetch request timed out after 1000 ms",
+    );
+}
+
+fn check_fetch_failure_recovery(failure: Reply, fetch_timeout_ms: u64, expected_error: &str) {
     let results = json!([{
         "rerank_score":2.4,"title":"Release","url":"https://example.com/missing",
         "snippet":"Snippet","summary":"Summary","content":"Content","site_name":null,
@@ -187,11 +207,9 @@ fn checked_fetch_failure_reaches_agent_and_explicit_alternate_source_without_pri
         "snippet":"Snippet","summary":"Summary","content":"Content","site_name":null,
         "site_icon":null,"date":null,"authority":3
     }]);
-    let mut missing = Reply::json(json!({"error":{"message":"synthetic-tool-key remote-secret"}}));
-    missing.status = 404;
     let attempt = [
         Reply::search(results),
-        missing,
+        failure,
         Reply::fetch("Alternate", "# Markdown"),
     ];
     let server = Server::start(attempt.iter().cloned().cycle().take(6).collect());
@@ -215,7 +233,7 @@ fn checked_fetch_failure_reaches_agent_and_explicit_alternate_source_without_pri
             })
             .collect(),
     );
-    let definition = web_agent(&server);
+    let definition = web_agent(&server, fetch_timeout_ms);
     let root = tempfile::tempdir().unwrap();
     let executable = compile(&definition, root.path());
     assert!(server.requests().is_empty());
@@ -240,12 +258,7 @@ fn checked_fetch_failure_reaches_agent_and_explicit_alternate_source_without_pri
         assert_eq!(transcript.len(), 7);
         assert_eq!(messages[3]["tool_call_id"], "missing");
         let failed: Value = serde_json::from_str(messages[3]["content"].as_str().unwrap()).unwrap();
-        assert!(
-            failed["error"]
-                .as_str()
-                .unwrap()
-                .contains("HTTP 404 Not Found")
-        );
+        assert!(failed["error"].as_str().unwrap().contains(expected_error));
         assert_eq!(messages[5]["tool_call_id"], "alternate");
         assert_eq!(
             serde_json::from_str::<Value>(messages[5]["content"].as_str().unwrap()).unwrap(),
@@ -266,7 +279,7 @@ fn checked_fetch_failure_reaches_agent_and_explicit_alternate_source_without_pri
                     message["role"] == "tool"
                         && message["content"]
                             .as_str()
-                            .is_some_and(|content| content.contains("HTTP 404 Not Found"))
+                            .is_some_and(|content| content.contains(expected_error))
                 })
         );
         for request in round {
