@@ -1,3 +1,4 @@
+mod agent_request;
 pub mod call;
 pub mod flows;
 pub mod tools;

@@ -77,6 +77,9 @@
       "config": {
         "max_iterations": 8,
         "inputs": {
+          "prefix": {
+            "list": "object"
+          },
           "api_key": "string",
           "base_url": "string",
           "model": "string",
@@ -91,12 +94,6 @@
           }
         },
         "variables": [
-          {
-            "name": "messages",
-            "type": {
-              "list": "object"
-            }
-          },
           {
             "name": "generated",
             "type": {
@@ -145,6 +142,24 @@
           },
           "nodes": [
             {
+              "id": "request",
+              "kind": "llm.agent_request",
+              "inputs": {
+                "prefix": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "prefix"
+                  }
+                },
+                "generated": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "generated"
+                  }
+                }
+              }
+            },
+            {
               "id": "turn",
               "kind": "workflow.call",
               "config": {
@@ -153,7 +168,7 @@
               "inputs": {
                 "params.messages": {
                   "from": {
-                    "node": "%loop",
+                    "node": "request",
                     "port": "messages"
                   }
                 },
@@ -258,7 +273,7 @@
               "inputs": {
                 "messages": {
                   "from": {
-                    "node": "%loop",
+                    "node": "request",
                     "port": "messages"
                   }
                 },
@@ -398,12 +413,6 @@
           ],
           "outputs": [
             {
-              "name": "messages",
-              "node": "append_tool_results",
-              "port": "messages",
-              "optional": true
-            },
-            {
               "name": "generated",
               "node": "generated",
               "port": "value"
@@ -443,7 +452,7 @@
         }
       },
       "inputs": {
-        "messages": {
+        "prefix": {
           "from": {
             "node": "params",
             "port": "messages"
