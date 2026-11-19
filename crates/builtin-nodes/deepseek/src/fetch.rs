@@ -5,8 +5,7 @@ use mf_runtime::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use snafu::{OptionExt, ResultExt, ensure};
-use std::time::{Duration, Instant};
+use snafu::{ResultExt, ensure};
 
 pub const FETCH_KIND: &str = "builtin.deepseek.fetch";
 
@@ -69,19 +68,8 @@ impl TypedTaskNode for FetchNode {
         context: &mut ExecutionContext,
     ) -> Result<TypedNodeResult<Self::Output>, NodeExecutionError> {
         Self::validate(&inputs)?;
-        let origin = Instant::now();
-        let config = self
-            .config
-            .resolve(context)
-            .map_err(DeepSeekExecutionError::from)?;
-        let deadline = origin
-            .checked_add(Duration::from_millis(config.timeout_ms))
-            .context(crate::DeadlineRangeSnafu)?;
-        context.check_future_limits(Some(deadline))?;
         let request = FetchRequest { url: &inputs.url };
-        let request = self.client.post(&config, "fetch", &request)?;
-        let outputs: FetchOutputs = context.execute_future(request, Some(deadline))??;
-        context.check_future_limits(Some(deadline))?;
+        let outputs: FetchOutputs = self.client.post(&self.config, "fetch", &request, context)?;
         Ok(outputs.into())
     }
 }
