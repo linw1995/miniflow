@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-28",
+  "version": "2026-11-11",
   "dependencies": {
     "core": {
       "package": "mfn-core"
@@ -124,6 +124,20 @@
       "from_node": "route",
       "from_output": "else",
       "to_node": "continue_request"
+    }
+  ],
+  "clusters": [
+    {
+      "label": "Compose messages",
+      "annotation": "Forward the prefix unchanged when the generated suffix is empty.",
+      "collapsed": true,
+      "nodes": [
+        "params",
+        "route",
+        "prefix_only",
+        "continue_request",
+        "request"
+      ]
     }
   ],
   "outputs": [

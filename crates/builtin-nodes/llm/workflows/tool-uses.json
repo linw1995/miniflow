@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-28",
+  "version": "2026-11-11",
   "dependencies": {
     "core": {
       "package": "mfn-core"
@@ -103,7 +103,7 @@
           }
         },
         "body": {
-          "version": "2026-10-28",
+          "version": "2026-11-11",
           "nodes": [
             {
               "id": "classify",
@@ -251,6 +251,26 @@
               "to_node": "execute"
             }
           ],
+          "clusters": [
+            {
+              "label": "Check arguments",
+              "annotation": "Select the tool and check its public arguments.",
+              "collapsed": true,
+              "nodes": [
+                "classify",
+                "gate"
+              ]
+            },
+            {
+              "label": "Encode result",
+              "annotation": "Keep the call ID with the tool content or error.",
+              "collapsed": true,
+              "nodes": [
+                "fail",
+                "encode"
+              ]
+            }
+          ],
           "outputs": [
             {
               "name": "result",
@@ -290,6 +310,19 @@
     {
       "from_node": "require_calls",
       "to_node": "validated_calls"
+    }
+  ],
+  "clusters": [
+    {
+      "label": "Validate calls",
+      "annotation": "Reject malformed calls before starting the parallel batch.",
+      "collapsed": true,
+      "nodes": [
+        "params",
+        "calls_valid",
+        "require_calls",
+        "validated_calls"
+      ]
     }
   ],
   "outputs": [
