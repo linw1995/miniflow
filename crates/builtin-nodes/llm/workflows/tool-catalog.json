@@ -29,7 +29,7 @@
       "config": {
         "mode": "parallel",
         "body": {
-          "version": "2026-10-28",
+          "version": "2026-11-11",
           "nodes": [
             {
               "id": "definition",
@@ -120,6 +120,18 @@
             {
               "from_node": "definition",
               "to_node": "require_portable"
+            }
+          ],
+          "clusters": [
+            {
+              "label": "Validate schema",
+              "annotation": "Check the callable shape, documented fields, and model-visible types.",
+              "collapsed": true,
+              "nodes": [
+                "require_structure",
+                "require_documented",
+                "require_portable"
+              ]
             }
           ],
           "outputs": [

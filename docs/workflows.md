@@ -550,6 +550,14 @@ The same Agent handles empty, single-tool, and multi-tool collections. For no to
 `tools` and `tool_properties` objects with `builtin.object` and `fields: {}`; there is no separate
 empty-Agent definition.
 
+In the TUI, `--tui`, chat Inspect, and the chat Flow execution panel share the same default summary
+view: bodies with statically bound Router routes start at `[~]` showing only their bound tool
+subgraphs, and bodies without static routes start folded (`[+]`). When the Agent body is expanded,
+its [node clusters](#node-clusters) still fold preparation, reply handling, and state updates by
+default while keeping the model turn and tool dispatch visible. Press `l` to expand a body, or `c`
+to cycle a body's view or toggle a cluster. These folds do not change execution order, streams, or
+outputs.
+
 The [calculator chat Flow](../examples/chat-calculator-flow.json) loads
 [the calculator](../examples/agent-calculator/calculator.json) as a Flow constant. The `tools` object
 holds the native Flow, and one CEL node assembles `tool_properties` from its `properties` output and a

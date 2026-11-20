@@ -60,7 +60,6 @@ mod tests {
             json!({"map":"object"})
         );
         assert!(params.config["parameters"].get("descriptions").is_none());
-        assert!(definition.clusters.is_empty());
         let repeat = definition
             .nodes
             .iter()

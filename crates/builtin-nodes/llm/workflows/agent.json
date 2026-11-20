@@ -417,6 +417,28 @@
               "to_node": "dispatch"
             }
           ],
+          "clusters": [
+            {
+              "label": "Handle reply",
+              "annotation": "Append the assistant message and decide whether to dispatch tools.",
+              "collapsed": true,
+              "nodes": [
+                "route",
+                "append_assistant"
+              ]
+            },
+            {
+              "label": "Record turn",
+              "annotation": "Retain usage and the generated messages from either branch.",
+              "collapsed": true,
+              "nodes": [
+                "collect_usages",
+                "append_tool_results",
+                "finished_generated",
+                "generated"
+              ]
+            }
+          ],
           "outputs": [
             {
               "name": "generated",
@@ -551,6 +573,17 @@
     }
   ],
   "edges": [],
+  "clusters": [
+    {
+      "label": "Prepare agent",
+      "annotation": "Read the request and build the tool catalog once.",
+      "collapsed": true,
+      "nodes": [
+        "params",
+        "catalog"
+      ]
+    }
+  ],
   "outputs": [
     {
       "name": "tool_call_delta",

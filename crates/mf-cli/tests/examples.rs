@@ -276,6 +276,98 @@ fn every_example_has_an_expected_result() {
 }
 
 #[cfg(unix)]
+fn assert_agent_layouts(executable: &Path, routes: &[&str]) {
+    use mf_telemetry::event::ScopePathEntry;
+    use mf_tui::graph::{BodyDisplay, ConnectionView, GraphLayout};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let description = mf_tui::manifest::read_manifest(executable)
+        .unwrap()
+        .description()
+        .unwrap();
+    let scopes: &[(&[&str], usize, &[&str])] = &[
+        (&["agent"], 3, &["repeat", "result"]),
+        (&["agent", "catalog", "project"], 2, &["definition"]),
+        (&["agent", "repeat"], 5, &["request", "turn", "dispatch"]),
+        (&["agent", "repeat", "request"], 1, &[]),
+        (&["agent", "repeat", "dispatch"], 2, &["dispatch"]),
+        (
+            &["agent", "repeat", "dispatch", "dispatch"],
+            3,
+            &["execute"],
+        ),
+    ];
+    for &(path, boxes, visible) in scopes {
+        let path = path.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let body = description.body(&path).unwrap();
+        let layout =
+            GraphLayout::from_body_with_view(&description, &path, ConnectionView::Execution)
+                .unwrap();
+        assert_eq!(
+            layout.nodes().len(),
+            boxes + usize::from(body.source.is_some()),
+            "{path:?}"
+        );
+        for id in visible {
+            let display = layout.display_index_for_node_id(id).unwrap();
+            assert_eq!(layout.nodes()[display].id, *id, "{path:?}");
+        }
+        let expanded = GraphLayout::from_body_with_view_and_collapsed(
+            &description,
+            &path,
+            ConnectionView::Execution,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        assert_eq!(expanded.nodes().len(), body.nodes.len(), "{path:?}");
+    }
+
+    let agent = vec!["agent".to_owned()];
+    let default_states: BTreeMap<_, _> = description
+        .loop_bodies
+        .iter()
+        .map(|body| (body.path.clone(), BodyDisplay::Summary))
+        .collect();
+    let summary = GraphLayout::with_body_states(
+        &description,
+        ConnectionView::Execution,
+        &default_states,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let owner = summary.display_index_for_node_id("agent").unwrap();
+    assert_eq!(summary.body_display(owner), Some(BodyDisplay::Summary));
+    assert!(
+        summary
+            .display_index_for_scoped_node(&agent, "repeat")
+            .is_none()
+    );
+    let mut count = description.nodes.len();
+    for route in routes {
+        let path = vec![
+            "agent".into(),
+            "repeat".into(),
+            "dispatch".into(),
+            "dispatch".into(),
+            ScopePathEntry::binding_key("execute", route),
+        ];
+        let body = description.body(&path).unwrap();
+        for node in &body.nodes {
+            assert!(
+                summary
+                    .display_index_for_scoped_node(&path, &node.id)
+                    .is_some(),
+                "missing {route}/{}",
+                node.id
+            );
+        }
+        count += body.nodes.len();
+    }
+    assert_eq!(summary.nodes().len(), count);
+    mf_tui::run::ObservationView::new(&description).unwrap();
+}
+
+#[cfg(unix)]
 #[test]
 fn documented_examples_compile_and_produce_expected_outputs() {
     use std::{
@@ -438,7 +530,64 @@ fn documented_examples_compile_and_produce_expected_outputs() {
             .unwrap();
             fs::remove_dir_all(&build).unwrap();
             if name == "chat-context-flow.json" {
+                use mf_telemetry::event::ScopePathEntry;
+                use mf_tui::graph::{BodyDisplay, ConnectionView, GraphLayout};
+                use std::collections::BTreeMap;
+
                 fs::remove_file(definitions.join("chat-calculator-flow.json")).unwrap();
+                let description = mf_tui::manifest::read_manifest(&executable)
+                    .unwrap()
+                    .description()
+                    .unwrap();
+                let default_states: BTreeMap<_, _> = description
+                    .loop_bodies
+                    .iter()
+                    .map(|body| (body.path.clone(), BodyDisplay::Summary))
+                    .collect();
+                let summary = GraphLayout::with_body_states(
+                    &description,
+                    ConnectionView::Execution,
+                    &default_states,
+                    &BTreeMap::new(),
+                )
+                .unwrap();
+                let conversation = summary.display_index_for_node_id("conversation").unwrap();
+                assert_eq!(
+                    summary.body_display(conversation),
+                    Some(BodyDisplay::Summary)
+                );
+                assert!(
+                    summary
+                        .display_index_for_scoped_node(&["conversation".into()], "agent")
+                        .is_none()
+                );
+                let calculator = vec![
+                    "conversation".into(),
+                    "agent".into(),
+                    "repeat".into(),
+                    "dispatch".into(),
+                    "dispatch".into(),
+                    ScopePathEntry::binding_key("execute", "calculator"),
+                ];
+                let body = description.body(&calculator).unwrap();
+                for node in &body.nodes {
+                    assert!(
+                        summary
+                            .display_index_for_scoped_node(&calculator, &node.id)
+                            .is_some(),
+                        "missing calculator/{}",
+                        node.id
+                    );
+                }
+                assert_eq!(
+                    summary.nodes().len(),
+                    description.nodes.len() + body.nodes.len()
+                );
+                mf_tui::run::ObservationView::new(&description).unwrap();
+            } else if name == "chat-deepseek-flow.json" {
+                assert_agent_layouts(&executable, &["search", "fetch"]);
+            } else {
+                assert_agent_layouts(&executable, &["calculator"]);
             }
         }
         let mut command = Command::new(&executable);
