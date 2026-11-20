@@ -703,7 +703,7 @@ it entirely. Expanded bodies with running descendants do not add duplicate PiPs 
 Running members of folded clusters and bodies remain visible in separate PiPs through a shared fully
 expanded PiP layout; folding the main graph does not hide them. PiP titles include the body path to
 distinguish nodes with the same ID in different scopes. The compact chat Flow execution panel uses the
-same PiP grid alongside its folded root overview and keeps a single running nested Call node visible.
+same PiP grid alongside its default-view root overview and keeps a single running nested Call node visible.
 PiPs follow the deepest active runtime scope, including named Router branches and dynamic calls through
 Flow-valued edges. Dynamic PiPs use the target's existing definition layout with invocation-local node
 states; they do not move the main graph's selection or mark the producer's static body as executing.
@@ -718,12 +718,19 @@ The graph hides a cluster's annotation while its label is displaced from its ori
 Aligned ports use a straight connection when collision checks allow it, including connections spanning multiple columns.
 Press `c` to collapse or
 expand the selected node's cluster; collapsed clusters render as one aggregate node, remap external
-connections, and hide internal connections. On a node with a described Loop, Iteration, or Call body,
-`c` toggles that body and `l` expands it inside the parent node. Bodies start expanded (`[-]`);
-expanded bodies keep parent nodes and external connections visible and support nested expansion.
-Collapsed bodies (`[+]`) can be reopened without leaving the parent graph.
-Tab selects body nodes alongside parent nodes. `h` or Esc collapses the selected expanded body or its
-enclosing body; Esc closes visible Details first. `[` and `]` inspect older and newer retained pass
+connections, and hide internal connections. On a body owner, `c` cycles its display view and `l` expands it directly.
+An owner whose body contains statically bound Router routes has an intermediate summary (`[~]`): it hides the
+enclosing orchestration and displays the outermost bound route subgraphs under the owner, labeled by route name.
+Across `--tui`, chat Inspect, and the chat Flow execution panel, bodies start in this default summary view (`[~]`),
+falling back to folded (`[+]`) when there are no statically bound routes under the body. For example, the DeepSeek
+`agent` call starts at `[~]`, showing `search` and `fetch` without the Agent Loop and dispatch chain, and the context
+example's `conversation` call starts at `[~]`, showing `calculator`. Dynamic Flow values do not create summary bodies;
+their active invocations continue to appear in PiPs and Details.
+
+A summary keeps the route's original scope and observation identity. It does not change cluster
+folding, external edges, or the separate PiP layout. Tab selects the displayed nodes. `h` or Esc
+folds the selected open body or its nearest visible enclosing body; Esc closes visible Details
+first. `[` and `]` inspect older and newer retained pass
 frames or Iteration items for the selected node's scope, with nested bodies following their enclosing pass.
 New lifecycle and Iteration detail events focus and reveal the deepest visible node; collapsed bodies focus their owner.
 Retained history and manual panning stay stable until new lifecycle evidence arrives.

@@ -638,11 +638,12 @@ not queued. Drafts survive idle switches. History opens at a bounded latest page
 commands page original records, not model context. Turn-level performance appears once per page and
 is not duplicated on reload.
 
-The Flow panel is enabled by default. Wide terminals place it beside the transcript, narrower tall
-terminals below, and small terminals show a status line. Ctrl+E does not stop observation and its
-preference survives new turns/sessions for the application run. Parallel work uses the shared local
-picture-in-picture graphs, including members inside folded calls. The last run remains visible until
-a new turn or session; Inspect opens graph, trace, log, and data views and Esc returns to chat.
+The Flow panel is enabled by default and uses the same default summary view as `--tui` and Inspect.
+Wide terminals place it beside the transcript, narrower tall terminals below, and small terminals
+show a status line. Ctrl+E does not stop observation and its preference survives new turns/sessions
+for the application run. Parallel work uses the shared local picture-in-picture graphs, including
+members inside folded calls. The last run remains visible until a new turn or session; Inspect opens
+graph, trace, log, and data views and Esc returns to chat.
 
 The terminal has no rename, archive, usage-dashboard, automatic-title, or parallel-execution controls;
 those remain programmatic APIs or Flow policy. Storage and supervision run on a worker so drawing

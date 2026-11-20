@@ -104,10 +104,13 @@ impl ScopePathEntry {
         )
     }
 
+    /// Decodes a compiled child binding key as `(owner, binding)`.
+    pub fn split_binding_key(key: &str) -> Option<(String, String)> {
+        serde_json::from_str(key.strip_prefix("%flow:")?).ok()
+    }
+
     pub fn binding_owner(key: &str) -> Option<String> {
-        let (owner, _): (String, String) =
-            serde_json::from_str(key.strip_prefix("%flow:")?).ok()?;
-        Some(owner)
+        Self::split_binding_key(key).map(|(owner, _)| owner)
     }
 }
 

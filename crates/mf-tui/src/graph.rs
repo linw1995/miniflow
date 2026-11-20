@@ -11,6 +11,7 @@ use crate::{
 use mf_telemetry::{
     ContractError,
     description::{NodeDescription, WorkflowDescription, WorkflowDescriptionVersion},
+    event::ScopePathEntry,
 };
 use ratatui::{
     buffer::Buffer,
@@ -74,6 +75,14 @@ pub struct GraphCluster {
     pub members: Vec<usize>,
     pub rect: GraphRect,
     pub collapsed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BodyDisplay {
+    #[default]
+    Hidden,
+    Summary,
+    Expanded,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -150,6 +159,72 @@ struct TransferEvent {
     snapshot: Arc<mf_runtime::NodeSnapshot>,
 }
 
+struct RouterBinding<'a> {
+    path: &'a [String],
+    name: String,
+}
+
+struct InlineBodies<'a> {
+    states: &'a BTreeMap<Vec<String>, BodyDisplay>,
+    collapsed: &'a BTreeMap<Vec<String>, BTreeSet<usize>>,
+    bindings: Vec<RouterBinding<'a>>,
+}
+
+impl<'a> InlineBodies<'a> {
+    fn new(
+        description: &'a WorkflowDescription,
+        states: &'a BTreeMap<Vec<String>, BodyDisplay>,
+        collapsed: &'a BTreeMap<Vec<String>, BTreeSet<usize>>,
+    ) -> Self {
+        let routers: BTreeSet<_> = std::iter::once((&[][..], &description.nodes))
+            .chain(
+                description
+                    .loop_bodies
+                    .iter()
+                    .map(|body| (body.path.as_slice(), &body.nodes)),
+            )
+            .flat_map(|(path, nodes)| {
+                nodes
+                    .iter()
+                    .filter(|node| node.kind == "builtin.router")
+                    .map(move |node| (path, node.id.as_str()))
+            })
+            .collect();
+        let mut bindings: Vec<_> = description
+            .loop_bodies
+            .iter()
+            .filter_map(|body| {
+                // Only described Router branches prove a static target. A binding-shaped
+                // scope on another kind, or a runtime Flow origin, is not a Router route.
+                let (key, parent) = body.path.split_last()?;
+                let (owner, name) = ScopePathEntry::split_binding_key(key)?;
+                (body.source.is_none() && routers.contains(&(parent, owner.as_str()))).then_some(
+                    RouterBinding {
+                        path: &body.path,
+                        name,
+                    },
+                )
+            })
+            .collect();
+        bindings.sort_unstable_by_key(|binding| binding.path);
+        Self {
+            states,
+            collapsed,
+            bindings,
+        }
+    }
+
+    fn summary(&self, path: &[String]) -> impl Iterator<Item = &RouterBinding<'a>> {
+        // Direct route bodies already describe the Router's entire expanded view.
+        let start = self
+            .bindings
+            .partition_point(|binding| binding.path <= path);
+        self.bindings[start..]
+            .iter()
+            .take_while(move |binding| binding.path.starts_with(path))
+    }
+}
+
 pub struct GraphLayout {
     streaming: bool,
     view: ConnectionView,
@@ -164,8 +239,9 @@ pub struct GraphLayout {
     all_nodes: Vec<NodeDescription>,
     source_paths: Vec<Vec<String>>,
     cluster_keys: Vec<(Vec<String>, usize)>,
-    expanded_nodes: BTreeSet<usize>,
-    body_nodes: BTreeSet<usize>,
+    body_displays: BTreeMap<usize, BodyDisplay>,
+    summarizable_nodes: BTreeSet<usize>,
+    summary_labels: Vec<(GraphRect, String)>,
     clusters: Vec<GraphCluster>,
     edges: Vec<GraphEdge>,
     transfer_members: Vec<Vec<TransferMapping>>,
@@ -981,14 +1057,16 @@ impl GraphLayout {
             )
             .max()
             .unwrap_or(MARGIN * 2);
-        let body_nodes = nodes
+        let body_displays = description
+            .loop_bodies
             .iter()
-            .enumerate()
-            .filter_map(|(index, node)| {
-                description
-                    .body(std::slice::from_ref(&node.id))
-                    .is_some()
-                    .then_some(index)
+            .filter_map(|body| {
+                let [key] = body.path.as_slice() else {
+                    return None;
+                };
+                let owner = ScopePathEntry::binding_owner(key);
+                let display = display_of_node[node_index[owner.as_deref().unwrap_or(key)]];
+                (nodes[display].kind != CLUSTER_KIND).then_some((display, BodyDisplay::Hidden))
             })
             .collect();
         Ok(Self {
@@ -1010,8 +1088,9 @@ impl GraphLayout {
             cluster_keys: (0..description.clusters.len())
                 .map(|index| (Vec::new(), index))
                 .collect(),
-            expanded_nodes: BTreeSet::new(),
-            body_nodes,
+            body_displays,
+            summarizable_nodes: BTreeSet::new(),
+            summary_labels: Vec::new(),
             clusters,
             edges,
             transfer_members,
@@ -1026,17 +1105,31 @@ impl GraphLayout {
         expanded: &BTreeSet<Vec<String>>,
         collapsed: &BTreeMap<Vec<String>, BTreeSet<usize>>,
     ) -> Result<Self, GraphError> {
+        let states = expanded
+            .iter()
+            .map(|path| (path.clone(), BodyDisplay::Expanded))
+            .collect();
+        Self::with_body_states(description, view, &states, collapsed)
+    }
+
+    /// Projects selected bodies without rewriting their definition paths or connections.
+    pub fn with_body_states(
+        description: &WorkflowDescription,
+        view: ConnectionView,
+        states: &BTreeMap<Vec<String>, BodyDisplay>,
+        collapsed: &BTreeMap<Vec<String>, BTreeSet<usize>>,
+    ) -> Result<Self, GraphError> {
         description.validate().context(DescriptionSnafu)?;
+        let bodies = InlineBodies::new(description, states, collapsed);
         let mut remaining = MAX_SESSION_NODES;
-        Self::inline_scope(description, &[], view, expanded, collapsed, &mut remaining)
+        Self::inline_scope(description, &[], view, &bodies, &mut remaining)
     }
 
     fn inline_scope(
         description: &WorkflowDescription,
         path: &[String],
         view: ConnectionView,
-        expanded: &BTreeSet<Vec<String>>,
-        collapsed: &BTreeMap<Vec<String>, BTreeSet<usize>>,
+        bodies: &InlineBodies<'_>,
         remaining: &mut usize,
     ) -> Result<Self, GraphError> {
         let body;
@@ -1053,7 +1146,7 @@ impl GraphLayout {
             }
         );
         *remaining -= scope.nodes.len();
-        let folded = collapsed.get(path).cloned().unwrap_or_default();
+        let folded = bodies.collapsed.get(path).cloned().unwrap_or_default();
         let hidden: BTreeSet<_> = scope
             .clusters
             .iter()
@@ -1062,27 +1155,58 @@ impl GraphLayout {
             .flat_map(|(_, cluster)| cluster.nodes.iter().map(String::as_str))
             .collect();
         let mut children: BTreeMap<String, Self> = BTreeMap::new();
+        let mut displays = Vec::new();
         for node in &scope.nodes {
             if hidden.contains(node.id.as_str()) {
                 continue;
             }
-            for child_path in description.body_paths_for_node(path, &node.id) {
-                if expanded.contains(child_path) {
-                    let child = Self::inline_scope(
-                        description,
-                        child_path,
-                        view,
-                        expanded,
-                        collapsed,
-                        remaining,
-                    )?;
-                    if let Some(existing) = children.get_mut(&node.id) {
-                        existing.stack_below(child);
-                    } else {
-                        children.insert(node.id.clone(), child);
+            let paths = description.body_paths_for_node(path, &node.id);
+            if paths.is_empty() {
+                continue;
+            }
+            let mut display = BodyDisplay::Hidden;
+            let mut summarizable = false;
+            let mut attach = |child, mode| {
+                if let Some(existing) = children.get_mut(&node.id) {
+                    existing.stack_below(child);
+                } else {
+                    children.insert(node.id.clone(), child);
+                }
+                if display == BodyDisplay::Hidden || mode == BodyDisplay::Expanded {
+                    display = mode;
+                }
+            };
+            for child_path in paths {
+                let mut summary = bodies.summary(child_path).peekable();
+                summarizable |= summary.peek().is_some();
+                match bodies.states.get(child_path).copied().unwrap_or_default() {
+                    BodyDisplay::Expanded => attach(
+                        Self::inline_scope(description, child_path, view, bodies, remaining)?,
+                        BodyDisplay::Expanded,
+                    ),
+                    BodyDisplay::Summary => {
+                        let mut outer_route: Option<&[String]> = None;
+                        for binding in summary {
+                            // Its own normal layout already accounts for any nested routes.
+                            if outer_route.is_some_and(|path| binding.path.starts_with(path)) {
+                                continue;
+                            }
+                            outer_route = Some(binding.path);
+                            let mut child = Self::inline_scope(
+                                description,
+                                binding.path,
+                                view,
+                                bodies,
+                                remaining,
+                            )?;
+                            child.add_summary_label(&binding.name);
+                            attach(child, BodyDisplay::Summary);
+                        }
                     }
+                    BodyDisplay::Hidden => {}
                 }
             }
+            displays.push((&node.id, display, summarizable));
         }
         let mut layout = Self::with_children(
             scope,
@@ -1092,23 +1216,23 @@ impl GraphLayout {
             &children,
         )?;
         layout.source_paths.fill(path.to_vec());
-        layout.body_nodes = layout
-            .nodes
-            .iter()
-            .enumerate()
-            .filter_map(|(index, node)| {
-                (node.kind != CLUSTER_KIND
-                    && !description.body_paths_for_node(path, &node.id).is_empty())
-                .then_some(index)
-            })
-            .collect();
+        layout.body_displays.clear();
+        for (id, display, summarizable) in displays {
+            let index = layout
+                .display_index_for_scoped_node(path, id)
+                .expect("body owner is visible");
+            layout.body_displays.insert(index, display);
+            if summarizable {
+                layout.summarizable_nodes.insert(index);
+            }
+        }
         for (scope, _) in &mut layout.cluster_keys {
             *scope = path.to_vec();
         }
         for (id, child) in children {
             let owner = layout
                 .display_index_for_scoped_node(path, &id)
-                .expect("expanded body owner is visible");
+                .expect("body owner is visible");
             layout.append_body(owner, child);
         }
         Ok(layout)
@@ -1120,7 +1244,22 @@ impl GraphLayout {
         let x = parent.x + 1;
         let y = parent.y + parent.height - child.height - 1;
         self.merge_body(child, x, y);
-        self.expanded_nodes.insert(owner);
+    }
+
+    fn add_summary_label(&mut self, name: &str) {
+        // Reserve a whole row outside the already routed body.
+        self.translate(0, 1);
+        self.height += 1;
+        self.width = self.width.max(NODE_WIDTH + MARGIN);
+        self.summary_labels.push((
+            GraphRect {
+                x: MARGIN,
+                y: 0,
+                width: self.width - MARGIN,
+                height: 1,
+            },
+            format!("Route: {}", display_line(name)),
+        ));
     }
 
     /// Stacks `other` below this layout without an owning call node.
@@ -1132,20 +1271,42 @@ impl GraphLayout {
         self.width = self.width.max(width);
     }
 
+    fn translate(&mut self, x: u32, y: u32) {
+        let translate = |rect: &mut GraphRect| {
+            rect.x += x;
+            rect.y += y;
+        };
+        for node in &mut self.nodes {
+            translate(&mut node.rect);
+        }
+        for cluster in &mut self.clusters {
+            translate(&mut cluster.rect);
+        }
+        for (rect, _) in &mut self.summary_labels {
+            translate(rect);
+        }
+        for route in &mut self.routes {
+            for point in &mut route.points {
+                point.x += x;
+                point.y += y;
+            }
+            if let Some(label) = &mut route.label {
+                translate(&mut label.rect);
+            }
+        }
+        for crossing in &mut self.crossings {
+            crossing.point.x += x;
+            crossing.point.y += y;
+        }
+    }
+
     fn merge_body(&mut self, mut child: Self, x: u32, y: u32) {
         let nodes = self.nodes.len();
         let sources = self.all_nodes.len();
         let clusters = self.clusters.len();
         let edges = self.edges.len();
-        let translate = |rect: &mut GraphRect| {
-            rect.x += x;
-            rect.y += y;
-        };
-        for node in &mut child.nodes {
-            translate(&mut node.rect);
-        }
+        child.translate(x, y);
         for cluster in &mut child.clusters {
-            translate(&mut cluster.rect);
             for source in &mut cluster.members {
                 *source += sources;
             }
@@ -1165,26 +1326,24 @@ impl GraphLayout {
             edge.from += nodes;
             edge.to += nodes;
         }
-        for route in &mut child.routes {
-            for point in &mut route.points {
-                point.x += x;
-                point.y += y;
-            }
-            if let Some(label) = &mut route.label {
-                translate(&mut label.rect);
-            }
-        }
         for crossing in &mut child.crossings {
-            crossing.point.x += x;
-            crossing.point.y += y;
             crossing.horizontal += edges;
             crossing.vertical += edges;
             crossing.upper += edges;
         }
-        self.body_nodes
-            .extend(child.body_nodes.into_iter().map(|index| index + nodes));
-        self.expanded_nodes
-            .extend(child.expanded_nodes.into_iter().map(|index| index + nodes));
+        self.body_displays.extend(
+            child
+                .body_displays
+                .into_iter()
+                .map(|(index, mode)| (index + nodes, mode)),
+        );
+        self.summarizable_nodes.extend(
+            child
+                .summarizable_nodes
+                .into_iter()
+                .map(|index| index + nodes),
+        );
+        self.summary_labels.extend(child.summary_labels);
         self.nodes.extend(child.nodes);
         self.sources.extend(child.sources);
         self.display_of_node.extend(child.display_of_node);
@@ -1221,12 +1380,20 @@ impl GraphLayout {
         &self.cluster_keys[cluster]
     }
 
+    pub fn body_display(&self, display: usize) -> Option<BodyDisplay> {
+        self.body_displays.get(&display).copied()
+    }
+
+    pub fn can_summarize_body(&self, display: usize) -> bool {
+        self.summarizable_nodes.contains(&display)
+    }
+
     pub fn is_expanded_body(&self, display: usize) -> bool {
-        self.expanded_nodes.contains(&display)
+        self.body_display(display) == Some(BodyDisplay::Expanded)
     }
 
     pub fn display_index_for_scoped_node(&self, path: &[String], id: &str) -> Option<usize> {
-        let owner = mf_telemetry::event::ScopePathEntry::binding_owner(id);
+        let owner = ScopePathEntry::binding_owner(id);
         let source = self
             .all_nodes
             .iter()
@@ -2234,12 +2401,11 @@ impl<'a> GraphView<'a> {
         }
 
         let marker = status_marker(status, observed, self.elapsed_ns);
-        let fold = if self.layout.is_expanded_body(index) {
-            " [-]"
-        } else if self.layout.body_nodes.contains(&index) {
-            " [+]"
-        } else {
-            ""
+        let fold = match self.layout.body_display(index) {
+            Some(BodyDisplay::Expanded) => " [-]",
+            Some(BodyDisplay::Summary) => " [~]",
+            Some(BodyDisplay::Hidden) => " [+]",
+            None => "",
         };
         let title = format!("{marker} {}{fold}", display_line(&node.id));
         let detail = if self.layout.is_collapsed_cluster(index) {
@@ -2729,6 +2895,9 @@ impl Widget for GraphView<'_> {
         for (index, cluster) in self.layout.clusters().iter().enumerate() {
             self.draw_cluster_label(area, buffer, index, cluster);
         }
+        for (rect, label) in &self.layout.summary_labels {
+            self.text(area, buffer, *rect, label, Style::default().fg(Color::Cyan));
+        }
         if let Some(map) = self.minimap_area(area) {
             self.draw_minimap(area, buffer, map);
         }
@@ -3113,8 +3282,9 @@ mod rendering_tests {
             node_annotations: vec![Vec::new(), Vec::new()],
             source_paths: vec![Vec::new(); nodes.len()],
             cluster_keys: Vec::new(),
-            expanded_nodes: BTreeSet::new(),
-            body_nodes: BTreeSet::new(),
+            body_displays: BTreeMap::new(),
+            summarizable_nodes: BTreeSet::new(),
+            summary_labels: Vec::new(),
             all_nodes: nodes
                 .iter()
                 .map(|node| NodeDescription {
