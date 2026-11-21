@@ -796,3 +796,58 @@ fn closing_a_live_controller_reaps_a_child_without_rendering() {
     controller.close().unwrap();
     assert!(started.elapsed() < Duration::from_secs(4));
 }
+
+#[test]
+fn missing_required_env_parameter_fails_without_creating_session() {
+    let root = tempfile::tempdir().unwrap();
+    let mut manifest = chat_manifest();
+    manifest.descriptor.input_schema = serde_json::from_value(json!({
+        "inputs": {
+            "start": {
+                "messages": {
+                    "type": mf_runtime::ValueType::List(Box::new(mf_runtime::ValueType::Object)),
+                    "required": true
+                },
+                "api_key": {
+                    "type": mf_runtime::ValueType::String,
+                    "required": true,
+                    "binding": {
+                        "env": "MF_CHAT_MISSING_TEST_KEY",
+                        "secret": true
+                    }
+                }
+            }
+        },
+        "stdin": {}
+    }))
+    .unwrap();
+    let launch = launch_runner(root.path(), &manifest, "#!/bin/sh\nexit 0\n");
+    let controller = ChatController::open(launch).unwrap();
+    controller
+        .send(ChatCommand::Submit {
+            session_id: None,
+            prompt: "hello".into(),
+        })
+        .unwrap();
+    match next(&controller) {
+        ChatEvent::Error { admission, source } => {
+            assert!(admission);
+            assert!(
+                source.to_string().contains("/start.api_key"),
+                "unexpected error: {source}"
+            );
+        }
+        _ => panic!("expected admission error"),
+    }
+    assert!(
+        controller
+            ._database
+            .list_sessions(false, 50, None)
+            .unwrap()
+            .sessions
+            .is_empty(),
+        "failed parameter resolution must not leave an empty provisional session"
+    );
+    assert!(!controller.busy());
+    controller.close().unwrap();
+}

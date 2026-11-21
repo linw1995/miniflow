@@ -1027,6 +1027,7 @@ impl ChatView {
                 self.load(controller, None);
             }
             ChatEvent::Error { admission, source } => {
+                let detail = source.to_string();
                 if admission {
                     self.pending = None;
                     self.running = false;
@@ -1035,9 +1036,11 @@ impl ChatView {
                     {
                         self.editor.insert(&prompt);
                     }
+                    self.outcome.clear();
+                    append_diagnostic(&mut self.outcome, &detail);
                     self.load(controller, None);
                 }
-                self.notice = source.to_string();
+                self.notice = detail;
             }
         }
         if self.mode == Mode::Commands {
@@ -1162,6 +1165,7 @@ impl ChatView {
         ) {
             self.pending = Some(Some(self.editor.revision));
             self.observation = None;
+            self.outcome.clear();
             self.mode = Mode::Input;
             self.notice = "Starting...".into();
             self.earlier = false;
@@ -3659,6 +3663,7 @@ mod tests {
         pump(&mut view, &controller, |v| {
             v.notice.contains("could not launch") && v.page.is_some()
         });
+        assert!(view.outcome.contains("could not launch"));
         assert_eq!(view.editor.text, "keep this prompt");
         assert!(view.retry_turn().is_some());
         assert!(!controller.busy());
