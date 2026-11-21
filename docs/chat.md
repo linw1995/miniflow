@@ -388,6 +388,29 @@ thresholds or summary strategies. The example's CEL assembly inherits the ordina
 limit of 16 levels without expression, serialized-size, or collection-entry caps. Configure a
 different business pipeline when explicit transcript budgets or truncation policies are required.
 
+### Reusable compaction Flow (`mf-chat.chat-compact`)
+
+`mf-chat` ships the built-in `mf-chat.chat-compact` Flow (`workflows/compact.json`) so chatflows can
+compose structured, threshold-based compaction into `replace_context` without duplicating compaction
+logic:
+
+- **Inputs:** `params.messages` (required), `params.append_messages` (`[]`), `params.usages` (`[]`),
+  `params.enabled` (`true`), `params.force` (`false`), `params.context_window` (`128000`),
+  `params.reserve_tokens` (`16384`), `params.keep_recent_tokens` (`20000`),
+  `params.custom_instructions` (`""`), `params.model`, `params.base_url`, and `params.api_key`.
+- **Outputs:** `status` (`"skipped"`, `"succeeded"`, or `"failed"`), `compacted` (`bool`),
+  `messages`, `summary`, `usages` (attributed with `purpose: "compaction"`), `tokens_before`,
+  `read_files`, `modified_files`, and `error`.
+- **Policy:** Negative token settings fail explicitly. When `!enabled && !force`, the Flow takes a
+  fast path that skips transcript scanning and preserves `messages` directly. Otherwise it estimates
+  context tokens from the last valid non-auxiliary usage plus trailing messages (falling back to a
+  character-based estimate), triggers when `force` is true or
+  `tokens_before > context_window - reserve_tokens`, keeps leading system messages and recent turns
+  without cutting on a tool result, handles split turns with a separate turn-prefix summary, truncates
+  summarized tool results to 2,000 characters, and updates previous compaction summaries and
+  cumulative `read`/`write`/`edit` file lists stored in `metadata.compaction`. Summarization failures
+  or truncated replies keep the original messages unchanged and return captured usages and `error`.
+
 ## History metadata
 
 Every message can carry opaque object-valued `metadata`, including nested values and nulls:
