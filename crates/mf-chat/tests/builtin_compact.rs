@@ -876,3 +876,47 @@ fn cut_point_never_starts_kept_messages_on_tool_result_and_usage_filters_auxilia
     assert_eq!(rebuilt[1]["role"], "assistant");
     assert_eq!(rebuilt[2]["role"], "tool");
 }
+
+#[test]
+fn compact_and_helper_flows_declare_annotated_clusters_covering_all_nodes() {
+    let registry = mf_runtime::BuiltinFlowRegistry::from_inventory().unwrap();
+    for flow_name in [
+        "mf-chat.chat-compact",
+        "mf-chat.chat-compact-run",
+        "mf-chat.chat-compact-prepare",
+        "mf-chat.chat-compact-summarize",
+    ] {
+        let definition = (registry
+            .get(flow_name)
+            .unwrap_or_else(|| panic!("missing builtin flow {flow_name}"))
+            .definition)()
+        .unwrap();
+        assert!(
+            !definition.clusters.is_empty(),
+            "{flow_name} should organize nodes into clusters"
+        );
+        let mut covered = std::collections::BTreeSet::new();
+        for cluster in &definition.clusters {
+            assert!(
+                !cluster.annotation.trim().is_empty(),
+                "{flow_name} cluster `{}` must carry a non-empty annotation",
+                cluster.label
+            );
+            for node_id in &cluster.nodes {
+                assert!(
+                    covered.insert(node_id.clone()),
+                    "{flow_name} assigns node `{node_id}` to multiple clusters"
+                );
+            }
+        }
+        let all_nodes: std::collections::BTreeSet<_> = definition
+            .nodes
+            .iter()
+            .map(|node| node.id.clone())
+            .collect();
+        assert_eq!(
+            covered, all_nodes,
+            "{flow_name} clusters should cover every node exactly once"
+        );
+    }
+}

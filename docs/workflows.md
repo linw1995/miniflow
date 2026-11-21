@@ -146,7 +146,9 @@ The [nested chat example](../examples/chat-nested-title-flow.json) combines the 
 conversation call and streams only the primary answer. The older flat title example remains available
 for inspecting the equivalent composition.
 
-`mf-chat` also owns `workflows/compact.json` and registers `mf-chat.chat-compact`. It takes `params.messages`,
+`mf-chat` also owns `workflows/compact.json` and registers `mf-chat.chat-compact` (backed by internal
+helper Flows `mf-chat.chat-compact-run`, `mf-chat.chat-compact-prepare`, and
+`mf-chat.chat-compact-summarize`). It takes `params.messages`,
 optional `params.append_messages` (default `[]`), `params.usages` (default `[]`), `params.enabled` (default `true`),
 `params.force` (default `false`), `params.context_window` (default `128000`), `params.reserve_tokens` (default `16384`),
 `params.keep_recent_tokens` (default `20000`), `params.custom_instructions` (default `""`), `params.model`,

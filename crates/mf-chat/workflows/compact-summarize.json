@@ -1,0 +1,320 @@
+{
+  "version": "2026-11-13",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core"
+    },
+    "code": {
+      "package": "mfn-code"
+    },
+    "llm": {
+      "package": "mfn-llm"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "enabled": {
+            "type": "bool",
+            "default": false,
+            "secret": false
+          },
+          "messages": {
+            "type": {
+              "list": "object"
+            },
+            "default": []
+          },
+          "error_prefix": {
+            "type": "string",
+            "default": "Summarization",
+            "secret": false
+          },
+          "model": {
+            "type": "string",
+            "default": "your-model",
+            "secret": false
+          },
+          "base_url": {
+            "type": "string",
+            "default": "https://api.openai.com/v1",
+            "secret": false
+          },
+          "api_key": {
+            "type": "string",
+            "env": "OPENAI_API_KEY"
+          }
+        }
+      }
+    },
+    {
+      "id": "route",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "yes",
+            "condition": {
+              "source": {
+                "output": "params.enabled",
+                "path": ""
+              },
+              "operator": "eq",
+              "value": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "model",
+      "kind": "builtin.llm",
+      "config": {
+        "model": {
+          "$ref": "params.model"
+        },
+        "base_url": {
+          "$ref": "params.base_url"
+        },
+        "api_key": {
+          "$ref": "params.api_key"
+        },
+        "capture_errors": true,
+        "attribution": {
+          "purpose": "compaction"
+        }
+      },
+      "inputs": {
+        "messages": {
+          "from": {
+            "node": "params",
+            "port": "messages"
+          }
+        }
+      }
+    },
+    {
+      "id": "check",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "status": "string",
+          "outcome": "string",
+          "text": "string",
+          "usages": {
+            "list": "object"
+          },
+          "error_prefix": "string"
+        },
+        "code": {
+          "ok": "status == 'succeeded' && outcome == 'completed' && text.trim() != ''",
+          "text": "text.trim()",
+          "error": "status == 'succeeded' && outcome == 'completed' && text.trim() != '' ? '' : (usages.size() > 0 && has(usages[0].error) ? string(usages[0].error) : (outcome == 'truncated' ? error_prefix + ' failed: generation hit the token cap and the summary is incomplete' : error_prefix + ' did not produce a complete nonempty summary'))"
+        }
+      },
+      "inputs": {
+        "status": {
+          "from": {
+            "node": "model",
+            "port": "status"
+          }
+        },
+        "outcome": {
+          "from": {
+            "node": "model",
+            "port": "outcome"
+          }
+        },
+        "text": {
+          "from": {
+            "node": "model",
+            "port": "text"
+          }
+        },
+        "usages": {
+          "from": {
+            "node": "model",
+            "port": "usages"
+          }
+        },
+        "error_prefix": {
+          "from": {
+            "node": "params",
+            "port": "error_prefix"
+          }
+        }
+      }
+    },
+    {
+      "id": "skipped",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {},
+        "code": {
+          "ok": "true",
+          "text": "''",
+          "error": "''"
+        }
+      }
+    },
+    {
+      "id": "skipped_usages",
+      "kind": "builtin.constant",
+      "config": {
+        "value": []
+      }
+    },
+    {
+      "id": "ok",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "check",
+              "port": "ok"
+            },
+            {
+              "node": "skipped",
+              "port": "ok"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "text",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "check",
+              "port": "text"
+            },
+            {
+              "node": "skipped",
+              "port": "text"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "usages",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "model",
+              "port": "usages"
+            },
+            {
+              "node": "skipped_usages",
+              "port": "value"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "error",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "check",
+              "port": "error"
+            },
+            {
+              "node": "skipped",
+              "port": "error"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "params",
+      "to_node": "route"
+    },
+    {
+      "from_node": "route",
+      "from_output": "yes",
+      "to_node": "model"
+    },
+    {
+      "from_node": "route",
+      "from_output": "else",
+      "to_node": "skipped"
+    },
+    {
+      "from_node": "route",
+      "from_output": "else",
+      "to_node": "skipped_usages"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "ok",
+      "node": "ok",
+      "port": "value"
+    },
+    {
+      "name": "text",
+      "node": "text",
+      "port": "value"
+    },
+    {
+      "name": "usages",
+      "node": "usages",
+      "port": "value"
+    },
+    {
+      "name": "error",
+      "node": "error",
+      "port": "value"
+    }
+  ],
+  "clusters": [
+    {
+      "label": "Gate request",
+      "annotation": "Route enabled summarization requests to the model or short-circuit as skipped.",
+      "collapsed": true,
+      "nodes": [
+        "params",
+        "route"
+      ]
+    },
+    {
+      "label": "Run model",
+      "annotation": "Call the LLM with compaction attribution and reject provider errors, truncation, or empty replies.",
+      "nodes": [
+        "model",
+        "check"
+      ]
+    },
+    {
+      "label": "Collect result",
+      "annotation": "Merge active and skipped branches into a single status, text, usage, and error contract.",
+      "collapsed": true,
+      "nodes": [
+        "skipped",
+        "skipped_usages",
+        "ok",
+        "text",
+        "usages",
+        "error"
+      ]
+    }
+  ]
+}

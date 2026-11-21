@@ -41,7 +41,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .as_str()
             .expect("Cargo workspace manifest")
     );
-    for workflow in ["title.json", "compact.json"] {
+    for workflow in [
+        "title.json",
+        "compact.json",
+        "compact-run.json",
+        "compact-prepare.json",
+        "compact-summarize.json",
+    ] {
         let source = Path::new("workflows").join(workflow);
         println!("cargo:rerun-if-changed={}", source.display());
         let mut definition = serde_json::from_slice(&fs::read(&source)?)?;

@@ -392,7 +392,10 @@ different business pipeline when explicit transcript budgets or truncation polic
 
 `mf-chat` ships the built-in `mf-chat.chat-compact` Flow (`workflows/compact.json`) so chatflows can
 compose structured, threshold-based compaction into `replace_context` without duplicating compaction
-logic:
+logic. Internally it delegates compaction execution to `mf-chat.chat-compact-run`
+(`workflows/compact-run.json`), which composes `mf-chat.chat-compact-prepare`
+(`workflows/compact-prepare.json`) and the shared `mf-chat.chat-compact-summarize`
+(`workflows/compact-summarize.json`) Flow:
 
 - **Inputs:** `params.messages` (required), `params.append_messages` (`[]`), `params.usages` (`[]`),
   `params.enabled` (`true`), `params.force` (`false`), `params.context_window` (`128000`),

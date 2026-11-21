@@ -1,0 +1,903 @@
+{
+  "version": "2026-11-13",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core"
+    },
+    "code": {
+      "package": "mfn-code"
+    }
+  },
+  "flows": {
+    "prepare": {
+      "builtin": "mf-chat.chat-compact-prepare"
+    },
+    "summarize": {
+      "builtin": "mf-chat.chat-compact-summarize"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "messages": {
+            "type": {
+              "list": "object"
+            }
+          },
+          "state": {
+            "type": "object",
+            "secret": false
+          },
+          "tokens_before": {
+            "type": "int",
+            "secret": false
+          },
+          "keep_recent_tokens": {
+            "type": "int",
+            "default": 20000,
+            "secret": false
+          },
+          "custom_instructions": {
+            "type": "string",
+            "default": "",
+            "secret": false
+          },
+          "model": {
+            "type": "string",
+            "default": "your-model",
+            "secret": false
+          },
+          "base_url": {
+            "type": "string",
+            "default": "https://api.openai.com/v1",
+            "secret": false
+          },
+          "api_key": {
+            "type": "string",
+            "env": "OPENAI_API_KEY"
+          }
+        }
+      }
+    },
+    {
+      "id": "prepare",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "prepare"
+      },
+      "inputs": {
+        "params.messages": {
+          "from": {
+            "node": "params",
+            "port": "messages"
+          }
+        },
+        "params.state": {
+          "from": {
+            "node": "params",
+            "port": "state"
+          }
+        },
+        "params.keep_recent_tokens": {
+          "from": {
+            "node": "params",
+            "port": "keep_recent_tokens"
+          }
+        },
+        "params.custom_instructions": {
+          "from": {
+            "node": "params",
+            "port": "custom_instructions"
+          }
+        }
+      }
+    },
+    {
+      "id": "compact_route",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "compact",
+            "condition": {
+              "source": {
+                "output": "prepare.should_compact",
+                "path": ""
+              },
+              "operator": "eq",
+              "value": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "nothing_messages",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "from": {
+            "node": "params",
+            "port": "messages"
+          }
+        }
+      }
+    },
+    {
+      "id": "nothing_result",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {},
+        "code": {
+          "status": "'skipped'",
+          "compacted": "false",
+          "summary": "''",
+          "error": "''",
+          "read_files": "[].map(x, string(x))",
+          "modified_files": "[].map(x, string(x))"
+        }
+      }
+    },
+    {
+      "id": "nothing_usages",
+      "kind": "builtin.constant",
+      "config": {
+        "value": []
+      }
+    },
+    {
+      "id": "history_error_prefix",
+      "kind": "builtin.constant",
+      "config": {
+        "value": "Summarization"
+      }
+    },
+    {
+      "id": "turn_prefix_error_prefix",
+      "kind": "builtin.constant",
+      "config": {
+        "value": "Turn prefix summarization"
+      }
+    },
+    {
+      "id": "summarize_history",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "summarize"
+      },
+      "inputs": {
+        "params.enabled": {
+          "from": {
+            "node": "prepare",
+            "port": "has_history"
+          }
+        },
+        "params.messages": {
+          "from": {
+            "node": "prepare",
+            "port": "history_request"
+          }
+        },
+        "params.error_prefix": {
+          "from": {
+            "node": "history_error_prefix",
+            "port": "value"
+          }
+        },
+        "params.model": {
+          "from": {
+            "node": "params",
+            "port": "model"
+          }
+        },
+        "params.base_url": {
+          "from": {
+            "node": "params",
+            "port": "base_url"
+          }
+        },
+        "params.api_key": {
+          "from": {
+            "node": "params",
+            "port": "api_key"
+          }
+        }
+      }
+    },
+    {
+      "id": "turn_prefix_eligible",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "history_ok": "bool",
+          "has_turn_prefix": "bool"
+        },
+        "code": {
+          "run": "history_ok && has_turn_prefix"
+        }
+      },
+      "inputs": {
+        "history_ok": {
+          "from": {
+            "node": "summarize_history",
+            "port": "ok"
+          }
+        },
+        "has_turn_prefix": {
+          "from": {
+            "node": "prepare",
+            "port": "has_turn_prefix"
+          }
+        }
+      }
+    },
+    {
+      "id": "summarize_turn_prefix",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "summarize"
+      },
+      "inputs": {
+        "params.enabled": {
+          "from": {
+            "node": "turn_prefix_eligible",
+            "port": "run"
+          }
+        },
+        "params.messages": {
+          "from": {
+            "node": "prepare",
+            "port": "turn_prefix_request"
+          }
+        },
+        "params.error_prefix": {
+          "from": {
+            "node": "turn_prefix_error_prefix",
+            "port": "value"
+          }
+        },
+        "params.model": {
+          "from": {
+            "node": "params",
+            "port": "model"
+          }
+        },
+        "params.base_url": {
+          "from": {
+            "node": "params",
+            "port": "base_url"
+          }
+        },
+        "params.api_key": {
+          "from": {
+            "node": "params",
+            "port": "api_key"
+          }
+        }
+      }
+    },
+    {
+      "id": "summarize_status",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "history_ok": "bool",
+          "turn_prefix_ok": "bool",
+          "history_error": "string",
+          "turn_prefix_error": "string",
+          "history_usages": {
+            "list": "object"
+          },
+          "turn_prefix_usages": {
+            "list": "object"
+          }
+        },
+        "code": {
+          "ok": "history_ok && turn_prefix_ok",
+          "error": "history_error != '' ? history_error : turn_prefix_error",
+          "usages": "history_usages + turn_prefix_usages"
+        }
+      },
+      "inputs": {
+        "history_ok": {
+          "from": {
+            "node": "summarize_history",
+            "port": "ok"
+          }
+        },
+        "turn_prefix_ok": {
+          "from": {
+            "node": "summarize_turn_prefix",
+            "port": "ok"
+          }
+        },
+        "history_error": {
+          "from": {
+            "node": "summarize_history",
+            "port": "error"
+          }
+        },
+        "turn_prefix_error": {
+          "from": {
+            "node": "summarize_turn_prefix",
+            "port": "error"
+          }
+        },
+        "history_usages": {
+          "from": {
+            "node": "summarize_history",
+            "port": "usages"
+          }
+        },
+        "turn_prefix_usages": {
+          "from": {
+            "node": "summarize_turn_prefix",
+            "port": "usages"
+          }
+        }
+      }
+    },
+    {
+      "id": "assemble_route",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "yes",
+            "condition": {
+              "source": {
+                "output": "summarize_status.ok",
+                "path": ""
+              },
+              "operator": "eq",
+              "value": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "compose_body",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "is_split_turn": "bool",
+          "has_history": "bool",
+          "has_turn_prefix": "bool",
+          "previous_summary": "string",
+          "history_summary": "string",
+          "turn_prefix_summary": "string"
+        },
+        "code": {
+          "body": "is_split_turn && has_turn_prefix ? (has_history ? history_summary.trim() : (previous_summary.trim() != '' ? previous_summary.trim() : 'No prior history.')) + '\\n\\n---\\n\\n**Turn Context (split turn):**\\n\\n' + turn_prefix_summary.trim() : history_summary.trim()"
+        }
+      },
+      "inputs": {
+        "is_split_turn": {
+          "from": {
+            "node": "prepare",
+            "port": "is_split_turn"
+          }
+        },
+        "has_history": {
+          "from": {
+            "node": "prepare",
+            "port": "has_history"
+          }
+        },
+        "has_turn_prefix": {
+          "from": {
+            "node": "prepare",
+            "port": "has_turn_prefix"
+          }
+        },
+        "previous_summary": {
+          "from": {
+            "node": "prepare",
+            "port": "previous_summary"
+          }
+        },
+        "history_summary": {
+          "from": {
+            "node": "summarize_history",
+            "port": "text"
+          }
+        },
+        "turn_prefix_summary": {
+          "from": {
+            "node": "summarize_turn_prefix",
+            "port": "text"
+          }
+        }
+      }
+    },
+    {
+      "id": "compose_summary",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "body": "string",
+          "read_files": {
+            "list": "string"
+          },
+          "modified_files": {
+            "list": "string"
+          }
+        },
+        "code": {
+          "summary": "cel.bind(sections, (size(read_files) > 0 ? ['<read-files>\\n' + read_files.join('\\n') + '\\n</read-files>'] : []) + (size(modified_files) > 0 ? ['<modified-files>\\n' + modified_files.join('\\n') + '\\n</modified-files>'] : []), body + (size(sections) > 0 ? '\\n\\n' + sections.map(s, string(s)).join('\\n\\n') : ''))"
+        }
+      },
+      "inputs": {
+        "body": {
+          "from": {
+            "node": "compose_body",
+            "port": "body"
+          }
+        },
+        "read_files": {
+          "from": {
+            "node": "prepare",
+            "port": "read_files"
+          }
+        },
+        "modified_files": {
+          "from": {
+            "node": "prepare",
+            "port": "modified_files"
+          }
+        }
+      }
+    },
+    {
+      "id": "compose_messages",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "system_messages": {
+            "list": "object"
+          },
+          "kept_messages": {
+            "list": "object"
+          },
+          "body": "string",
+          "summary": "string",
+          "read_files": {
+            "list": "string"
+          },
+          "modified_files": {
+            "list": "string"
+          },
+          "tokens_before": "int"
+        },
+        "code": {
+          "messages": "system_messages + [{'role': 'user', 'content': 'The conversation history before this point was compacted into the following summary:\\n\\n<summary>\\n' + summary + '\\n</summary>', 'metadata': {'compaction': {'summary': body, 'read_files': read_files, 'modified_files': modified_files, 'tokens_before': tokens_before}}}] + kept_messages",
+          "read_files": "read_files",
+          "modified_files": "modified_files"
+        }
+      },
+      "inputs": {
+        "system_messages": {
+          "from": {
+            "node": "prepare",
+            "port": "system_messages"
+          }
+        },
+        "kept_messages": {
+          "from": {
+            "node": "prepare",
+            "port": "kept_messages"
+          }
+        },
+        "body": {
+          "from": {
+            "node": "compose_body",
+            "port": "body"
+          }
+        },
+        "summary": {
+          "from": {
+            "node": "compose_summary",
+            "port": "summary"
+          }
+        },
+        "read_files": {
+          "from": {
+            "node": "prepare",
+            "port": "read_files"
+          }
+        },
+        "modified_files": {
+          "from": {
+            "node": "prepare",
+            "port": "modified_files"
+          }
+        },
+        "tokens_before": {
+          "from": {
+            "node": "params",
+            "port": "tokens_before"
+          }
+        }
+      }
+    },
+    {
+      "id": "succeeded_meta",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {},
+        "code": {
+          "status": "'succeeded'",
+          "compacted": "true",
+          "error": "''"
+        }
+      }
+    },
+    {
+      "id": "failed_messages",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "from": {
+            "node": "params",
+            "port": "messages"
+          }
+        }
+      }
+    },
+    {
+      "id": "failed_result",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "error": "string"
+        },
+        "code": {
+          "status": "'failed'",
+          "compacted": "false",
+          "summary": "''",
+          "error": "error",
+          "read_files": "[].map(x, string(x))",
+          "modified_files": "[].map(x, string(x))"
+        }
+      },
+      "inputs": {
+        "error": {
+          "from": {
+            "node": "summarize_status",
+            "port": "error"
+          }
+        }
+      }
+    },
+    {
+      "id": "status",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "nothing_result",
+              "port": "status"
+            },
+            {
+              "node": "succeeded_meta",
+              "port": "status"
+            },
+            {
+              "node": "failed_result",
+              "port": "status"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "compacted",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "nothing_result",
+              "port": "compacted"
+            },
+            {
+              "node": "succeeded_meta",
+              "port": "compacted"
+            },
+            {
+              "node": "failed_result",
+              "port": "compacted"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "messages",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "nothing_messages",
+              "port": "value"
+            },
+            {
+              "node": "compose_messages",
+              "port": "messages"
+            },
+            {
+              "node": "failed_messages",
+              "port": "value"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "summary",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "nothing_result",
+              "port": "summary"
+            },
+            {
+              "node": "compose_summary",
+              "port": "summary"
+            },
+            {
+              "node": "failed_result",
+              "port": "summary"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "usages",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "nothing_usages",
+              "port": "value"
+            },
+            {
+              "node": "summarize_status",
+              "port": "usages"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "read_files",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "nothing_result",
+              "port": "read_files"
+            },
+            {
+              "node": "compose_messages",
+              "port": "read_files"
+            },
+            {
+              "node": "failed_result",
+              "port": "read_files"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "modified_files",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "nothing_result",
+              "port": "modified_files"
+            },
+            {
+              "node": "compose_messages",
+              "port": "modified_files"
+            },
+            {
+              "node": "failed_result",
+              "port": "modified_files"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "error",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "nothing_result",
+              "port": "error"
+            },
+            {
+              "node": "succeeded_meta",
+              "port": "error"
+            },
+            {
+              "node": "failed_result",
+              "port": "error"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "prepare",
+      "to_node": "compact_route"
+    },
+    {
+      "from_node": "compact_route",
+      "from_output": "else",
+      "to_node": "nothing_messages"
+    },
+    {
+      "from_node": "compact_route",
+      "from_output": "else",
+      "to_node": "nothing_result"
+    },
+    {
+      "from_node": "compact_route",
+      "from_output": "else",
+      "to_node": "nothing_usages"
+    },
+    {
+      "from_node": "compact_route",
+      "from_output": "compact",
+      "to_node": "summarize_history"
+    },
+    {
+      "from_node": "summarize_status",
+      "to_node": "assemble_route"
+    },
+    {
+      "from_node": "assemble_route",
+      "from_output": "yes",
+      "to_node": "compose_body"
+    },
+    {
+      "from_node": "assemble_route",
+      "from_output": "yes",
+      "to_node": "succeeded_meta"
+    },
+    {
+      "from_node": "assemble_route",
+      "from_output": "else",
+      "to_node": "failed_messages"
+    },
+    {
+      "from_node": "assemble_route",
+      "from_output": "else",
+      "to_node": "failed_result"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "status",
+      "node": "status",
+      "port": "value"
+    },
+    {
+      "name": "compacted",
+      "node": "compacted",
+      "port": "value"
+    },
+    {
+      "name": "messages",
+      "node": "messages",
+      "port": "value"
+    },
+    {
+      "name": "summary",
+      "node": "summary",
+      "port": "value"
+    },
+    {
+      "name": "usages",
+      "node": "usages",
+      "port": "value"
+    },
+    {
+      "name": "read_files",
+      "node": "read_files",
+      "port": "value"
+    },
+    {
+      "name": "modified_files",
+      "node": "modified_files",
+      "port": "value"
+    },
+    {
+      "name": "error",
+      "node": "error",
+      "port": "value"
+    }
+  ],
+  "clusters": [
+    {
+      "label": "Plan compaction",
+      "annotation": "Select the cut point, extract cumulative files, and skip cleanly when nothing lies before the cut.",
+      "nodes": [
+        "params",
+        "prepare",
+        "compact_route",
+        "nothing_messages",
+        "nothing_result",
+        "nothing_usages"
+      ]
+    },
+    {
+      "label": "Summarize",
+      "annotation": "Summarize complete prior history and any split-turn prefix through the shared summarization Flow.",
+      "nodes": [
+        "history_error_prefix",
+        "turn_prefix_error_prefix",
+        "summarize_history",
+        "turn_prefix_eligible",
+        "summarize_turn_prefix",
+        "summarize_status"
+      ]
+    },
+    {
+      "label": "Assemble result",
+      "annotation": "Compose the compacted summary message and metadata on success, or preserve original messages on failure.",
+      "nodes": [
+        "assemble_route",
+        "compose_body",
+        "compose_summary",
+        "compose_messages",
+        "succeeded_meta",
+        "failed_messages",
+        "failed_result"
+      ]
+    },
+    {
+      "label": "Output contract",
+      "annotation": "Merge skipped, succeeded, and failed branches into the stable compaction result ports.",
+      "collapsed": true,
+      "nodes": [
+        "status",
+        "compacted",
+        "messages",
+        "summary",
+        "usages",
+        "read_files",
+        "modified_files",
+        "error"
+      ]
+    }
+  ]
+}
