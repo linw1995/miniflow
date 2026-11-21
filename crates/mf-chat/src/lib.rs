@@ -22,8 +22,9 @@ pub mod workflow;
 
 pub use context::ModelContext;
 pub use contract::{
-    CallUsage, Completion, ConversationContext, ConversationInputs, ConversationResult,
-    MessageUpdate, ModelContextRevision, ResultAlternatives, TitleContext, UncommittedCompletion,
+    CallUsage, CompactionConfig, CompactionContext, Completion, ConversationContext,
+    ConversationInputs, ConversationResult, MessageUpdate, ModelContextRevision,
+    ResultAlternatives, TitleContext, UncommittedCompletion,
 };
 pub use error::{BackendSnafu, CaptureSnafu, ChatError};
 pub use host::{ChatHost, ChatJob, HostConfig};

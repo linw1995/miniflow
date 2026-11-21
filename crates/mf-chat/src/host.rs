@@ -29,6 +29,7 @@ pub struct HostConfig {
     /// A local observer without export is used when none is supplied.
     pub observer: Option<Observer>,
     pub automatic_titles: bool,
+    pub automatic_compaction: crate::CompactionConfig,
 }
 
 impl HostConfig {
@@ -38,6 +39,7 @@ impl HostConfig {
             max_active: 4,
             observer: None,
             automatic_titles: true,
+            automatic_compaction: crate::CompactionConfig::default(),
         }
     }
 }
@@ -142,6 +144,7 @@ impl ChatHost {
                 reason: "must contain a workflow profile"
             }
         );
+        config.automatic_compaction.validate()?;
         for (key, profile) in &config.profiles {
             ensure!(
                 key == &profile.name,
@@ -463,6 +466,7 @@ impl Inner {
             profile.backend(),
             cancellation,
             self.config.automatic_titles,
+            &self.config.automatic_compaction,
             self.config.observer.as_ref(),
             presentation,
         )?;

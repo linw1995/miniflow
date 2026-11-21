@@ -619,6 +619,12 @@ impl mf_chat::ConversationBackend for ExternalBackend {
             .builtin_title_parameters(&self.parameters)
     }
 
+    fn builtin_compaction_parameters(&self) -> Option<mf_runtime::WorkflowArguments> {
+        self.launch
+            .contract
+            .builtin_compaction_parameters(&self.parameters)
+    }
+
     fn invoke(
         &self,
         invocation: &Invocation,

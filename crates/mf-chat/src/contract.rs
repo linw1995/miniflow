@@ -25,9 +25,72 @@ pub struct ModelContextRevision {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, NodeValue)]
+pub struct CompactionConfig {
+    pub enabled: bool,
+    pub context_window: i64,
+    pub reserve_tokens: i64,
+    pub keep_recent_tokens: i64,
+    pub custom_instructions: String,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            context_window: 128_000,
+            reserve_tokens: 16_384,
+            keep_recent_tokens: 20_000,
+            custom_instructions: String::new(),
+        }
+    }
+}
+
+impl CompactionConfig {
+    pub fn validate(&self) -> Result<(), ChatError> {
+        ensure!(
+            self.context_window >= 0 && self.reserve_tokens >= 0 && self.keep_recent_tokens >= 0,
+            InvalidSnafu {
+                field: "automatic_compaction",
+                reason: "context_window, reserve_tokens, and keep_recent_tokens must be non-negative"
+            }
+        );
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, NodeValue)]
+pub struct CompactionContext {
+    pub enabled: bool,
+    pub context_window: i64,
+    pub reserve_tokens: i64,
+    pub keep_recent_tokens: i64,
+    pub custom_instructions: String,
+}
+
+impl Default for CompactionContext {
+    fn default() -> Self {
+        Self::from(&CompactionConfig::default())
+    }
+}
+
+impl From<&CompactionConfig> for CompactionContext {
+    fn from(config: &CompactionConfig) -> Self {
+        Self {
+            enabled: config.enabled,
+            context_window: config.context_window,
+            reserve_tokens: config.reserve_tokens,
+            keep_recent_tokens: config.keep_recent_tokens,
+            custom_instructions: config.custom_instructions.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, NodeValue)]
 pub struct ConversationContext {
     pub title: TitleContext,
     pub model_context: ModelContextRevision,
+    #[serde(default)]
+    pub compaction: CompactionContext,
 }
 
 #[derive(Clone, Debug, NodeValue)]
@@ -278,6 +341,18 @@ impl ChatContract {
                 .insert(mf_runtime::output_id("params", name), value.clone());
         }
         Some(arguments)
+    }
+
+    /// Reuses unambiguous public provider inputs for host-managed compaction when the Flow does
+    /// not declare its own `replace_context` output.
+    pub fn builtin_compaction_parameters(
+        &self,
+        parameters: &WorkflowArguments,
+    ) -> Option<WorkflowArguments> {
+        if self.alternatives != ResultAlternatives::Append {
+            return None;
+        }
+        self.builtin_title_parameters(parameters)
     }
 
     pub fn arguments(

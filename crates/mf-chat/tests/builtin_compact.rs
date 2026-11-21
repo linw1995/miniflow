@@ -1,8 +1,13 @@
-use mf_chat::{ChatHost, HostConfig, MessageUpdate, WorkflowProfile};
+use mf_chat::{
+    ChatError, ChatHost, CompactionConfig, ConversationBackend, ConversationInputs,
+    ConversationResult, HostConfig, Invocation, MessageUpdate, WorkflowProfile,
+};
 use mf_compiler::{NodeRegistry, WorkflowDefinition, compile_definition, instantiate_compiled};
-use mf_runtime::{NodeValues, ValueRef, WorkflowArguments};
+use mf_runtime::{ExecutionContext, NodeValues, ValueRef, WorkflowArguments};
+use mf_telemetry::observation::Observer;
 use mfn_llm::test_support::{Reply, Server, messages as request_messages};
 use serde_json::{Value, json};
+use std::time::Duration;
 
 fn compact_wrapper_definition() -> WorkflowDefinition {
     serde_json::from_value(json!({
@@ -919,4 +924,780 @@ fn compact_and_helper_flows_declare_annotated_clusters_covering_all_nodes() {
             "{flow_name} clusters should cover every node exactly once"
         );
     }
+}
+
+fn plain_chat_host(
+    directory: &std::path::Path,
+    server: &Server,
+    automatic_titles: bool,
+    automatic_compaction: CompactionConfig,
+) -> ChatHost {
+    let definition =
+        WorkflowDefinition::from_json(include_str!("../../../examples/chat-flow.json")).unwrap();
+    let profile = WorkflowProfile::new(
+        "default",
+        definition,
+        WorkflowArguments::try_from(json!({
+            "params.model": "fixture-model",
+            "params.base_url": server.base_url,
+            "params.api_key": "synthetic-key"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut config = HostConfig::new(profile);
+    config.automatic_titles = automatic_titles;
+    config.automatic_compaction = automatic_compaction;
+    ChatHost::open(directory.join("chat.sqlite"), config).unwrap()
+}
+
+fn usage_reply(text: &str, total_tokens: i64) -> Reply {
+    Reply::json(json!({
+        "id": "chatcmpl-test",
+        "object": "chat.completion",
+        "model": "fixture-model",
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": text },
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": total_tokens - 10,
+            "completion_tokens": 10,
+            "total_tokens": total_tokens
+        }
+    }))
+}
+
+#[test]
+fn host_builtin_compaction_triggers_automatically_and_persists_across_reopen() {
+    let server = Server::start(vec![
+        usage_reply("First answer", 40),
+        Reply::text("Project Alpha"),
+        usage_reply("Second answer", 95),
+        Reply::text("## Goal\nSummarized turn one"),
+        usage_reply("Third answer", 35),
+    ]);
+    let root = tempfile::tempdir().unwrap();
+    let compaction = CompactionConfig {
+        enabled: true,
+        context_window: 100,
+        reserve_tokens: 20,
+        keep_recent_tokens: 12,
+        custom_instructions: "Preserve project names.".into(),
+    };
+    let host = plain_chat_host(root.path(), &server, true, compaction.clone());
+    let session_id = host
+        .database()
+        .create_session("default", Some("System prompt".into()), None)
+        .unwrap()
+        .id;
+
+    // Turn 1: under threshold (40 <= 80). Host generates title and skips compaction.
+    let first = host
+        .submit(&session_id, "Discuss Project Alpha details")
+        .unwrap()
+        .join()
+        .unwrap();
+    assert!(matches!(first.result.update, MessageUpdate::Append { .. }));
+    assert_eq!(first.result.title.as_deref(), Some("Project Alpha"));
+    assert_eq!(first.result.usages.len(), 2);
+    assert_eq!(server.requests().len(), 2);
+
+    // Turn 2: over threshold (95 > 80). Host automatically runs mf-chat.chat-compact.
+    let second = host
+        .submit(&session_id, "Follow up on Project Alpha")
+        .unwrap()
+        .join()
+        .unwrap();
+    assert_eq!(second.result.final_text(), Some("Second answer"));
+    assert!(matches!(
+        second.result.update,
+        MessageUpdate::ReplaceContext { .. }
+    ));
+    assert_eq!(second.result.usages.len(), 2);
+    let compact_usage = &second.result.usages[1];
+    assert_eq!(
+        compact_usage
+            .attribution
+            .as_ref()
+            .and_then(|attribution| attribution.purpose.as_deref()),
+        Some("compaction")
+    );
+    assert!(
+        compact_usage
+            .timing
+            .as_ref()
+            .is_some_and(|timing| timing.is_valid())
+    );
+    let compact_request = &server.requests()[3];
+    let compact_messages = request_messages(compact_request);
+    let compact_prompt = compact_messages[1]["content"].as_str().unwrap();
+    assert!(compact_prompt.contains("Preserve project names."));
+    host.close().unwrap();
+
+    // Reopen and verify the compacted context is sent to Turn 3 while full display history remains.
+    let reopened = plain_chat_host(root.path(), &server, true, compaction);
+    let context_before_turn3 = reopened.database().model_context(&session_id).unwrap();
+    assert!(context_before_turn3.messages.iter().any(|message| matches!(
+        message,
+        mfn_llm::ChatMessage::User { content, metadata: Some(meta) }
+        if content.contains("## Goal\nSummarized turn one") && meta.get("compaction").is_some()
+    )));
+    let third = reopened
+        .submit(&session_id, "Third question")
+        .unwrap()
+        .join()
+        .unwrap();
+    assert_eq!(third.result.final_text(), Some("Third answer"));
+    assert!(matches!(third.result.update, MessageUpdate::Append { .. }));
+
+    let turn3_messages = request_messages(&server.requests()[4]);
+    assert!(turn3_messages.iter().any(|message| {
+        message["content"]
+            .as_str()
+            .is_some_and(|text| text.contains("Summarized turn one"))
+    }));
+    assert!(!turn3_messages.iter().any(|message| {
+        message["content"]
+            .as_str()
+            .is_some_and(|text| text.contains("Discuss Project Alpha details"))
+    }));
+    assert_eq!(
+        reopened
+            .database()
+            .messages(&session_id, 50, None)
+            .unwrap()
+            .messages
+            .len(),
+        6
+    );
+    reopened.close().unwrap();
+}
+
+#[test]
+fn host_builtin_compaction_failure_preserves_answer_and_records_failed_usage() {
+    let mut failed_compact = Reply::json(json!({"error":{"message":"summary unavailable"}}));
+    failed_compact.status = 500;
+    let server = Server::start(vec![
+        usage_reply("First answer", 40),
+        usage_reply("Second answer", 95),
+        failed_compact,
+    ]);
+    let root = tempfile::tempdir().unwrap();
+    let host = plain_chat_host(
+        root.path(),
+        &server,
+        false,
+        CompactionConfig {
+            enabled: true,
+            context_window: 100,
+            reserve_tokens: 20,
+            keep_recent_tokens: 4,
+            custom_instructions: String::new(),
+        },
+    );
+    let session_id = host
+        .database()
+        .create_session("default", None, Some("Manual".into()))
+        .unwrap()
+        .id;
+
+    host.submit(&session_id, "Turn one details to summarize")
+        .unwrap()
+        .join()
+        .unwrap();
+    let second = host
+        .submit(&session_id, "Turn two")
+        .unwrap()
+        .join()
+        .unwrap();
+    assert_eq!(second.result.final_text(), Some("Second answer"));
+    assert!(matches!(second.result.update, MessageUpdate::Append { .. }));
+    assert_eq!(second.result.usages.len(), 2);
+    let compact_usage = &second.result.usages[1];
+    assert_eq!(
+        compact_usage
+            .attribution
+            .as_ref()
+            .and_then(|attribution| attribution.purpose.as_deref()),
+        Some("compaction")
+    );
+    assert!(compact_usage.error.is_some());
+    assert_eq!(
+        host.database()
+            .model_context(&session_id)
+            .unwrap()
+            .messages
+            .len(),
+        4
+    );
+    host.close().unwrap();
+}
+
+#[test]
+fn host_builtin_compaction_respects_disabled_config_failed_answers_and_validates_settings() {
+    let server = Server::start(vec![]);
+    let root = tempfile::tempdir().unwrap();
+    let definition =
+        WorkflowDefinition::from_json(include_str!("../../../examples/chat-flow.json")).unwrap();
+    let profile = WorkflowProfile::new(
+        "default",
+        definition,
+        WorkflowArguments::try_from(json!({
+            "params.model": "fixture-model",
+            "params.base_url": server.base_url,
+            "params.api_key": "synthetic-key"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut bad_config = HostConfig::new(profile);
+    bad_config.automatic_compaction.reserve_tokens = -1;
+    assert!(matches!(
+        ChatHost::open(root.path().join("invalid.sqlite"), bad_config),
+        Err(ChatError::Invalid {
+            field: "automatic_compaction",
+            ..
+        })
+    ));
+
+    for scenario in ["disabled", "failed"] {
+        let reply = if scenario == "failed" {
+            let mut failed = Reply::json(json!({"error":{"message":"answer failed"}}));
+            failed.status = 400;
+            failed
+        } else {
+            usage_reply("Answer", 95)
+        };
+        let server = Server::start(vec![reply]);
+        let case_root = tempfile::tempdir().unwrap();
+        let host = plain_chat_host(
+            case_root.path(),
+            &server,
+            false,
+            CompactionConfig {
+                enabled: scenario != "disabled",
+                context_window: 100,
+                reserve_tokens: 20,
+                keep_recent_tokens: 0,
+                custom_instructions: String::new(),
+            },
+        );
+        let session_id = host
+            .database()
+            .create_session("default", None, Some("Manual".into()))
+            .unwrap()
+            .id;
+        let outcome = host.submit(&session_id, "Prompt").unwrap().join();
+        assert_eq!(outcome.is_err(), scenario == "failed");
+        assert_eq!(server.requests().len(), 1);
+        host.close().unwrap();
+    }
+}
+
+#[test]
+fn cancelling_builtin_compaction_does_not_commit_an_intermediate_answer() {
+    let mut slow_compact = Reply::text("## Goal\nSlow summary");
+    slow_compact.header_delay = Duration::from_millis(1200);
+    let server = Server::start(vec![
+        usage_reply("First answer", 40),
+        usage_reply("Second answer", 95),
+        slow_compact,
+    ]);
+    let root = tempfile::tempdir().unwrap();
+    let host = plain_chat_host(
+        root.path(),
+        &server,
+        false,
+        CompactionConfig {
+            enabled: true,
+            context_window: 100,
+            reserve_tokens: 20,
+            keep_recent_tokens: 4,
+            custom_instructions: String::new(),
+        },
+    );
+    let session_id = host
+        .database()
+        .create_session("default", None, Some("Manual".into()))
+        .unwrap()
+        .id;
+    host.submit(&session_id, "Turn one details to summarize")
+        .unwrap()
+        .join()
+        .unwrap();
+
+    let job = host.submit(&session_id, "Turn two").unwrap();
+    let invocation = job.invocation().clone();
+    server.wait_for_requests(3);
+    job.cancel();
+    assert!(job.join().is_err());
+    assert_eq!(
+        host.database().turn(&invocation.turn_id).unwrap().state,
+        "cancelled"
+    );
+    assert_eq!(
+        host.database()
+            .model_context(&session_id)
+            .unwrap()
+            .messages
+            .len(),
+        2
+    );
+    host.close().unwrap();
+}
+
+#[test]
+fn conversation_finish_retains_compaction_for_save_only_retry() {
+    use diesel::{Connection, connection::SimpleConnection};
+    let server = Server::start(vec![
+        usage_reply("First answer", 40),
+        usage_reply("Second answer", 95),
+        Reply::text("## Goal\nRecoverable summary"),
+    ]);
+    let root = tempfile::tempdir().unwrap();
+    let host = plain_chat_host(
+        root.path(),
+        &server,
+        false,
+        CompactionConfig {
+            enabled: true,
+            context_window: 100,
+            reserve_tokens: 20,
+            keep_recent_tokens: 6,
+            custom_instructions: String::new(),
+        },
+    );
+    let session_id = host
+        .database()
+        .create_session("default", None, Some("Manual".into()))
+        .unwrap()
+        .id;
+    host.submit(&session_id, "Turn one details to summarize")
+        .unwrap()
+        .join()
+        .unwrap();
+
+    let mut connection =
+        diesel::SqliteConnection::establish(host.database().path().to_str().unwrap()).unwrap();
+    connection
+        .batch_execute(
+            "CREATE TRIGGER reject_replacement BEFORE INSERT ON context_revisions WHEN NEW.operation = 'checkpoint' BEGIN SELECT RAISE(ABORT, 'injected compaction write failure'); END;",
+        )
+        .unwrap();
+    let error = host
+        .submit(&session_id, "Turn two")
+        .unwrap()
+        .join()
+        .unwrap_err();
+    let ChatError::Uncommitted { pending, .. } = error else {
+        panic!("expected compacted completion to remain recoverable");
+    };
+    assert!(matches!(
+        pending.completion.result.update,
+        MessageUpdate::ReplaceContext { .. }
+    ));
+    assert_eq!(pending.completion.result.usages.len(), 2);
+    assert_eq!(
+        host.database()
+            .model_context(&session_id)
+            .unwrap()
+            .messages
+            .len(),
+        2
+    );
+
+    connection
+        .batch_execute("DROP TRIGGER reject_replacement;")
+        .unwrap();
+    let saved = host.retry_completion(*pending).unwrap();
+    assert_eq!(saved.result.final_text(), Some("Second answer"));
+    assert!(matches!(
+        saved.result.update,
+        MessageUpdate::ReplaceContext { .. }
+    ));
+    assert!(
+        host.database()
+            .model_context(&session_id)
+            .unwrap()
+            .messages
+            .iter()
+            .any(|message| matches!(
+                message,
+                mfn_llm::ChatMessage::User { content, .. } if content.contains("Recoverable summary")
+            ))
+    );
+    assert_eq!(server.requests().len(), 3);
+    host.close().unwrap();
+}
+
+#[test]
+fn chatflow_reusing_builtin_compact_receives_host_policy_and_suppresses_host_compaction() {
+    let server = Server::start(vec![
+        usage_reply("First answer", 40),
+        usage_reply("Second answer", 95),
+        Reply::text("## Goal\nUser-flow reused compaction"),
+    ]);
+    let definition: WorkflowDefinition = serde_json::from_value(json!({
+        "version": "2026-11-13",
+        "dependencies": {
+            "core": { "package": "mfn-core", "path": "../../crates/builtin-nodes/core" },
+            "code": { "package": "mfn-code", "path": "../../crates/builtin-nodes/code" },
+            "llm": { "package": "mfn-llm", "path": "../../crates/builtin-nodes/llm" }
+        },
+        "flows": {
+            "compact": { "builtin": "mf-chat.chat-compact" }
+        },
+        "nodes": [
+            {
+                "id": "params",
+                "kind": "builtin.parameters",
+                "config": {
+                    "parameters": {
+                        "messages": { "type": { "list": "object" } },
+                        "context": {
+                            "type": "object",
+                            "default": {
+                                "title": { "source": "provisional", "revision": 0, "attempted": false, "enabled": true },
+                                "model_context": { "revision": 0 },
+                                "compaction": { "enabled": true, "context_window": 128000, "reserve_tokens": 16384, "keep_recent_tokens": 20000, "custom_instructions": "" }
+                            }
+                        },
+                        "model": { "type": "string", "default": "fixture-model", "secret": false },
+                        "base_url": { "type": "string", "default": "https://api.openai.com/v1", "secret": false },
+                        "api_key": { "type": "string", "default": "synthetic-key", "secret": true }
+                    }
+                }
+            },
+            {
+                "id": "chat",
+                "kind": "builtin.llm",
+                "config": {
+                    "model": { "$ref": "params.model" },
+                    "base_url": { "$ref": "params.base_url" },
+                    "api_key": { "$ref": "params.api_key" },
+                    "capture_errors": true
+                },
+                "inputs": {
+                    "messages": { "from": { "node": "params", "port": "messages" } }
+                }
+            },
+            {
+                "id": "turn",
+                "kind": "builtin.code",
+                "config": {
+                    "language": "cel",
+                    "inputs": {
+                        "text": "string",
+                        "context": "object"
+                    },
+                    "code": {
+                        "append_messages": "[{'role': 'assistant', 'content': text}]",
+                        "enabled": "context.compaction.enabled",
+                        "context_window": "context.compaction.context_window",
+                        "reserve_tokens": "context.compaction.reserve_tokens",
+                        "keep_recent_tokens": "context.compaction.keep_recent_tokens",
+                        "custom_instructions": "context.compaction.custom_instructions"
+                    }
+                },
+                "inputs": {
+                    "text": { "from": { "node": "chat", "port": "text" } },
+                    "context": { "from": { "node": "params", "port": "context" } }
+                }
+            },
+            {
+                "id": "compact",
+                "kind": "workflow.call",
+                "config": { "flow": "compact" },
+                "inputs": {
+                    "params.messages": { "from": { "node": "params", "port": "messages" } },
+                    "params.append_messages": { "from": { "node": "turn", "port": "append_messages" } },
+                    "params.usages": { "from": { "node": "chat", "port": "usages" } },
+                    "params.enabled": { "from": { "node": "turn", "port": "enabled" } },
+                    "params.context_window": { "from": { "node": "turn", "port": "context_window" } },
+                    "params.reserve_tokens": { "from": { "node": "turn", "port": "reserve_tokens" } },
+                    "params.keep_recent_tokens": { "from": { "node": "turn", "port": "keep_recent_tokens" } },
+                    "params.custom_instructions": { "from": { "node": "turn", "port": "custom_instructions" } },
+                    "params.model": { "from": { "node": "params", "port": "model" } },
+                    "params.base_url": { "from": { "node": "params", "port": "base_url" } },
+                    "params.api_key": { "from": { "node": "params", "port": "api_key" } }
+                }
+            },
+            {
+                "id": "route",
+                "kind": "builtin.if_else",
+                "config": {
+                    "branches": [{
+                        "id": "replaced",
+                        "condition": {
+                            "source": { "output": "compact.compacted", "path": "" },
+                            "operator": "eq",
+                            "value": true
+                        }
+                    }]
+                }
+            },
+            {
+                "id": "append_result",
+                "kind": "builtin.code",
+                "config": {
+                    "language": "cel",
+                    "inputs": {
+                        "append_messages": { "list": "object" },
+                        "turn_usages": { "list": "object" },
+                        "compact_usages": { "list": "object" }
+                    },
+                    "code": {
+                        "value": "{'status': 'succeeded', 'messages': append_messages, 'usages': turn_usages + compact_usages}"
+                    }
+                },
+                "inputs": {
+                    "append_messages": { "from": { "node": "turn", "port": "append_messages" } },
+                    "turn_usages": { "from": { "node": "chat", "port": "usages" } },
+                    "compact_usages": { "from": { "node": "compact", "port": "usages" } }
+                }
+            },
+            {
+                "id": "replace_result",
+                "kind": "builtin.code",
+                "config": {
+                    "language": "cel",
+                    "inputs": {
+                        "append_messages": { "list": "object" },
+                        "turn_usages": { "list": "object" },
+                        "context_messages": { "list": "object" },
+                        "compact_usages": { "list": "object" }
+                    },
+                    "code": {
+                        "value": "{'status': 'succeeded', 'context_messages': context_messages, 'display_messages': append_messages, 'usages': turn_usages + compact_usages}"
+                    }
+                },
+                "inputs": {
+                    "append_messages": { "from": { "node": "turn", "port": "append_messages" } },
+                    "turn_usages": { "from": { "node": "chat", "port": "usages" } },
+                    "context_messages": { "from": { "node": "compact", "port": "messages" } },
+                    "compact_usages": { "from": { "node": "compact", "port": "usages" } }
+                }
+            }
+        ],
+        "edges": [
+            { "from_node": "compact", "to_node": "route" },
+            { "from_node": "route", "from_output": "replaced", "to_node": "replace_result" },
+            { "from_node": "route", "from_output": "else", "to_node": "append_result" }
+        ],
+        "outputs": [
+            { "name": "append", "node": "append_result", "port": "value", "optional": true },
+            { "name": "replace_context", "node": "replace_result", "port": "value", "optional": true }
+        ]
+    }))
+    .unwrap();
+
+    let profile = WorkflowProfile::new(
+        "default",
+        definition,
+        WorkflowArguments::try_from(json!({
+            "params.model": "fixture-model",
+            "params.base_url": server.base_url,
+            "params.api_key": "synthetic-key"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut config = HostConfig::new(profile);
+    config.automatic_titles = false;
+    config.automatic_compaction = CompactionConfig {
+        enabled: true,
+        context_window: 100,
+        reserve_tokens: 20,
+        keep_recent_tokens: 6,
+        custom_instructions: "Follow host custom instructions.".into(),
+    };
+    let root = tempfile::tempdir().unwrap();
+    let host = ChatHost::open(root.path().join("chat.sqlite"), config).unwrap();
+    let session_id = host
+        .database()
+        .create_session("default", None, Some("Manual".into()))
+        .unwrap()
+        .id;
+
+    // Turn 1: under threshold -> returns append; host does NOT run a second compaction.
+    let first = host
+        .submit(&session_id, "Turn one details to summarize")
+        .unwrap()
+        .join()
+        .unwrap();
+    assert!(matches!(first.result.update, MessageUpdate::Append { .. }));
+    assert_eq!(server.requests().len(), 1);
+
+    // Turn 2: over threshold -> user chatflow runs mf-chat.chat-compact once; host yields.
+    let second = host
+        .submit(&session_id, "Turn two")
+        .unwrap()
+        .join()
+        .unwrap();
+    assert!(matches!(
+        second.result.update,
+        MessageUpdate::ReplaceContext { .. }
+    ));
+    assert_eq!(second.result.usages.len(), 2);
+    assert_eq!(server.requests().len(), 3);
+    let compact_messages = request_messages(&server.requests()[2]);
+    let compact_prompt = compact_messages[1]["content"].as_str().unwrap();
+    assert!(compact_prompt.contains("Follow host custom instructions."));
+    host.close().unwrap();
+}
+
+struct CustomCompactingBackend {
+    base_url: String,
+    report_compaction_usage: bool,
+}
+
+impl ConversationBackend for CustomCompactingBackend {
+    fn builtin_title_parameters(&self) -> Option<WorkflowArguments> {
+        Some(
+            WorkflowArguments::try_from(json!({
+                "params.model": "fixture-model",
+                "params.base_url": self.base_url,
+                "params.api_key": "synthetic-key"
+            }))
+            .unwrap(),
+        )
+    }
+
+    fn invoke(
+        &self,
+        _: &Invocation,
+        input: ConversationInputs,
+        _: &mut ExecutionContext,
+        _: Option<&mut dyn FnMut(mf_chat::PreviewDelta) -> Result<(), ChatError>>,
+        _: Option<&Observer>,
+    ) -> Result<ConversationResult, ChatError> {
+        let context = input.context.expect("host passes compaction context");
+        assert!(context.compaction.enabled);
+        let mut result = ConversationResult::assistant("Custom backend answer");
+        if self.report_compaction_usage {
+            result.usages.push(mf_chat::CallUsage {
+                started_at: Some(0),
+                call_id: "custom-compact-1".into(),
+                node: None,
+                model: "fixture-model".into(),
+                usage: None,
+                attribution: Some(mfn_llm::UsageAttribution {
+                    purpose: Some("compaction".into()),
+                    profile: None,
+                }),
+                timing: None,
+                error: Some("custom compaction skipped".into()),
+            });
+        } else {
+            result.update = MessageUpdate::ReplaceContext {
+                context_messages: vec![mfn_llm::ChatMessage::System {
+                    content: "Custom compacted context".into(),
+                    metadata: None,
+                }],
+                display_messages: vec![mfn_llm::ChatMessage::Assistant {
+                    content: "Custom backend answer".into(),
+                    tool_calls: None,
+                    metadata: None,
+                }],
+            };
+        }
+        Ok(result)
+    }
+}
+
+#[test]
+fn custom_compaction_result_or_compaction_usage_suppresses_host_compaction() {
+    for report_compaction_usage in [false, true] {
+        let server = Server::start(vec![]);
+        let profile = WorkflowProfile::with_backend(
+            "custom",
+            std::sync::Arc::new(CustomCompactingBackend {
+                base_url: server.base_url.clone(),
+                report_compaction_usage,
+            }),
+        )
+        .unwrap();
+        let mut config = HostConfig::new(profile);
+        config.automatic_titles = false;
+        config.automatic_compaction = CompactionConfig {
+            enabled: true,
+            context_window: 10,
+            reserve_tokens: 5,
+            keep_recent_tokens: 0,
+            custom_instructions: String::new(),
+        };
+        let root = tempfile::tempdir().unwrap();
+        let host = ChatHost::open(root.path().join("chat.sqlite"), config).unwrap();
+        let session_id = host
+            .database()
+            .create_session("custom", None, Some("Manual".into()))
+            .unwrap()
+            .id;
+
+        let completion = host
+            .submit(&session_id, "Prompt well above host compaction threshold")
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(
+            completion.result.final_text(),
+            Some("Custom backend answer")
+        );
+        assert_eq!(
+            server.requests().len(),
+            0,
+            "host must not invoke builtin compaction when custom backend handled compaction"
+        );
+        host.close().unwrap();
+    }
+}
+
+#[test]
+fn embedded_conversation_declares_and_prepares_builtin_compact_call() {
+    let authored =
+        WorkflowDefinition::from_json(include_str!("../workflows/conversation.json")).unwrap();
+    assert_eq!(
+        authored.flows["compact"],
+        mf_runtime::FlowSource::Builtin {
+            builtin: "mf-chat.chat-compact".into()
+        }
+    );
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = mf_chat::flows::conversation::plan(&registry).unwrap();
+    for (id, kind) in [
+        ("prepare_compact", "mf_chat.compact.prepare"),
+        ("finish", "mf_chat.conversation.finish"),
+    ] {
+        assert!(
+            plan.graph
+                .definition
+                .nodes
+                .iter()
+                .any(|node| node.id.as_str() == id && node.kind == kind),
+            "missing node {id} ({kind})"
+        );
+    }
+    let call = plan
+        .graph
+        .definition
+        .nodes
+        .iter()
+        .find(|node| node.id.as_str() == "compact")
+        .unwrap();
+    assert_eq!(call.kind, mf_runtime::CALL_KIND);
+    let configuration: mf_runtime::CallConfig =
+        serde_json::from_value(call.config.clone()).unwrap();
+    let body = configuration.body.unwrap();
+    let registered = mf_chat::flows::compact_definition().unwrap();
+    let resolved = mf_compiler::resolve_flows_with_registry(&registered, None, &registry).unwrap();
+    let mut expected = mf_compiler::plan_resolved_workflow(&resolved)
+        .unwrap()
+        .graph
+        .definition;
+    // Standalone resolution hoists descendant dependencies onto its own root, whereas nested call
+    // bodies retain only their direct dependencies.
+    expected.dependencies = registered.dependencies;
+    assert_eq!(*body, expected);
 }

@@ -77,8 +77,8 @@ current user submission. A chatflow declares one unambiguous required `messages:
 port. Its qualified name can belong to any startup node, such as `params.messages`. The host, not
 terminal configuration, binds this input.
 
-The optional application-owned `context: Object` startup port receives title policy and the admitted
-model-context revision:
+The optional application-owned `context: Object` startup port receives title policy, the admitted
+model-context revision, and compaction policy:
 
 ```json
 {
@@ -88,7 +88,14 @@ model-context revision:
     "attempted": false,
     "enabled": true
   },
-  "model_context": {"revision": 3}
+  "model_context": {"revision": 3},
+  "compaction": {
+    "enabled": true,
+    "context_window": 128000,
+    "reserve_tokens": 16384,
+    "keep_recent_tokens": 20000,
+    "custom_instructions": ""
+  }
 }
 ```
 
@@ -261,7 +268,8 @@ flowchart LR
     Bind --> Invoke["Invoke user chatflow once"]
     Invoke --> Validate["Validate result and await delivery closure"]
     Validate --> Title["Optional application title"]
-    Title --> Settle["Settle atomically"]
+    Title --> Compact["Optional application compaction"]
+    Compact --> Settle["Settle atomically"]
 ```
 
 Finite and compatible TaskStream graphs are composed through `workflow.call`; preparation binds
@@ -270,11 +278,11 @@ port must not skip settlement. Graphs requiring a native Event/Stream coordinato
 `mf_chat.workflow.invoke` adapter. Both paths share cancellation, result validation, and storage.
 The host drains declared streams even without a preview subscriber.
 
-The user Flow owns business generation, tools, compaction thresholds, summary requests, explicit
-usage composition, and captured-failure policy. The application does not insert Agent/tool/compact
-branches, identify internal model nodes, or collect hidden model usage. Resource management and
-abort cleanup remain host responsibilities outside the Flow success graph. Save-only retries call
-storage directly, never the conversation Flow.
+The user Flow owns business generation, tools, explicit usage composition, and captured-failure
+policy, and may also own compaction thresholds and summary requests by declaring `replace_context`.
+The application does not insert Agent or tool branches, identify internal model nodes, or collect
+hidden model usage. Resource management and abort cleanup remain host responsibilities outside the
+Flow success graph. Save-only retries call storage directly, never the conversation Flow.
 
 ```rust
 let profile = mf_chat::WorkflowProfile::from_path(
@@ -388,11 +396,32 @@ thresholds or summary strategies. The example's CEL assembly inherits the ordina
 limit of 16 levels without expression, serialized-size, or collection-entry caps. Configure a
 different business pipeline when explicit transcript budgets or truncation policies are required.
 
-### Reusable compaction Flow (`mf-chat.chat-compact`)
+### Automatic and reusable compaction (`mf-chat.chat-compact`)
 
-`mf-chat` ships the built-in `mf-chat.chat-compact` Flow (`workflows/compact.json`) so chatflows can
-compose structured, threshold-based compaction into `replace_context` without duplicating compaction
-logic. Internally it delegates compaction execution to `mf-chat.chat-compact-run`
+`mf-chat` ships the built-in `mf-chat.chat-compact` Flow (`workflows/compact.json`) and supports
+three compaction modes—mirroring session title generation:
+
+1. **Host-managed built-in compaction:** When `HostConfig::automatic_compaction.enabled` is true
+   (default: `context_window = 128000`, `reserve_tokens = 16384`, `keep_recent_tokens = 20000`,
+   `custom_instructions = ""`), the chatflow only declares `append` (not `replace_context`), and
+   unique resolved `model`, `base_url`, and `api_key` inputs exist, the host composes
+   `mf-chat.chat-compact` inside `workflows/conversation.json` after optional title generation and
+   before atomic settlement. If compaction triggers, the host publishes the compacted context via
+   `ReplaceContext` while preserving the original turn's display messages and merging `compaction`
+   usages atomically. If compaction is skipped or fails, the primary `Append` result is preserved
+   along with any captured compaction usage. Set `HostConfig::automatic_compaction.enabled = false`
+   to disable host compaction; negative token settings fail validation when opening `ChatHost`.
+2. **User chatflow reuse:** A chatflow can call `{"builtin": "mf-chat.chat-compact"}` directly,
+   optionally reading policy defaults from `context.compaction` or overriding thresholds and models,
+   and export `append` / `replace_context`. Declaring `replace_context` causes the host to yield
+   automatically so compaction never runs twice.
+3. **Custom compaction:** A chatflow declaring `replace_context` with custom summarization (such as
+   [examples/chat-context-flow.json](../examples/chat-context-flow.json)), or a custom
+   `ConversationBackend` that returns `MessageUpdate::ReplaceContext`, reports a usage with
+   `attribution.purpose == "compaction"`, or overrides `builtin_compaction_parameters` to return
+   `None`, suppresses host-managed compaction.
+
+Internally `mf-chat.chat-compact` delegates compaction execution to `mf-chat.chat-compact-run`
 (`workflows/compact-run.json`), which composes `mf-chat.chat-compact-prepare`
 (`workflows/compact-prepare.json`) and the shared `mf-chat.chat-compact-summarize`
 (`workflows/compact-summarize.json`) Flow:
