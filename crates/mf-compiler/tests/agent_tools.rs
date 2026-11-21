@@ -630,7 +630,11 @@ fn empty_agent_completes_a_direct_answer_without_advertising_tools() {
     assert_catalog_once_outside_loop(&recording, 0);
     let snapshot = recording.current();
     let agent = snapshot.node(&[], "agent").unwrap();
-    assert_eq!(agent.outputs["messages"].as_str(), Some("[REDACTED]"));
+    assert_eq!(agent.inputs["params.messages"].as_str(), Some("[REDACTED]"));
+    assert_eq!(
+        agent.outputs["messages"],
+        json!([{"role":"assistant","content":"Direct answer"}])
+    );
     assert!(agent.outputs["usages"].is_array());
     let requests = server.requests();
     assert_eq!(requests.len(), 1);
@@ -1006,6 +1010,10 @@ fn secret_tool_results_reach_the_model_but_not_agent_snapshots_or_catalog() {
         &json!({"role":"tool", "tool_call_id":"private-result", "content":SECRET})
     );
     assert_eq!(output["messages"][1]["content"], SECRET);
+    assert_eq!(
+        recording.current().node(&[], "agent").unwrap().outputs["messages"].as_str(),
+        Some("[REDACTED]")
+    );
     let history = recording.history();
     assert!(
         history

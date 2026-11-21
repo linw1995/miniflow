@@ -261,9 +261,6 @@
               "config": {
                 "language": "cel",
                 "inputs": {
-                  "messages": {
-                    "list": "object"
-                  },
                   "generated": {
                     "list": "object"
                   },
@@ -272,17 +269,10 @@
                   }
                 },
                 "code": {
-                  "messages": "messages + additions",
                   "generated": "generated + additions"
                 }
               },
               "inputs": {
-                "messages": {
-                  "from": {
-                    "node": "request",
-                    "port": "messages"
-                  }
-                },
                 "generated": {
                   "from": {
                     "node": "%loop",
@@ -330,9 +320,6 @@
               "config": {
                 "language": "cel",
                 "inputs": {
-                  "assistant": {
-                    "list": "object"
-                  },
                   "generated": {
                     "list": "object"
                   },
@@ -341,17 +328,10 @@
                   }
                 },
                 "code": {
-                  "messages": "assistant + results.map(result, dyn({'role':'tool','tool_call_id':result.tool_call_id,'content':result.content}))",
                   "generated": "generated + results.map(result, dyn({'role':'tool','tool_call_id':result.tool_call_id,'content':result.content}))"
                 }
               },
               "inputs": {
-                "assistant": {
-                  "from": {
-                    "node": "append_assistant",
-                    "port": "messages"
-                  }
-                },
                 "generated": {
                   "from": {
                     "node": "append_assistant",
