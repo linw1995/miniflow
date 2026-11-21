@@ -384,10 +384,9 @@ mf run ./target/chat-context --chat --params.model your-model --params.compact t
 ```
 
 The flag is example business policy, not a host compaction scheduler. Real flows can use their own
-thresholds or summary strategies. The example's CEL assembly has the ordinary Code limits: 1 MiB
-serialized inputs/outputs, 10,000 collection entries across conversion, and 16 nesting levels. Large
-inputs fail explicitly instead of silently dropping history. Configure a different business pipeline
-when those limits are inappropriate.
+thresholds or summary strategies. The example's CEL assembly inherits the ordinary Code nesting
+limit of 16 levels without expression, serialized-size, or collection-entry caps. Configure a
+different business pipeline when explicit transcript budgets or truncation policies are required.
 
 ## History metadata
 

@@ -210,50 +210,39 @@ fn structured_json_matches_in_memory_and_generated_runner_checks() {
 }
 
 #[test]
-fn loop_accumulation_fails_atomically_when_conversion_budget_is_exhausted() {
-    for iterations in [5, 6] {
-        let definition: WorkflowDefinition = serde_json::from_value(json!({
-            "version":"2026-09-29", "dependencies":{},
-            "nodes":[
-                {"id":"seed", "kind":"builtin.constant", "config":{"value":[]}},
-                {"id":"repeat", "kind":"loop.run", "config":{
-                    "max_iterations":iterations, "variables":[{"name":"items", "type":{"list":"object"}}],
-                    "body":{"version":"2026-09-29", "dependencies":{},
-                        "nodes":[
-                            {"id":"chunk", "kind":"builtin.constant", "config":{"value":vec![json!({}); 1000]}},
-                            {"id":"collect", "kind":"builtin.code", "config":{
-                                "language":"cel", "inputs":{"left":{"list":"object"}, "right":{"list":"object"}},
-                                "code":{"value":"left + right"}
-                            }},
-                            {"id":"assign", "kind":"workflow.assign", "config":{"variable":"items"}}
-                        ],
-                        "edges":[
-                            {"from_node":"%loop", "from_output":"items", "to_node":"collect", "to_input":"left"},
-                            {"from_node":"chunk", "from_output":"value", "to_node":"collect", "to_input":"right"},
-                            {"from_node":"collect", "from_output":"value", "to_node":"assign", "to_input":"value"}
-                        ]
-                    }
-                }}
-            ],
-            "edges":[{"from_node":"seed", "from_output":"value", "to_node":"repeat", "to_input":"items"}],
-            "outputs":[{"name":"items", "node":"repeat", "port":"items"}]
-        })).unwrap();
-        let registry = NodeRegistry::from_inventory().unwrap();
-        let plan = compile_definition(&definition, &registry).unwrap();
-        let flow = instantiate_compiled(&plan, &registry).unwrap();
-        let mut context = mf_runtime::ExecutionContext::default();
-        let result = flow.execute_in_context(&mut context);
-        if iterations == 5 {
-            assert_eq!(result.unwrap()["items"].as_array().unwrap().len(), 5000);
-        } else {
-            let error = result.unwrap_err().to_string();
-            assert!(
-                error.contains("collect") && error.contains("collection entry limit"),
-                "{error}"
-            );
-            assert!(context.output("repeat.items").is_err());
-        }
-    }
+fn loop_accumulation_accepts_collections_beyond_the_former_entry_limit() {
+    let definition: WorkflowDefinition = serde_json::from_value(json!({
+        "version":"2026-09-29", "dependencies":{},
+        "nodes":[
+            {"id":"seed", "kind":"builtin.constant", "config":{"value":[]}},
+            {"id":"repeat", "kind":"loop.run", "config":{
+                "max_iterations":5, "variables":[{"name":"items", "type":{"list":"object"}}],
+                "body":{"version":"2026-09-29", "dependencies":{},
+                    "nodes":[
+                        {"id":"chunk", "kind":"builtin.constant", "config":{"value":vec![json!({}); 4000]}},
+                        {"id":"collect", "kind":"builtin.code", "config":{
+                            "language":"cel", "inputs":{"left":{"list":"object"}, "right":{"list":"object"}},
+                            "code":{"value":"left + right"}
+                        }},
+                        {"id":"assign", "kind":"workflow.assign", "config":{"variable":"items"}}
+                    ],
+                    "edges":[
+                        {"from_node":"%loop", "from_output":"items", "to_node":"collect", "to_input":"left"},
+                        {"from_node":"chunk", "from_output":"value", "to_node":"collect", "to_input":"right"},
+                        {"from_node":"collect", "from_output":"value", "to_node":"assign", "to_input":"value"}
+                    ]
+                }
+            }}
+        ],
+        "edges":[{"from_node":"seed", "from_output":"value", "to_node":"repeat", "to_input":"items"}],
+        "outputs":[{"name":"items", "node":"repeat", "port":"items"}]
+    })).unwrap();
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let flow = instantiate_compiled(&plan, &registry).unwrap();
+    let mut context = mf_runtime::ExecutionContext::default();
+    let result = flow.execute_in_context(&mut context).unwrap();
+    assert_eq!(result["items"].as_array().unwrap().len(), 20_000);
 }
 
 #[test]

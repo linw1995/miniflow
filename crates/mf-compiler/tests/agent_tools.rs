@@ -647,50 +647,11 @@ fn empty_agent_completes_a_direct_answer_without_advertising_tools() {
 }
 
 #[test]
-fn transcript_budget_failures_follow_the_provider_request_and_precede_tool_dispatch() {
-    let calls = json!([call(
-        "first",
-        "calculator",
-        json!({"operation":"add", "left":2.0, "right":3.0})
-    )]);
-    for oversized_prefix in [true, false] {
-        let reply = tool_reply(calls.clone(), false);
-        let reply = if oversized_prefix {
-            reply
-        } else {
-            // The new assistant alone fits, but the legacy append stage budgets
-            // both the full transcript and the generated additions.
-            let mut response: Value = serde_json::from_str(&reply.body).unwrap();
-            response["choices"][0]["message"]["content"] = "a".repeat(600 * 1024).into();
-            Reply::json(response)
-        };
-        let server = Server::start(vec![reply]);
-        let mut args = inputs(&server);
-        if oversized_prefix {
-            args["params.messages"][0]["content"] = "p".repeat(1024 * 1024).into();
-        }
-        let (result, recording) = memory_result(configured_agent(calculator_tools()), args);
-        let error = result.unwrap_err().to_string();
-        assert!(
-            error.contains("append_assistant") && error.contains("JSON limit"),
-            "{error}"
-        );
-        assert_eq!(server.requests().len(), 1);
-        assert!(
-            recording
-                .history()
-                .iter()
-                .all(|entry| entry.node.as_ref() != "calculate")
-        );
-    }
-}
-
-#[test]
-fn near_limit_prefix_can_continue_after_a_tool_round() {
+fn large_transcripts_can_continue_after_a_tool_round() {
     let server = Server::start(vec![
         tool_reply(
             json!([call(
-                "near-limit",
+                "large-prefix",
                 "calculator",
                 json!({"operation":"add", "left":2.0, "right":3.0})
             )]),
@@ -699,7 +660,7 @@ fn near_limit_prefix_can_continue_after_a_tool_round() {
         Reply::text("Continued answer"),
     ]);
     let mut args = inputs(&server);
-    let long_prefix = "p".repeat(1024 * 1024 - 1024);
+    let long_prefix = "p".repeat(2 * 1024 * 1024);
     args["params.messages"][0]["content"] = long_prefix.clone().into();
     let (output, _) = memory(configured_agent(calculator_tools()), args);
     assert_success(&output, "Continued answer", 2);
@@ -708,7 +669,7 @@ fn near_limit_prefix_can_continue_after_a_tool_round() {
     assert!(requests[1].body["messages"][0]["content"].as_str() == Some(long_prefix.as_str()));
     assert_eq!(
         requests[1].body["messages"][2],
-        json!({"role":"tool", "tool_call_id":"near-limit", "content":"5.0"})
+        json!({"role":"tool", "tool_call_id":"large-prefix", "content":"5.0"})
     );
 }
 
@@ -996,20 +957,23 @@ fn literal_tool_result(content: &str) -> FlowTool {
 }
 
 #[test]
-fn tool_results_over_the_transcript_budget_do_not_trigger_another_model_request() {
+fn large_tool_results_continue_the_conversation() {
     let tool = literal_tool_result(&"t".repeat(600 * 1024));
-    let server = Server::start(vec![tool_reply(
-        json!([call("large-result", "large", json!({}))]),
-        false,
-    )]);
+    let server = Server::start(vec![
+        tool_reply(json!([call("large-result", "large", json!({}))]), false),
+        Reply::text("Large result received"),
+    ]);
     let definition = configured_agent(BTreeMap::from([("large".into(), tool)]));
-    let (result, _) = memory_result(definition, inputs(&server));
-    let error = result.unwrap_err().to_string();
-    assert!(
-        error.contains("append_tool_results") && error.contains("JSON limit"),
-        "{error}"
+    let (output, _) = memory(definition, inputs(&server));
+    assert_success(&output, "Large result received", 2);
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[1].body["messages"][2]["content"]
+            .as_str()
+            .map(str::len),
+        Some(600 * 1024)
     );
-    assert_eq!(server.requests().len(), 1);
 }
 
 #[test]
