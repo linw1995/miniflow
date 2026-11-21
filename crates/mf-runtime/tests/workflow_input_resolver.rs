@@ -106,8 +106,14 @@ fn missing_environment_only_fails_for_required_inputs_without_defaults() {
     }));
     let error =
         resolve_workflow_inputs(&schema, &WorkflowArguments::default(), |_| None).unwrap_err();
+    let message = error.to_string();
     assert!(
         matches!(error, WorkflowInputError::Invalid { path, .. } if path == "/params.required")
+    );
+    assert!(
+        message.contains("set environment variable REQUIRED")
+            && message.contains("--params.required"),
+        "unexpected message: {message}"
     );
     let resolved = resolve_workflow_inputs(&schema, &WorkflowArguments::default(), |name| {
         (name == "REQUIRED").then(|| "present".into())
@@ -115,6 +121,25 @@ fn missing_environment_only_fails_for_required_inputs_without_defaults() {
     .unwrap();
     assert!(!resolved.0.contains_key("params.optional"));
     assert_eq!(resolved.0["params.required"], json!("present"));
+}
+
+#[test]
+fn missing_required_inputs_name_the_cli_argument_and_environment_variable() {
+    let flagged = schema(json!({"flagged": {"type": "string", "required": true}}));
+    let error = flagged.validate(&WorkflowArguments::default()).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "workflow input `/params.flagged`: required input was not provided; pass --params.flagged"
+    );
+    let environment = schema(json!({
+        "environment": {"type": "string", "required": true, "binding": {"env": "MISSING"}}
+    }));
+    let error =
+        resolve_workflow_inputs(&environment, &WorkflowArguments::default(), |_| None).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "workflow input `/params.environment`: required input was not provided; set environment variable MISSING or pass --params.environment"
+    );
 }
 
 #[test]

@@ -390,6 +390,7 @@ impl Controller {
                         reason: "prompt must not be empty"
                     }
                 );
+                ensure!(self.retained.is_none(), BusySnafu);
                 let session = if let Some(id) = session_id {
                     self.database.session(&id)?
                 } else {
@@ -410,6 +411,7 @@ impl Controller {
                 self.submit(session, prompt, None)?;
             }
             ChatCommand::Retry { turn_id } => {
+                ensure!(self.retained.is_none(), BusySnafu);
                 let (turn, prompt) = self.database.retry_prompt(&turn_id)?;
                 self.submit(
                     self.database.session(&turn.session_id)?,
@@ -428,7 +430,6 @@ impl Controller {
         prompt: String,
         retry_of: Option<String>,
     ) -> Result<(), ChatRunError> {
-        ensure!(self.retained.is_none(), BusySnafu);
         let parameters = mf_runtime::resolve_workflow_inputs(
             &self.launch.contract.parameters,
             &self.launch.parameters,

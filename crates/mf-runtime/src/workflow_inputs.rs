@@ -237,6 +237,19 @@ impl WorkflowInput {
             value
         })
     }
+
+    /// Names the sources a caller could still use to supply this required input.
+    ///
+    /// Defaults cannot be missing here: a present default is always resolved, so only the
+    /// command line and an optional environment variable remain actionable.
+    pub fn missing_hint(&self, name: &str) -> String {
+        match &self.binding.env {
+            Some(variable) => format!(
+                "required input was not provided; set environment variable {variable} or pass --{name}"
+            ),
+            None => format!("required input was not provided; pass --{name}"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -408,10 +421,7 @@ impl WorkflowInputSchema {
                     && input.binding.default.is_none()
                     && !arguments.0.contains_key(name.as_str())
                 {
-                    return Err(invalid(
-                        pointer("", &name),
-                        "required input was not provided",
-                    ));
+                    return Err(invalid(pointer("", &name), input.missing_hint(&name)));
                 }
             }
         }

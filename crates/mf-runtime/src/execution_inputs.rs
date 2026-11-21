@@ -331,8 +331,9 @@ pub fn resolve_workflow_inputs(
             if input.required && !resolved.0.contains_key(&name) {
                 return InvalidSnafu {
                     path: pointer("", &name),
-                    message: "required input was not provided by arguments, environment, or default",
-                }.fail();
+                    message: input.missing_hint(&name),
+                }
+                .fail();
             }
         }
     }
