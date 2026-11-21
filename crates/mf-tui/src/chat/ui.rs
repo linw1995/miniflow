@@ -700,30 +700,124 @@ enum Action {
     Quit,
 }
 
+fn compaction_tokens_before(messages: &[mf_chat::ChatMessage]) -> Option<u64> {
+    messages.iter().find_map(|message| {
+        let mf_chat::ChatMessage::User {
+            metadata: Some(metadata),
+            ..
+        } = message
+        else {
+            return None;
+        };
+        metadata.get("compaction")?.get("tokens_before")?.as_u64()
+    })
+}
+
+fn format_token_count(tokens: u64) -> String {
+    if tokens >= 10_000 {
+        format!("{:.1}k", tokens as f64 / 1000.0)
+    } else {
+        tokens.to_string()
+    }
+}
+
+/// Returns `Some(true)` if all compaction calls succeeded, `Some(false)` if any failed,
+/// or `None` if no compaction call was reported.
+fn compaction_call_outcome(usages: &[mf_chat::CallUsage]) -> Option<bool> {
+    let mut saw_compaction = false;
+    let mut failed = false;
+    for usage in usages {
+        if usage
+            .attribution
+            .as_ref()
+            .and_then(|attribution| attribution.purpose.as_deref())
+            == Some("compaction")
+        {
+            saw_compaction = true;
+            if usage.error.is_some() {
+                failed = true;
+            }
+        }
+    }
+    saw_compaction.then_some(!failed)
+}
+
+fn compacted_label(tokens_before: Option<u64>) -> String {
+    match tokens_before {
+        Some(tokens) => format!(
+            "[context compacted from {} tokens]",
+            format_token_count(tokens)
+        ),
+        None => "[context compacted]".into(),
+    }
+}
+
+fn committed_notice(result: &mf_chat::ConversationResult) -> String {
+    if result.status == "failed" {
+        return "Failed result saved; model context unchanged".into();
+    }
+    match &result.update {
+        mf_chat::MessageUpdate::ReplaceContext {
+            context_messages, ..
+        } => {
+            let tokens_before = compaction_tokens_before(context_messages);
+            if tokens_before.is_some() || compaction_call_outcome(&result.usages).is_some() {
+                match tokens_before {
+                    Some(tokens) => format!(
+                        "Saved; context compacted from {} tokens",
+                        format_token_count(tokens)
+                    ),
+                    None => "Saved; context compacted".into(),
+                }
+            } else {
+                "Saved; model context replaced".into()
+            }
+        }
+        mf_chat::MessageUpdate::Append { .. } => {
+            if compaction_call_outcome(&result.usages) == Some(false) {
+                "Saved; compaction failed".into()
+            } else {
+                "Saved".into()
+            }
+        }
+    }
+}
+
 struct PresentedResult {
     result: mf_chat::ConversationResult,
     saved: bool,
 }
 
 impl PresentedResult {
-    fn status(&self) -> Option<&'static str> {
+    fn status(&self) -> Option<String> {
         if self.result.status == "failed" {
-            Some(if self.saved {
-                "[failed] Model context unchanged"
+            Some(
+                if self.saved {
+                    "[failed] Model context unchanged"
+                } else {
+                    "[failed] [not saved] Model context unchanged"
+                }
+                .into(),
+            )
+        } else if let mf_chat::MessageUpdate::ReplaceContext {
+            context_messages, ..
+        } = &self.result.update
+        {
+            if !self.saved {
+                Some("[not saved] Model context replacement pending".into())
             } else {
-                "[failed] [not saved] Model context unchanged"
-            })
-        } else if matches!(
-            self.result.update,
-            mf_chat::MessageUpdate::ReplaceContext { .. }
-        ) {
-            Some(if self.saved {
-                "[model context replaced]"
-            } else {
-                "[not saved] Model context replacement pending"
-            })
+                let tokens_before = compaction_tokens_before(context_messages);
+                if tokens_before.is_some() || compaction_call_outcome(&self.result.usages).is_some()
+                {
+                    Some(compacted_label(tokens_before))
+                } else {
+                    Some("[model context replaced]".into())
+                }
+            }
         } else if !self.saved {
-            Some("[not saved] Model context update pending")
+            Some("[not saved] Model context update pending".into())
+        } else if compaction_call_outcome(&self.result.usages) == Some(false) {
+            Some("[compaction failed; model context unchanged]".into())
         } else {
             None
         }
@@ -745,6 +839,7 @@ struct ChatView {
     active: Option<(Invocation, String)>,
     /// Whether that turn is still executing, separate from what is presented.
     running: bool,
+    host_compacting: bool,
     retained: bool,
     reply: Option<PresentedResult>,
     preview: LivePreview,
@@ -793,6 +888,7 @@ impl ChatView {
             pending: None,
             active: None,
             running: false,
+            host_compacting: false,
             retained: false,
             reply: None,
             preview: LivePreview::default(),
@@ -843,6 +939,7 @@ impl ChatView {
         self.page = None;
         self.active = None;
         self.running = false;
+        self.host_compacting = false;
         self.preview = LivePreview::default();
         self.expanded_tools.clear();
         self.focused_tool = None;
@@ -904,6 +1001,7 @@ impl ChatView {
                 self.reply = None;
                 self.active = Some((invocation, prompt));
                 self.running = true;
+                self.host_compacting = false;
                 self.observation = None;
                 self.retained = false;
                 self.outcome.clear();
@@ -921,6 +1019,16 @@ impl ChatView {
                         .is_some_and(|(active, _)| active == &invocation)
                 {
                     self.replace_preview(preview);
+                }
+            }
+            ChatEvent::Compacting { invocation, active } => {
+                if self.running
+                    && self
+                        .active
+                        .as_ref()
+                        .is_some_and(|(current, _)| current == &invocation)
+                {
+                    self.host_compacting = active;
                 }
             }
             ChatEvent::Observing(observation) => self.observation = Some(observation),
@@ -947,6 +1055,7 @@ impl ChatView {
                         .retain(|key| !key.starts_with(&canonical) && !key.starts_with(&anonymous));
                 }
                 self.running = false;
+                self.host_compacting = false;
                 self.pending = None;
                 self.retained = false;
                 self.reply = None;
@@ -961,17 +1070,7 @@ impl ChatView {
                         match resolution.state {
                             CompletionState::Committed(completion) => {
                                 self.preview = LivePreview::default();
-                                self.notice = if completion.result.status == "failed" {
-                                    "Failed result saved; model context unchanged"
-                                } else if matches!(
-                                    completion.result.update,
-                                    mf_chat::MessageUpdate::ReplaceContext { .. }
-                                ) {
-                                    "Saved; model context replaced"
-                                } else {
-                                    "Saved"
-                                }
-                                .into();
+                                self.notice = committed_notice(&completion.result);
                                 if let Some(error) = &completion.result.error {
                                     details.push(error.clone());
                                 }
@@ -1252,6 +1351,15 @@ impl ChatView {
         self.observation
             .as_ref()
             .map_or_else(BTreeMap::new, |run| run.reader.tool_metrics().snapshot())
+    }
+
+    fn is_compacting(&self) -> bool {
+        self.running
+            && (self.host_compacting
+                || self
+                    .observation
+                    .as_ref()
+                    .is_some_and(|run| run.reader.call_events().has_active_purpose("compaction")))
     }
 
     fn tool_keys(&self) -> Vec<String> {
@@ -1561,7 +1669,8 @@ impl ChatView {
                 );
             }
             let mut metadata = vec![];
-            if let Some(usages) = records.iter().find_map(|record| record.usages.as_deref()) {
+            let turn_usages = records.iter().find_map(|record| record.usages.as_deref());
+            if let Some(usages) = turn_usages {
                 let calls = crate::performance::conversation_calls(usages);
                 metadata.push(Line::styled(
                     crate::performance::footer(&calls, body.width),
@@ -1574,6 +1683,15 @@ impl ChatView {
                     format!("[{state}; model context unchanged]"),
                     Style::default().fg(Color::Yellow),
                 ));
+            } else if state == "succeeded"
+                && let Some(outcome) = turn_usages.and_then(compaction_call_outcome)
+            {
+                let label = if outcome {
+                    "[context compacted]"
+                } else {
+                    "[compaction failed; model context unchanged]"
+                };
+                metadata.push(Line::styled(label, Style::default().fg(Color::Yellow)));
             }
             metadata.push(Line::default());
             transcript.plain(format!("turn:{turn}:saved:metadata"), metadata);
@@ -1593,6 +1711,7 @@ impl ChatView {
             transcript.literal(format!("turn:{turn}:you:body"), prompt, Style::default());
             transcript.plain(format!("turn:{turn}:you:metadata"), vec![Line::default()]);
         }
+        let compacting = self.is_compacting();
         if let Some(reply) = &self.reply {
             for group in message_groups(reply.result.display_messages().iter()) {
                 let key = format!("turn:{turn}:display:{}", group.index);
@@ -1629,15 +1748,16 @@ impl ChatView {
                     % LOADING_FRAMES.len() as u128) as usize;
                 LOADING_FRAMES[frame]
             });
+            let assistant_indicator = indicator.filter(|_| !compacting);
             let LiveMessages {
                 messages,
                 unmatched,
             } = live_messages(turn, &self.preview, executions);
             let count = messages.len();
-            if count == 0 && loading {
+            if count == 0 && loading && !compacting {
                 transcript.plain(
                     format!("turn:{turn}:assistant:label"),
-                    vec![role_label("Assistant", Color::Cyan, indicator)],
+                    vec![role_label("Assistant", Color::Cyan, assistant_indicator)],
                 );
             }
             for (index, message) in messages.into_iter().enumerate() {
@@ -1651,7 +1771,7 @@ impl ChatView {
                     &key,
                     message.text,
                     message.tools,
-                    indicator.filter(|_| index + 1 == count),
+                    assistant_indicator.filter(|_| index + 1 == count),
                     &self.expanded_tools,
                     self.focused_tool.as_deref(),
                 );
@@ -1672,6 +1792,13 @@ impl ChatView {
                 );
             }
             let mut status = vec![];
+            if compacting {
+                let spinner = indicator.unwrap_or(LOADING_FRAMES[0]);
+                status.push(Line::styled(
+                    format!("{spinner} Compacting context..."),
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
             if !loading && has_preview && self.preview.incomplete {
                 status.push(Line::styled(
                     "Response unfinished",
@@ -1733,8 +1860,13 @@ impl ChatView {
         } else {
             "Ctrl+P commands | Ctrl+E flow | Ctrl+S chats | Ctrl+Q quit"
         };
+        let footer_notice = if self.notice.is_empty() && compacting {
+            "Compacting context..."
+        } else {
+            self.notice.as_str()
+        };
         frame.render_widget(
-            Paragraph::new(format!("{}\n{hints}", safe(&self.notice)))
+            Paragraph::new(format!("{}\n{hints}", safe(footer_notice)))
                 .style(Style::default().fg(Color::DarkGray)),
             footer,
         );
@@ -4020,6 +4152,268 @@ mod tests {
         assert!(screen.contains("not saved"));
         assert!(!screen.contains("partial text"));
         assert!(view.retained);
+        controller.close().unwrap();
+    }
+
+    #[test]
+    fn live_compacting_status_renders_for_host_and_clears_after_settlement() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
+        view.show_execution = false;
+        let controller = ChatController::open(launch).unwrap();
+        let session = controller
+            ._database
+            .create_session("default", None, None)
+            .unwrap();
+        let begun = controller
+            ._database
+            .begin_turn(
+                &session.id,
+                "Long conversation turn",
+                mf_chat::ModelIdentity {
+                    profile: "default".into(),
+                    model: None,
+                },
+                None,
+            )
+            .unwrap();
+        let invocation = begun.invocation.clone();
+        view.event(
+            ChatEvent::Submitted {
+                session: session.clone(),
+                invocation: invocation.clone(),
+                prompt: "Long conversation turn".into(),
+            },
+            &controller,
+        );
+        view.preview.begin(invocation.clone());
+        view.preview
+            .apply(mf_chat::PreviewEvent {
+                invocation: invocation.clone(),
+                delta: mf_chat::TextDelta {
+                    model_call_id: "model-1".into(),
+                    text: "Assistant answer".into(),
+                }
+                .into(),
+            })
+            .unwrap();
+
+        // Stale invocation compaction events must be ignored.
+        view.event(
+            ChatEvent::Compacting {
+                invocation: Invocation::new(&session.id),
+                active: true,
+            },
+            &controller,
+        );
+        assert!(!view.is_compacting());
+
+        // Active host compaction renders in both transcript status and footer notice.
+        view.event(
+            ChatEvent::Compacting {
+                invocation: invocation.clone(),
+                active: true,
+            },
+            &controller,
+        );
+        assert!(view.is_compacting());
+        let compacting_screen = render(&view, 100, 30);
+        assert!(
+            compacting_screen.contains("Assistant answer"),
+            "{compacting_screen}"
+        );
+        assert_eq!(
+            compacting_screen.matches("Compacting context...").count(),
+            2,
+            "expected compacting indicator in both transcript and footer:\n{compacting_screen}"
+        );
+
+        // Settled compacted completion shows token count and clears live compacting state.
+        let compacted_result = mf_chat::ConversationResult {
+            status: "succeeded".into(),
+            update: mf_chat::MessageUpdate::ReplaceContext {
+                context_messages: vec![mf_chat::ChatMessage::User {
+                    content: "Summary body".into(),
+                    metadata: Some(
+                        serde_json::from_value(serde_json::json!({
+                            "compaction": {"tokens_before": 12400}
+                        }))
+                        .unwrap(),
+                    ),
+                }],
+                display_messages: vec![mf_chat::ChatMessage::Assistant {
+                    content: "Assistant answer".into(),
+                    tool_calls: None,
+                    metadata: None,
+                }],
+            },
+            usages: serde_json::from_value(serde_json::json!([
+                {"call_id": "main-1", "model": "fixture"},
+                {"call_id": "compact-1", "model": "fixture", "attribution": {"purpose": "compaction"}}
+            ]))
+            .unwrap(),
+            error: None,
+            title: None,
+        };
+        compacted_result.validate().unwrap();
+        let completion = controller
+            ._database
+            .complete_turn(invocation.clone(), compacted_result)
+            .unwrap();
+        view.event(
+            finish(invocation, CompletionState::Committed(completion)),
+            &controller,
+        );
+        assert!(!view.is_compacting());
+        let settled = render(&view, 100, 30);
+        assert!(!settled.contains("Compacting context..."), "{settled}");
+        assert!(
+            settled.contains("[context compacted from 12.4k tokens]"),
+            "{settled}"
+        );
+        assert!(
+            settled.contains("Saved; context compacted from 12.4k tokens"),
+            "{settled}"
+        );
+
+        // Persisted history reload preserves a compaction marker on the compacted turn.
+        let page = controller
+            ._database
+            .messages(&session.id, 50, None)
+            .unwrap();
+        view.event(ChatEvent::Loaded { session, page }, &controller);
+        let loaded = render(&view, 100, 30);
+        assert!(loaded.contains("[context compacted]"), "{loaded}");
+        controller.close().unwrap();
+    }
+
+    #[test]
+    fn failed_and_custom_compaction_statuses_render_distinctly() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
+        view.show_execution = false;
+        let controller = ChatController::open(launch).unwrap();
+        let session = controller
+            ._database
+            .create_session("default", None, None)
+            .unwrap();
+
+        // Turn 1: failed compaction preserves primary answer and marks compaction failure.
+        let begun_failed = controller
+            ._database
+            .begin_turn(
+                &session.id,
+                "First question",
+                mf_chat::ModelIdentity {
+                    profile: "default".into(),
+                    model: None,
+                },
+                None,
+            )
+            .unwrap();
+        let mut failed_compact = mf_chat::ConversationResult::assistant("First answer");
+        failed_compact.usages = serde_json::from_value(serde_json::json!([
+            {"call_id": "main-1", "model": "fixture"},
+            {"call_id": "compact-1", "model": "fixture", "attribution": {"purpose": "compaction"}, "error": "HTTP 500"}
+        ]))
+        .unwrap();
+        let completion = controller
+            ._database
+            .complete_turn(begun_failed.invocation.clone(), failed_compact)
+            .unwrap();
+        view.event(
+            ChatEvent::Submitted {
+                session: session.clone(),
+                invocation: begun_failed.invocation.clone(),
+                prompt: "First question".into(),
+            },
+            &controller,
+        );
+        view.event(
+            finish(
+                begun_failed.invocation,
+                CompletionState::Committed(completion),
+            ),
+            &controller,
+        );
+        let screen = render(&view, 100, 30);
+        assert!(
+            screen.contains("[compaction failed; model context unchanged]"),
+            "{screen}"
+        );
+        assert!(screen.contains("Saved; compaction failed"), "{screen}");
+
+        // Turn 2: custom compaction without metadata.compaction.tokens_before still reports compacted.
+        let begun_custom = controller
+            ._database
+            .begin_turn(
+                &session.id,
+                "Second question",
+                mf_chat::ModelIdentity {
+                    profile: "default".into(),
+                    model: None,
+                },
+                None,
+            )
+            .unwrap();
+        let custom_compact = mf_chat::ConversationResult {
+            status: "succeeded".into(),
+            update: mf_chat::MessageUpdate::ReplaceContext {
+                context_messages: vec![mf_chat::ChatMessage::System {
+                    content: "Custom summary".into(),
+                    metadata: None,
+                }],
+                display_messages: vec![mf_chat::ChatMessage::Assistant {
+                    content: "Second answer".into(),
+                    tool_calls: None,
+                    metadata: None,
+                }],
+            },
+            usages: serde_json::from_value(serde_json::json!([
+                {"call_id": "main-2", "model": "fixture"},
+                {"call_id": "compact-2", "model": "fixture", "attribution": {"purpose": "compaction"}}
+            ]))
+            .unwrap(),
+            error: None,
+            title: None,
+        };
+        let completion = controller
+            ._database
+            .complete_turn(begun_custom.invocation.clone(), custom_compact)
+            .unwrap();
+        view.event(
+            ChatEvent::Submitted {
+                session: session.clone(),
+                invocation: begun_custom.invocation.clone(),
+                prompt: "Second question".into(),
+            },
+            &controller,
+        );
+        view.event(
+            finish(
+                begun_custom.invocation,
+                CompletionState::Committed(completion),
+            ),
+            &controller,
+        );
+        let screen = render(&view, 100, 30);
+        assert!(screen.contains("[context compacted]"), "{screen}");
+        assert!(screen.contains("Saved; context compacted"), "{screen}");
+
+        // Reload both turns from storage and verify persisted compaction badges.
+        let page = controller
+            ._database
+            .messages(&session.id, 50, None)
+            .unwrap();
+        view.event(ChatEvent::Loaded { session, page }, &controller);
+        let loaded = render(&view, 100, 40);
+        assert!(
+            loaded.contains("[compaction failed; model context unchanged]"),
+            "{loaded}"
+        );
+        assert!(loaded.contains("[context compacted]"), "{loaded}");
         controller.close().unwrap();
     }
 }

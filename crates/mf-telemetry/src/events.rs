@@ -88,9 +88,15 @@ type EmitEvent = Arc<dyn Fn(&'static str, &EventRecord) + Send + Sync>;
 pub fn collect(
     collect: impl Fn(&EventRecord) + Send + Sync + 'static,
 ) -> opentelemetry::ContextGuard {
-    Context::current()
-        .with_value::<CollectEvent>(Arc::new(collect))
-        .attach()
+    let context = Context::current();
+    let collector: CollectEvent = match context.get::<CollectEvent>().cloned() {
+        Some(parent) => Arc::new(move |event| {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| collect(event)));
+            parent(event);
+        }),
+        None => Arc::new(collect),
+    };
+    context.with_value::<CollectEvent>(collector).attach()
 }
 
 /// Record one source timestamp for local collection and the active observation exporter.

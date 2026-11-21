@@ -154,6 +154,19 @@ impl CallEventCollector {
         self.apply(&mut usages);
         usages
     }
+
+    pub fn has_active_purpose(&self, purpose: &str) -> bool {
+        self.calls.values().any(|call| {
+            call.finished.is_none()
+                && call.started.as_ref().is_some_and(|(_, usage)| {
+                    usage
+                        .attribution
+                        .as_ref()
+                        .and_then(|attribution| attribution.purpose.as_deref())
+                        == Some(purpose)
+                })
+        })
+    }
 }
 
 #[cfg(test)]
@@ -332,5 +345,27 @@ mod tests {
         });
         collector.apply(std::slice::from_mut(&mut legacy));
         assert!(legacy.timing.is_some());
+    }
+
+    #[test]
+    fn active_purpose_tracks_in_flight_compaction_requests_only() {
+        let mut collector = CallEventCollector::default();
+        assert!(!collector.has_active_purpose("compaction"));
+        let mut conversation_start = event(mfn_llm::REQUEST_STARTED_EVENT, 1, "conv-1");
+        conversation_start.body["attribution"] = json!({"purpose": "conversation"});
+        collector.observe(&conversation_start).unwrap();
+        assert!(!collector.has_active_purpose("compaction"));
+        assert!(collector.has_active_purpose("conversation"));
+
+        let mut compact_start = event(mfn_llm::REQUEST_STARTED_EVENT, 2, "compact-1");
+        compact_start.body["attribution"] = json!({"purpose": "compaction"});
+        collector.observe(&compact_start).unwrap();
+        assert!(collector.has_active_purpose("compaction"));
+
+        let mut compact_finish = event(mfn_llm::REQUEST_FINISHED_EVENT, 3, "compact-1");
+        compact_finish.body["attribution"] = json!({"purpose": "compaction"});
+        compact_finish.body["error"] = json!("provider timeout");
+        collector.observe(&compact_finish).unwrap();
+        assert!(!collector.has_active_purpose("compaction"));
     }
 }
