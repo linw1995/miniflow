@@ -8,7 +8,7 @@ use opentelemetry_sdk::{
     trace::{BatchConfigBuilder as SpanBatchConfigBuilder, BatchSpanProcessor, SdkTracerProvider},
 };
 use snafu::{IntoError, OptionExt, ResultExt, Snafu, ensure};
-use std::{env, sync::Arc, time::Duration};
+use std::{env, net::IpAddr, sync::Arc, time::Duration};
 
 pub const INTERACTIVE_BATCH_DELAY: Duration = Duration::from_millis(100);
 pub const EXPORT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -50,31 +50,32 @@ pub struct TelemetryProviders {
 impl TelemetryProviders {
     /// Returns `None` before constructing SDK providers when no endpoint is configured.
     pub fn from_env() -> Result<Option<Self>, SetupError> {
-        let common = configured("OTEL_EXPORTER_OTLP_ENDPOINT");
-        let traces_enabled = common || configured("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT");
-        let logs_enabled = common || configured("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT");
-        if !traces_enabled && !logs_enabled {
+        let common = endpoint_value("OTEL_EXPORTER_OTLP_ENDPOINT");
+        let traces_endpoint =
+            endpoint_value("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT").or_else(|| common.clone());
+        let logs_endpoint = endpoint_value("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT").or(common);
+        if traces_endpoint.is_none() && logs_endpoint.is_none() {
             return Ok(None);
         }
 
-        let client = reqwest::blocking::Client::builder()
-            .timeout(EXPORT_TIMEOUT)
-            .build()
-            .context(HttpClientSnafu)?;
-        let traces_exporter = traces_enabled
-            .then(|| {
+        let traces_exporter = traces_endpoint
+            .as_deref()
+            .map(|endpoint| {
+                let client = otlp_http_client(endpoint)?;
                 SpanExporter::builder()
                     .with_http()
                     .with_protocol(Protocol::HttpBinary)
                     .with_timeout(EXPORT_TIMEOUT)
-                    .with_http_client(client.clone())
+                    .with_http_client(client)
                     .with_max_request_body_size(MAX_REQUEST_BYTES)
                     .build()
                     .context(TracesSnafu)
             })
             .transpose()?;
-        let logs_exporter = logs_enabled
-            .then(|| {
+        let logs_exporter = logs_endpoint
+            .as_deref()
+            .map(|endpoint| {
+                let client = otlp_http_client(endpoint)?;
                 LogExporter::builder()
                     .with_http()
                     .with_protocol(Protocol::HttpBinary)
@@ -142,8 +143,38 @@ impl TelemetryProviders {
     }
 }
 
-fn configured(key: &str) -> bool {
-    env::var(key).is_ok_and(|value| !value.trim().is_empty())
+fn endpoint_value(key: &str) -> Option<String> {
+    env::var(key)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn is_loopback_endpoint(endpoint: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(endpoint.trim()) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let unbracketed = host.trim_start_matches('[').trim_end_matches(']');
+    if unbracketed.eq_ignore_ascii_case("localhost")
+        || unbracketed.to_ascii_lowercase().ends_with(".localhost")
+    {
+        return true;
+    }
+    unbracketed
+        .parse::<IpAddr>()
+        .is_ok_and(|address| address.is_loopback())
+}
+
+fn otlp_http_client(endpoint: &str) -> Result<reqwest::blocking::Client, SetupError> {
+    let mut builder = reqwest::blocking::Client::builder().timeout(EXPORT_TIMEOUT);
+    // Local OTLP receivers (such as mf run --tui) should never traverse external HTTP proxies.
+    if is_loopback_endpoint(endpoint) {
+        builder = builder.no_proxy();
+    }
+    builder.build().context(HttpClientSnafu)
 }
 
 #[derive(Debug, Snafu)]
@@ -232,15 +263,10 @@ impl SnapshotExporter {
         workflow: crate::identity::WorkflowId,
         run: crate::identity::RunId,
     ) -> Result<Self, SnapshotExportError> {
-        ensure!(
-            configured("OTEL_EXPORTER_OTLP_ENDPOINT")
-                || configured("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"),
-            MissingEndpointSnafu
-        );
-        let client = reqwest::blocking::Client::builder()
-            .timeout(EXPORT_TIMEOUT)
-            .build()
-            .context(HttpClientSnafu)?;
+        let endpoint = endpoint_value("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
+            .or_else(|| endpoint_value("OTEL_EXPORTER_OTLP_ENDPOINT"))
+            .context(MissingEndpointSnafu)?;
+        let client = otlp_http_client(&endpoint)?;
         let inner = LogExporter::builder()
             .with_http()
             .with_protocol(Protocol::HttpBinary)
@@ -572,5 +598,36 @@ mod snapshot_tests {
                 .is_none_or(|context| context.trace_id == TraceId::INVALID
                     && context.span_id == SpanId::INVALID)
         );
+    }
+
+    #[test]
+    fn loopback_endpoint_detection_matches_local_hosts_only() {
+        for local in [
+            "http://127.0.0.1:4318",
+            "http://127.0.1.1:4318/v1/traces",
+            "http://localhost:4318",
+            "http://LOCALHOST:4318/v1/logs",
+            "http://collector.localhost:4318",
+            "http://[::1]:4318",
+        ] {
+            assert!(
+                is_loopback_endpoint(local),
+                "expected loopback endpoint: {local}"
+            );
+            assert!(otlp_http_client(local).is_ok());
+        }
+        for remote in [
+            "https://otlp.example.com:4318",
+            "http://10.0.0.1:4318",
+            "http://localhost.example.com:4318",
+            "not-a-url",
+            "",
+        ] {
+            assert!(
+                !is_loopback_endpoint(remote),
+                "expected non-loopback endpoint: {remote}"
+            );
+            assert!(otlp_http_client(remote).is_ok());
+        }
     }
 }
