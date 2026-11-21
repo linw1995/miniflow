@@ -13,7 +13,7 @@ pub fn tool_uses_definition() -> Result<WorkflowDefinition, DefinitionParseError
     WorkflowDefinition::from_json(include_str!(concat!(env!("OUT_DIR"), "/tool-uses.json")))
 }
 
-/// Assemble a request without applying the CEL budget to the initial prefix.
+/// Assemble a request, forwarding the initial prefix directly when no suffix exists yet.
 fn agent_request_definition() -> Result<WorkflowDefinition, DefinitionParseError> {
     WorkflowDefinition::from_json(include_str!(concat!(
         env!("OUT_DIR"),
@@ -82,6 +82,24 @@ mod tests {
                 variable["name"] == "usages" && variable["initial"] == json!([])
             })
         );
+        let body: WorkflowDefinition =
+            serde_json::from_value(repeat.config["body"].clone()).unwrap();
+        for node_id in ["append_assistant", "append_tool_results"] {
+            let node = body
+                .nodes
+                .iter()
+                .find(|node| node.id.as_str() == node_id)
+                .unwrap();
+            assert!(node.config["code"].get("messages").is_none(), "{node_id}");
+            assert!(node.config["inputs"].get("messages").is_none(), "{node_id}");
+            assert!(
+                node.config["inputs"].get("assistant").is_none(),
+                "{node_id}"
+            );
+        }
+        assert!(body.edges.iter().all(|edge| {
+            !(edge.from_node.as_str() == "request" && edge.to_node.as_str() == "append_assistant")
+        }));
         let serialized = serde_json::to_string(&definition).unwrap();
         for synthetic in [
             "flow_0",

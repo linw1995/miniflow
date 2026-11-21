@@ -536,13 +536,12 @@ unchanged.
 The Agent accepts complete `params.messages` as a read-only Loop prefix and calls `mfn-llm.tool-catalog`
 once outside its eight-pass native Loop. The Loop carries only the generated suffix. The
 [request Flow](../crates/builtin-nodes/llm/workflows/agent-request.json) forwards the prefix unchanged
-when the suffix is empty, so the first model request does not run a CEL size check. After a completed
-tool round, it joins the prefix and the generated messages with CEL. The existing bounded append
-steps still check the full transcript after the model and tool calls, without carrying it into the
-next pass. The Agent invokes `mfn-llm.agent-turn` for each request and `mfn-llm.tool-uses` for tool-call
-batches. The latter uses native parallel Iteration for ordered tool results. Generated assistant call
-batches precede their tool results, and the terminal assistant is included in the exported `messages`
-additions. Request history is not echoed.
+when the suffix is empty, avoiding CEL conversion of the request history on the first model request.
+After a completed tool round, it joins the prefix and the generated messages with CEL, while the
+append steps update only the generated suffix. The Agent invokes `mfn-llm.agent-turn` for each request
+and `mfn-llm.tool-uses` for tool-call batches. The latter uses native parallel Iteration for ordered
+tool results. Generated assistant call batches precede their tool results, and the terminal assistant
+is included in the exported `messages` additions. Request history is not echoed.
 Completion also returns `status`, final `text`, `usages`, and `error`, while `answer` streams assistant
 text, including tool-call preambles. Captured provider failures and exhaustion retain completed rounds
 and their usages with failed status; an unresolved batch is permitted only at the end of a failed prefix.
