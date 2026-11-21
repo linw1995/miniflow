@@ -99,4 +99,11 @@ fn registered_title_dependencies_match_the_chat_cargo_manifest() {
         mf_chat::flows::title_definition().unwrap(),
         mf_runtime::WorkflowDefinition::from_json(&expected.to_string()).unwrap()
     );
+    let mut expected_compact: Value =
+        serde_json::from_str(include_str!("../workflows/compact.json")).unwrap();
+    title::bind_dependencies(&mut expected_compact, &package).unwrap();
+    assert_eq!(
+        mf_chat::flows::compact_definition().unwrap(),
+        mf_runtime::WorkflowDefinition::from_json(&expected_compact.to_string()).unwrap()
+    );
 }

@@ -41,13 +41,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .as_str()
             .expect("Cargo workspace manifest")
     );
-    println!("cargo:rerun-if-changed=workflows/title.json");
-    let mut definition = serde_json::from_slice(&fs::read("workflows/title.json")?)?;
-    title::bind_dependencies(&mut definition, &package)?;
-    fs::write(
-        Path::new(&env::var("OUT_DIR")?).join("title.json"),
-        serde_json::to_vec(&definition)?,
-    )?;
+    for workflow in ["title.json", "compact.json"] {
+        let source = Path::new("workflows").join(workflow);
+        println!("cargo:rerun-if-changed={}", source.display());
+        let mut definition = serde_json::from_slice(&fs::read(&source)?)?;
+        title::bind_dependencies(&mut definition, &package)?;
+        fs::write(
+            Path::new(&env::var("OUT_DIR")?).join(workflow),
+            serde_json::to_vec(&definition)?,
+        )?;
+    }
     mf_compiler::embed_workflows(&[mf_compiler::EmbedRequest::new(
         "conversation",
         "workflows/conversation.json",
