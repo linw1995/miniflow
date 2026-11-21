@@ -5,14 +5,13 @@ use mf_runtime::{
     Inputs, NodeBuildError, NodeExecutionError, NodePortContract, NodePorts, NodeRegistration,
     Outputs, PortSpec, TaskNode, ValueType, deserialize_config,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 use snafu::{ResultExt, Snafu};
 use std::{collections::BTreeMap, error::Error};
-use value::{Budget, MAX_JSON_BYTES, cel_to_json, json_to_cel};
+use value::{cel_to_json, json_to_cel};
 
 pub const KIND: &str = "builtin.code";
-const MAX_EXPRESSION_BYTES: usize = 8 * 1024;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -61,13 +60,6 @@ impl From<CodeBuildError> for NodeBuildError {
 
 #[derive(Debug, Snafu)]
 enum CodeExecutionError {
-    #[snafu(display("could not measure inputs: {source}"))]
-    MeasureInputs { source: serde_json::Error },
-    #[snafu(display("output `{output}`: {source}"))]
-    MeasureOutput {
-        output: String,
-        source: serde_json::Error,
-    },
     #[snafu(display("input `{input}`: {source}"))]
     ConvertInput {
         input: String,
@@ -156,29 +148,6 @@ fn valid_identifier(name: &str) -> bool {
     matches!(&ast.expr().node, cel_core::types::Expr::Ident(parsed) if parsed == name)
 }
 
-fn json_size(value: &(impl Serialize + ?Sized)) -> Result<usize, serde_json::Error> {
-    struct Counter(usize);
-    impl std::io::Write for Counter {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            if bytes.len() > MAX_JSON_BYTES.saturating_sub(self.0) {
-                self.0 = MAX_JSON_BYTES + 1;
-                return Err(std::io::Error::other("JSON byte limit"));
-            }
-            self.0 += bytes.len();
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut counter = Counter(0);
-    let result = serde_json::to_writer(&mut counter, value);
-    if counter.0 <= MAX_JSON_BYTES {
-        result?;
-    }
-    Ok(counter.0)
-}
-
 struct CheckedOutput {
     program: Program,
     value_type: ValueType,
@@ -195,44 +164,27 @@ impl TaskNode for CodeNode {
         inputs: Inputs,
         _ctx: &mut mf_runtime::ExecutionContext,
     ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
-        let input_size = json_size(&inputs).context(MeasureInputsSnafu)?;
-        if input_size > MAX_JSON_BYTES {
-            return Err(execution_error(format!(
-                "inputs exceed the {MAX_JSON_BYTES}-byte JSON limit"
-            )));
-        }
         for name in inputs.keys() {
             if !self.inputs.contains_key(name) {
                 return Err(execution_error(format!("undeclared input `{name}`")));
             }
         }
-        let mut budget = Budget::default();
         let mut activation = MapActivation::new();
         for (name, value_type) in &self.inputs {
             let name = name.as_str();
             let value = inputs
                 .get(name)
                 .ok_or_else(|| execution_error(format!("missing input `{name}`")))?;
-            let converted = json_to_cel(value, value_type, &mut budget, "", 1)
-                .context(ConvertInputSnafu { input: name })?;
+            let converted =
+                json_to_cel(value, value_type, "", 1).context(ConvertInputSnafu { input: name })?;
             activation.insert(name, converted);
         }
         let mut outputs = Outputs::new();
-        let mut output_size = 2usize;
         for (name, output) in &self.outputs {
             let name = name.as_str();
             let result = output.program.eval(&activation);
-            let converted = cel_to_json(&result, &output.value_type, &mut budget, "", 1)
+            let converted = cel_to_json(&result, &output.value_type, "", 1)
                 .context(ConvertOutputSnafu { output: name })?;
-            let encoded_name = json_size(name).context(MeasureOutputSnafu { output: name })?;
-            let encoded_value =
-                json_size(&converted).context(MeasureOutputSnafu { output: name })?;
-            output_size += encoded_name + encoded_value + 1 + usize::from(!outputs.is_empty());
-            if output_size > MAX_JSON_BYTES {
-                return Err(execution_error(format!(
-                    "output `{name}`: outputs exceed the {MAX_JSON_BYTES}-byte JSON limit"
-                )));
-            }
             outputs.insert(name.to_owned(), converted.inherit_secrets(inputs.values()));
         }
         Ok(outputs.into())
@@ -289,11 +241,6 @@ fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
             .as_str()
             .filter(|expression| !expression.trim().is_empty())
             .ok_or_else(|| invalid(format!("output `{name}` requires a nonblank expression")))?;
-        if expression.len() > MAX_EXPRESSION_BYTES {
-            return Err(invalid(format!(
-                "output `{name}` exceeds the {MAX_EXPRESSION_BYTES}-byte expression limit"
-            )));
-        }
         let ast = env
             .compile(expression)
             .context(CompileSnafu { output: name })?;
@@ -787,17 +734,21 @@ mod tests {
     }
 
     #[test]
-    fn enforces_expression_payload_and_collection_limits() {
-        let expression = format!("1{}", " ".repeat(MAX_EXPRESSION_BYTES));
-        let error = factory(json!({
+    fn accepts_large_expressions_payloads_and_collections() {
+        let expression = format!("1 + 1{}", " ".repeat(16 * 1024));
+        let node = factory(json!({
             "language": "cel",
             "inputs": {},
             "code": {"result": expression}
         }))
-        .err()
-        .unwrap()
-        .to_string();
-        assert!(error.contains("expression limit"));
+        .unwrap();
+        let result = node
+            .execution
+            .as_task_node()
+            .expect("expected task execution")
+            .execute(Inputs::new(), &mut mf_runtime::ExecutionContext::default())
+            .unwrap();
+        assert_eq!(result.outputs["result"], json!(2));
 
         let node = factory(json!({
             "language": "cel",
@@ -805,106 +756,37 @@ mod tests {
             "code": {"result": "payload + payload"}
         }))
         .unwrap();
-        let error = node
+        let payload = "x".repeat(2 * 1024 * 1024);
+        let result = node
             .execution
             .as_task_node()
             .expect("expected task execution")
             .execute(
-                Inputs::from([(
-                    "payload".into(),
-                    json!("x".repeat(MAX_JSON_BYTES + 1)).into(),
-                )]),
+                Inputs::from([("payload".into(), payload.clone().into())]),
                 &mut mf_runtime::ExecutionContext::default(),
             )
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("inputs exceed"), "{error}");
-        let error = node
-            .execution
-            .as_task_node()
-            .expect("expected task execution")
-            .execute(
-                Inputs::from([("payload".into(), json!("x".repeat(600_000)).into())]),
-                &mut mf_runtime::ExecutionContext::default(),
-            )
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("output `result`: outputs exceed"), "{error}");
+            .unwrap();
+        assert_eq!(
+            result.outputs["result"].as_str().map(str::len),
+            Some(2 * payload.len())
+        );
 
         let node = factory(json!({
             "language": "cel",
             "inputs": {"items": {"list": "int"}},
-            "code": {"first": "items", "second": "items"}
+            "code": {"value": "items + items"}
         }))
         .unwrap();
-        let error = node
+        let result = node
             .execution
             .as_task_node()
             .expect("expected task execution")
             .execute(
-                Inputs::from([("items".into(), json!(vec![1; 4_000]).into())]),
+                Inputs::from([("items".into(), json!(vec![1; 20_000]).into())]),
                 &mut mf_runtime::ExecutionContext::default(),
             )
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("output `second`"), "{error}");
-        assert!(error.contains("collection entry limit"), "{error}");
-    }
-
-    #[test]
-    fn accepts_exact_json_byte_limits_and_rejects_one_extra_byte() {
-        let payload = |bytes: usize| {
-            let unit = "\0\\\"\n\u{1f642}";
-            let encoded = serde_json::to_vec(unit).unwrap().len() - 2;
-            format!(
-                "{}{}",
-                unit.repeat(bytes / encoded),
-                "x".repeat(bytes % encoded)
-            )
-        };
-        for (input, output, input_limited, descriptor) in [
-            ("payload", "out", true, "string"),
-            ("x", "result", false, "string"),
-            ("payload", "out", true, "any"),
-            ("x", "result", false, "any"),
-        ] {
-            let node = factory(json!({
-                "language": "cel",
-                "inputs": BTreeMap::from([(input, descriptor)]),
-                "code": BTreeMap::from([(output, input)])
-            }))
             .unwrap();
-            let bounded_name = if input_limited { input } else { output };
-            let overhead = serde_json::to_vec(&BTreeMap::from([(bounded_name, "")]))
-                .unwrap()
-                .len();
-            let exact = payload(MAX_JSON_BYTES - overhead);
-            let inputs = Inputs::from([(input.into(), exact.clone().into())]);
-            let outputs = node
-                .execution
-                .as_task_node()
-                .expect("expected task execution")
-                .execute(inputs, &mut mf_runtime::ExecutionContext::default())
-                .unwrap()
-                .outputs;
-            assert_eq!(outputs[output].as_str(), Some(exact.as_str()));
-            let error = node
-                .execution
-                .as_task_node()
-                .expect("expected task execution")
-                .execute(
-                    Inputs::from([(input.into(), format!("{exact}x").into())]),
-                    &mut mf_runtime::ExecutionContext::default(),
-                )
-                .unwrap_err()
-                .to_string();
-            let expected = if input_limited {
-                "inputs exceed".to_owned()
-            } else {
-                format!("output `{output}`: outputs exceed")
-            };
-            assert!(error.contains(&expected), "{error}");
-        }
+        assert_eq!(result.outputs["value"].as_array().unwrap().len(), 40_000);
     }
 
     #[test]

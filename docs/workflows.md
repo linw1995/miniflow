@@ -865,10 +865,9 @@ For example, a readline output connected to input `text` can use:
 }
 ```
 
-Each expression is limited to 8 KiB. The serialized input map and output map are each limited to 1 MiB, with at most
-10,000 collection entries across input conversion and output conversion per execution. Type descriptors and values
-are limited to 16 nesting levels. These bounds limit accidental work; CEL evaluation runs in-process without a hard
-CPU or memory sandbox.
+Expression length, serialized input and output size, and collection size are unbounded. Type descriptors and values
+are limited to 16 nesting levels, which bounds recursive conversion work. CEL evaluation runs in-process without a
+hard CPU or memory sandbox.
 
 Run the complete [scalar example](../examples/cel-scalar.json) or [typed-list example](../examples/cel-list.json)
 with the [repository development commands](compiling.md#repository-development). They produce `{"doubled":42}`

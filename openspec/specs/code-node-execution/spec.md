@@ -112,8 +112,9 @@ At execution, the shared runtime SHALL recursively validate each received JSON i
 before invoking the node. Numeric input conversion SHALL use the shared lossless rules. The Code backend SHALL evaluate every declared output expression using the same input bindings
 and recursively convert each CEL result to JSON without coercion. The shared runtime SHALL publish outputs only after
 all evaluations and output type checks succeed. Collection values MUST satisfy their declared element or value types,
-including heterogeneous values permitted by dynamic declarations, and map keys MUST be strings. The node MUST enforce documented expression-length, JSON-size,
-collection-size, and nesting-depth limits. Evaluation errors, nonrepresentable results, and limit violations SHALL fail
+including heterogeneous values permitted by dynamic declarations, and map keys MUST be strings. The node MUST enforce the
+documented nesting-depth limit and MUST NOT impose expression-length, serialized JSON-size, or collection-size limits.
+Evaluation errors, nonrepresentable results, and depth-limit violations SHALL fail
 the node with the node ID, affected output name, and collection path where applicable. A branch-skipped Code node MUST
 NOT evaluate expressions.
 
@@ -137,9 +138,9 @@ NOT evaluate expressions.
 - **WHEN** a `{"list":"int"}` input contains a string, or a `{"map":"int"}` input contains a boolean value
 - **THEN** node execution fails before evaluation and identifies the failing element or field
 
-#### Scenario: Reject an over-limit collection
+#### Scenario: Reject over-limit nesting
 
-- **WHEN** an input or result exceeds the documented collection-size or nesting-depth limit
+- **WHEN** an input or result exceeds the documented nesting-depth limit
 - **THEN** execution fails without publishing any Code output
 
 #### Scenario: Publish atomically
@@ -283,16 +284,15 @@ secret solely because they pass through Code.
 
 ### Requirement: Bound dynamic JSON traversal
 
-Dynamic descendants SHALL obey the same limits as concrete values: 8 KiB per expression, 1 MiB each for serialized
-inputs and outputs, 10,000 collection entries across input and output conversion combined, and 16 value nesting
-levels. Broad type declarations MUST NOT bypass traversal limits. A limit failure SHALL publish no Code outputs.
+Dynamic descendants SHALL obey the same 16-level nesting limit as concrete values. Broad type declarations MUST NOT
+bypass that traversal limit. A depth failure SHALL publish no Code outputs.
 
 #### Scenario: Bound deep dynamic content
 
-- **WHEN** an Any or Object input hides a value exceeding the depth or collection-entry limit
+- **WHEN** an Any or Object input hides a value exceeding the depth limit
 - **THEN** execution rejects it with applicable path context
 
-#### Scenario: Bound repeated accumulation
+#### Scenario: Accept large repeated accumulation
 
-- **WHEN** repeated list concatenation crosses a documented input, output, or combined conversion limit
-- **THEN** that invocation fails without publishing a truncated list or a successful partial result
+- **WHEN** repeated list concatenation grows a collection beyond any former entry, expression, or serialized-size bound
+- **THEN** that invocation publishes the complete list
