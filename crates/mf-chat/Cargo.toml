@@ -21,6 +21,7 @@ diesel = { workspace = true, features = ["sqlite", "32-column-tables"] }
 diesel_migrations.workspace = true
 libsqlite3-sys = { workspace = true, features = ["bundled"] }
 fs2.workspace = true
+tempfile.workspace = true
 
 # Typed values and diagnostics.
 serde = { workspace = true, features = ["derive"] }
@@ -33,7 +34,6 @@ uuid = { workspace = true, features = ["v4"] }
 mfn-llm = { workspace = true, features = ["test-support"] }
 
 # Isolated databases and packaging fixtures.
-tempfile.workspace = true
 toml.workspace = true
 
 [build-dependencies]
