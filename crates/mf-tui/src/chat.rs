@@ -190,6 +190,7 @@ impl ChatController {
             retained: None,
             preview: preview.clone(),
             compacting: compacting.clone(),
+            context_windows: mf_chat::ModelContextWindowCache::default(),
         };
         let worker = thread::Builder::new()
             .name("mf-chat-controller".into())
@@ -346,6 +347,7 @@ struct Controller {
     retained: Option<Retained>,
     preview: Arc<Mutex<LivePreview>>,
     compacting: Arc<Mutex<(Option<Invocation>, bool)>>,
+    context_windows: mf_chat::ModelContextWindowCache,
 }
 impl Controller {
     fn emit(&self, event: ChatEvent) {
@@ -540,7 +542,7 @@ impl Controller {
                 }
             }
         });
-        let resolution = mf_chat::workflow::run_conversation_with_preview(
+        let resolution = mf_chat::workflow::run_conversation_with_context_windows(
             &self.database,
             request,
             Arc::new(backend),
@@ -548,6 +550,7 @@ impl Controller {
             true,
             None,
             preview_consumer,
+            self.context_windows.clone(),
         );
         *self.compacting.lock().unwrap() = (None, false);
         let outcome = captured

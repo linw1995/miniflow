@@ -24,10 +24,13 @@ pub struct ModelContextRevision {
     pub revision: i64,
 }
 
+pub const DEFAULT_COMPACTION_CONTEXT_WINDOW: i64 = 128_000;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, NodeValue)]
 pub struct CompactionConfig {
     pub enabled: bool,
-    pub context_window: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<i64>,
     pub reserve_tokens: i64,
     pub keep_recent_tokens: i64,
     pub custom_instructions: String,
@@ -37,7 +40,7 @@ impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            context_window: 128_000,
+            context_window: None,
             reserve_tokens: 16_384,
             keep_recent_tokens: 20_000,
             custom_instructions: String::new(),
@@ -48,13 +51,28 @@ impl Default for CompactionConfig {
 impl CompactionConfig {
     pub fn validate(&self) -> Result<(), ChatError> {
         ensure!(
-            self.context_window >= 0 && self.reserve_tokens >= 0 && self.keep_recent_tokens >= 0,
+            self.context_window.is_none_or(|value| value >= 0)
+                && self.reserve_tokens >= 0
+                && self.keep_recent_tokens >= 0,
             InvalidSnafu {
                 field: "automatic_compaction",
                 reason: "context_window, reserve_tokens, and keep_recent_tokens must be non-negative"
             }
         );
         Ok(())
+    }
+
+    pub fn resolved_context(&self, discovered_context_window: Option<i64>) -> CompactionContext {
+        CompactionContext {
+            enabled: self.enabled,
+            context_window: self
+                .context_window
+                .or(discovered_context_window)
+                .unwrap_or(DEFAULT_COMPACTION_CONTEXT_WINDOW),
+            reserve_tokens: self.reserve_tokens,
+            keep_recent_tokens: self.keep_recent_tokens,
+            custom_instructions: self.custom_instructions.clone(),
+        }
     }
 }
 
@@ -75,13 +93,7 @@ impl Default for CompactionContext {
 
 impl From<&CompactionConfig> for CompactionContext {
     fn from(config: &CompactionConfig) -> Self {
-        Self {
-            enabled: config.enabled,
-            context_window: config.context_window,
-            reserve_tokens: config.reserve_tokens,
-            keep_recent_tokens: config.keep_recent_tokens,
-            custom_instructions: config.custom_instructions.clone(),
-        }
+        config.resolved_context(None)
     }
 }
 

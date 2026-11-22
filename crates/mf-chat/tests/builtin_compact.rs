@@ -981,7 +981,7 @@ fn host_builtin_compaction_triggers_automatically_and_persists_across_reopen() {
     let root = tempfile::tempdir().unwrap();
     let compaction = CompactionConfig {
         enabled: true,
-        context_window: 100,
+        context_window: Some(100),
         reserve_tokens: 20,
         keep_recent_tokens: 12,
         custom_instructions: "Preserve project names.".into(),
@@ -1091,7 +1091,7 @@ fn host_builtin_compaction_failure_preserves_answer_and_records_failed_usage() {
         false,
         CompactionConfig {
             enabled: true,
-            context_window: 100,
+            context_window: Some(100),
             reserve_tokens: 20,
             keep_recent_tokens: 4,
             custom_instructions: String::new(),
@@ -1178,7 +1178,7 @@ fn host_builtin_compaction_respects_disabled_config_failed_answers_and_validates
             false,
             CompactionConfig {
                 enabled: scenario != "disabled",
-                context_window: 100,
+                context_window: Some(100),
                 reserve_tokens: 20,
                 keep_recent_tokens: 0,
                 custom_instructions: String::new(),
@@ -1212,7 +1212,7 @@ fn cancelling_builtin_compaction_does_not_commit_an_intermediate_answer() {
         false,
         CompactionConfig {
             enabled: true,
-            context_window: 100,
+            context_window: Some(100),
             reserve_tokens: 20,
             keep_recent_tokens: 4,
             custom_instructions: String::new(),
@@ -1263,7 +1263,7 @@ fn conversation_finish_retains_compaction_for_save_only_retry() {
         false,
         CompactionConfig {
             enabled: true,
-            context_window: 100,
+            context_window: Some(100),
             reserve_tokens: 20,
             keep_recent_tokens: 6,
             custom_instructions: String::new(),
@@ -1508,7 +1508,7 @@ fn chatflow_reusing_builtin_compact_receives_host_policy_and_suppresses_host_com
     config.automatic_titles = false;
     config.automatic_compaction = CompactionConfig {
         enabled: true,
-        context_window: 100,
+        context_window: Some(100),
         reserve_tokens: 20,
         keep_recent_tokens: 6,
         custom_instructions: "Follow host custom instructions.".into(),
@@ -1623,7 +1623,7 @@ fn custom_compaction_result_or_compaction_usage_suppresses_host_compaction() {
         config.automatic_titles = false;
         config.automatic_compaction = CompactionConfig {
             enabled: true,
-            context_window: 10,
+            context_window: Some(10),
             reserve_tokens: 5,
             keep_recent_tokens: 0,
             custom_instructions: String::new(),
@@ -1700,4 +1700,442 @@ fn embedded_conversation_declares_and_prepares_builtin_compact_call() {
     // bodies retain only their direct dependencies.
     expected.dependencies = registered.dependencies;
     assert_eq!(*body, expected);
+}
+
+#[test]
+fn host_discovers_and_caches_model_context_window_for_builtin_and_reused_compaction() {
+    // 1. Host-managed automatic compaction discovers context_window via /models on turn 1
+    //    and reuses the cached window to trigger compaction on turn 2.
+    let server = Server::start_with_models(
+        vec![
+            usage_reply("First turn answer", 40),
+            usage_reply("Second turn answer", 90),
+            Reply::text("## Goal\nDiscovered window summary"),
+        ],
+        vec![Reply::models(json!([
+            {"id": "fixture-model", "context_length": 100}
+        ]))],
+    );
+    let root = tempfile::tempdir().unwrap();
+    let host = plain_chat_host(
+        root.path(),
+        &server,
+        false,
+        CompactionConfig {
+            enabled: true,
+            context_window: None,
+            reserve_tokens: 20,
+            keep_recent_tokens: 6,
+            custom_instructions: String::new(),
+        },
+    );
+    let session_id = host
+        .database()
+        .create_session("default", None, Some("Manual".into()))
+        .unwrap()
+        .id;
+    let first = host
+        .submit(&session_id, "First turn details to summarize")
+        .unwrap()
+        .join()
+        .unwrap();
+    assert!(matches!(first.result.update, MessageUpdate::Append { .. }));
+    let second = host
+        .submit(&session_id, "Second turn over discovered window")
+        .unwrap()
+        .join()
+        .unwrap();
+    assert!(matches!(
+        second.result.update,
+        MessageUpdate::ReplaceContext { .. }
+    ));
+    assert_eq!(
+        server.model_requests().len(),
+        1,
+        "context_window probe must be cached across turns on the same ChatHost"
+    );
+    host.close().unwrap();
+
+    // 2. Explicit context_window override skips /models entirely.
+    let explicit_server = Server::start_with_models(
+        vec![usage_reply("Explicit answer", 30)],
+        vec![Reply::models(json!([
+            {"id": "fixture-model", "context_window": 10}
+        ]))],
+    );
+    let explicit_root = tempfile::tempdir().unwrap();
+    let explicit_host = plain_chat_host(
+        explicit_root.path(),
+        &explicit_server,
+        false,
+        CompactionConfig {
+            enabled: true,
+            context_window: Some(1_000),
+            reserve_tokens: 20,
+            keep_recent_tokens: 6,
+            custom_instructions: String::new(),
+        },
+    );
+    let explicit_session = explicit_host
+        .database()
+        .create_session("default", None, Some("Manual".into()))
+        .unwrap()
+        .id;
+    let explicit_turn = explicit_host
+        .submit(&explicit_session, "Explicit override turn")
+        .unwrap()
+        .join()
+        .unwrap();
+    assert!(matches!(
+        explicit_turn.result.update,
+        MessageUpdate::Append { .. }
+    ));
+    assert!(
+        explicit_server.model_requests().is_empty(),
+        "explicit context_window must not issue a /models request"
+    );
+    explicit_host.close().unwrap();
+
+    // 3. Missing/failed /models falls back to DEFAULT_COMPACTION_CONTEXT_WINDOW and caches the miss.
+    let mut forbidden = Reply::json(json!({"error": {"message": "models disabled"}}));
+    forbidden.status = 403;
+    let fallback_server = Server::start_with_models(
+        vec![
+            usage_reply("Fallback turn 1", 90),
+            usage_reply("Fallback turn 2", 90),
+        ],
+        vec![forbidden],
+    );
+    let fallback_root = tempfile::tempdir().unwrap();
+    let fallback_host = plain_chat_host(
+        fallback_root.path(),
+        &fallback_server,
+        false,
+        CompactionConfig {
+            enabled: true,
+            context_window: None,
+            reserve_tokens: 20,
+            keep_recent_tokens: 6,
+            custom_instructions: String::new(),
+        },
+    );
+    let fallback_session = fallback_host
+        .database()
+        .create_session("default", None, Some("Manual".into()))
+        .unwrap()
+        .id;
+    for prompt in ["First fallback prompt", "Second fallback prompt"] {
+        let turn = fallback_host
+            .submit(&fallback_session, prompt)
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(matches!(turn.result.update, MessageUpdate::Append { .. }));
+    }
+    assert_eq!(
+        fallback_server.model_requests().len(),
+        1,
+        "failed /models probe must be negative-cached on the ChatHost"
+    );
+    fallback_host.close().unwrap();
+}
+
+#[test]
+fn user_workflow_reusing_compact_receives_discovered_context_window_in_context() {
+    let server = Server::start_with_models(
+        vec![
+            usage_reply("Turn one answer", 40),
+            usage_reply("Turn two answer", 90),
+            Reply::text("## Goal\nWorkflow reused discovered window"),
+        ],
+        vec![Reply::models(json!([
+            {"id": "fixture-model", "max_model_len": 100}
+        ]))],
+    );
+    let definition: WorkflowDefinition = serde_json::from_value(json!({
+        "version": "2026-11-13",
+        "dependencies": {
+            "core": { "package": "mfn-core", "version": format!("={}", env!("CARGO_PKG_VERSION")) },
+            "code": { "package": "mfn-code", "version": format!("={}", env!("CARGO_PKG_VERSION")) },
+            "llm": { "package": "mfn-llm", "version": format!("={}", env!("CARGO_PKG_VERSION")) }
+        },
+        "flows": {
+            "compact": { "builtin": "mf-chat.chat-compact" }
+        },
+        "nodes": [
+            {
+                "id": "params",
+                "kind": "builtin.parameters",
+                "config": {
+                    "parameters": {
+                        "messages": { "type": { "list": "object" } },
+                        "context": {
+                            "type": "object",
+                            "default": {
+                                "title": { "source": "provisional", "revision": 0, "attempted": false, "enabled": true },
+                                "model_context": { "revision": 0 },
+                                "compaction": { "enabled": true, "context_window": 128000, "reserve_tokens": 16384, "keep_recent_tokens": 20000, "custom_instructions": "" }
+                            }
+                        },
+                        "model": { "type": "string", "default": "fixture-model", "secret": false },
+                        "base_url": { "type": "string", "default": "https://api.openai.com/v1", "secret": false },
+                        "api_key": { "type": "string", "default": "synthetic-key", "secret": true }
+                    }
+                }
+            },
+            {
+                "id": "chat",
+                "kind": "builtin.llm",
+                "config": {
+                    "model": { "$ref": "params.model" },
+                    "base_url": { "$ref": "params.base_url" },
+                    "api_key": { "$ref": "params.api_key" },
+                    "capture_errors": true
+                },
+                "inputs": {
+                    "messages": { "from": { "node": "params", "port": "messages" } }
+                }
+            },
+            {
+                "id": "turn",
+                "kind": "builtin.code",
+                "config": {
+                    "language": "cel",
+                    "inputs": {
+                        "text": "string",
+                        "context": "object"
+                    },
+                    "code": {
+                        "append_messages": "[{'role': 'assistant', 'content': text}]",
+                        "enabled": "context.compaction.enabled",
+                        "context_window": "context.compaction.context_window",
+                        "reserve_tokens": "context.compaction.reserve_tokens",
+                        "keep_recent_tokens": "context.compaction.keep_recent_tokens",
+                        "custom_instructions": "context.compaction.custom_instructions"
+                    }
+                },
+                "inputs": {
+                    "text": { "from": { "node": "chat", "port": "text" } },
+                    "context": { "from": { "node": "params", "port": "context" } }
+                }
+            },
+            {
+                "id": "compact",
+                "kind": "workflow.call",
+                "config": { "flow": "compact" },
+                "inputs": {
+                    "params.messages": { "from": { "node": "params", "port": "messages" } },
+                    "params.append_messages": { "from": { "node": "turn", "port": "append_messages" } },
+                    "params.usages": { "from": { "node": "chat", "port": "usages" } },
+                    "params.enabled": { "from": { "node": "turn", "port": "enabled" } },
+                    "params.context_window": { "from": { "node": "turn", "port": "context_window" } },
+                    "params.reserve_tokens": { "from": { "node": "turn", "port": "reserve_tokens" } },
+                    "params.keep_recent_tokens": { "from": { "node": "turn", "port": "keep_recent_tokens" } },
+                    "params.custom_instructions": { "from": { "node": "turn", "port": "custom_instructions" } },
+                    "params.model": { "from": { "node": "params", "port": "model" } },
+                    "params.base_url": { "from": { "node": "params", "port": "base_url" } },
+                    "params.api_key": { "from": { "node": "params", "port": "api_key" } }
+                }
+            },
+            {
+                "id": "route",
+                "kind": "builtin.if_else",
+                "config": {
+                    "branches": [{
+                        "id": "replaced",
+                        "condition": {
+                            "source": { "output": "compact.compacted", "path": "" },
+                            "operator": "eq",
+                            "value": true
+                        }
+                    }]
+                }
+            },
+            {
+                "id": "append_result",
+                "kind": "builtin.code",
+                "config": {
+                    "language": "cel",
+                    "inputs": {
+                        "append_messages": { "list": "object" },
+                        "turn_usages": { "list": "object" },
+                        "compact_usages": { "list": "object" }
+                    },
+                    "code": {
+                        "value": "{'status': 'succeeded', 'messages': append_messages, 'usages': turn_usages + compact_usages}"
+                    }
+                },
+                "inputs": {
+                    "append_messages": { "from": { "node": "turn", "port": "append_messages" } },
+                    "turn_usages": { "from": { "node": "chat", "port": "usages" } },
+                    "compact_usages": { "from": { "node": "compact", "port": "usages" } }
+                }
+            },
+            {
+                "id": "replace_result",
+                "kind": "builtin.code",
+                "config": {
+                    "language": "cel",
+                    "inputs": {
+                        "context_messages": { "list": "object" },
+                        "display_messages": { "list": "object" },
+                        "turn_usages": { "list": "object" },
+                        "compact_usages": { "list": "object" }
+                    },
+                    "code": {
+                        "value": "{'status': 'succeeded', 'context_messages': context_messages, 'display_messages': display_messages, 'usages': turn_usages + compact_usages}"
+                    }
+                },
+                "inputs": {
+                    "context_messages": { "from": { "node": "compact", "port": "messages" } },
+                    "display_messages": { "from": { "node": "turn", "port": "append_messages" } },
+                    "turn_usages": { "from": { "node": "chat", "port": "usages" } },
+                    "compact_usages": { "from": { "node": "compact", "port": "usages" } }
+                }
+            }
+        ],
+        "edges": [
+            { "from_node": "compact", "to_node": "route" },
+            { "from_node": "route", "from_output": "replaced", "to_node": "replace_result" },
+            { "from_node": "route", "from_output": "else", "to_node": "append_result" }
+        ],
+        "outputs": [
+            { "name": "append", "node": "append_result", "port": "value", "optional": true },
+            { "name": "replace_context", "node": "replace_result", "port": "value", "optional": true }
+        ]
+    }))
+    .unwrap();
+
+    let profile = WorkflowProfile::new(
+        "reuse-discovered",
+        definition,
+        WorkflowArguments::try_from(json!({
+            "params.model": "fixture-model",
+            "params.base_url": server.base_url,
+            "params.api_key": "synthetic-key"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut config = HostConfig::new(profile);
+    config.automatic_titles = false;
+    config.automatic_compaction = CompactionConfig {
+        enabled: true,
+        context_window: None,
+        reserve_tokens: 20,
+        keep_recent_tokens: 6,
+        custom_instructions: String::new(),
+    };
+    let root = tempfile::tempdir().unwrap();
+    let host = ChatHost::open(root.path().join("chat.sqlite"), config).unwrap();
+    let session_id = host
+        .database()
+        .create_session("reuse-discovered", None, Some("Manual".into()))
+        .unwrap()
+        .id;
+
+    let first = host
+        .submit(&session_id, "First prompt to seed history")
+        .unwrap()
+        .join()
+        .unwrap();
+    assert!(matches!(first.result.update, MessageUpdate::Append { .. }));
+    let second = host
+        .submit(
+            &session_id,
+            "Second prompt triggering workflow-owned compaction",
+        )
+        .unwrap()
+        .join()
+        .unwrap();
+    assert_eq!(server.model_requests().len(), 1);
+    assert_eq!(
+        server.requests().len(),
+        3,
+        "workflow should run turn 1, turn 2, and mf-chat.chat-compact using the discovered context_window (100)"
+    );
+    assert!(matches!(
+        second.result.update,
+        MessageUpdate::ReplaceContext { .. }
+    ));
+    host.close().unwrap();
+}
+
+#[test]
+fn cancelled_context_window_probe_is_not_negatively_cached() {
+    let mut slow_models = Reply::models(json!([
+        {"id": "fixture-model", "context_window": 100}
+    ]));
+    slow_models.header_delay = std::time::Duration::from_millis(600);
+    let server = Server::start_with_models(
+        vec![
+            usage_reply("Turn one after cancel", 40),
+            usage_reply("Turn two", 90),
+            Reply::text("## Goal\nCompacted after retry"),
+        ],
+        vec![
+            slow_models,
+            Reply::models(json!([
+                {"id": "fixture-model", "context_window": 100}
+            ])),
+        ],
+    );
+    let root = tempfile::tempdir().unwrap();
+    let host = plain_chat_host(
+        root.path(),
+        &server,
+        false,
+        CompactionConfig {
+            enabled: true,
+            context_window: None,
+            reserve_tokens: 20,
+            keep_recent_tokens: 4,
+            custom_instructions: String::new(),
+        },
+    );
+    let session_id = host
+        .database()
+        .create_session("default", None, Some("Manual".into()))
+        .unwrap()
+        .id;
+
+    let cancelled_job = host
+        .submit(&session_id, "Will cancel during probe")
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while server.model_requests().is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "context_window /models probe did not arrive"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    cancelled_job.cancel();
+    let err = cancelled_job.join().unwrap_err();
+    assert!(
+        err.to_string().contains("cancelled") || err.to_string().contains("failed"),
+        "{err}"
+    );
+
+    // Subsequent turns must re-probe /models rather than using a negative cache entry.
+    let first = host
+        .submit(&session_id, "First turn details to summarize")
+        .unwrap()
+        .join()
+        .unwrap();
+    assert!(matches!(first.result.update, MessageUpdate::Append { .. }));
+    let second = host
+        .submit(&session_id, "Retry turn")
+        .unwrap()
+        .join()
+        .unwrap();
+    assert!(
+        matches!(second.result.update, MessageUpdate::ReplaceContext { .. }),
+        "second={:?}, model_requests={}, chat_requests={}",
+        second.result,
+        server.model_requests().len(),
+        server.requests().len(),
+    );
+    assert_eq!(server.model_requests().len(), 2);
+    host.close().unwrap();
 }

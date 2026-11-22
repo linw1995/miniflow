@@ -60,6 +60,7 @@ struct Inner {
     database: ChatDatabase,
     config: HostConfig,
     workers: Mutex<Workers>,
+    context_windows: crate::ModelContextWindowCache,
 }
 
 pub struct ChatHost {
@@ -159,6 +160,7 @@ impl ChatHost {
                 database: ChatDatabase::open(path)?,
                 config,
                 workers: Mutex::new(Workers::default()),
+                context_windows: crate::ModelContextWindowCache::default(),
             }),
         };
         Ok(host)
@@ -305,6 +307,7 @@ impl ChatHost {
                         ConversationPresentation {
                             preview,
                             tools: Some(worker_metrics.clone()),
+                            context_windows: inner.context_windows.clone(),
                         },
                     )
                 }));

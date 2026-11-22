@@ -402,17 +402,23 @@ different business pipeline when explicit transcript budgets or truncation polic
 three compaction modes—mirroring session title generation:
 
 1. **Host-managed built-in compaction:** When `HostConfig::automatic_compaction.enabled` is true
-   (default: `context_window = 128000`, `reserve_tokens = 16384`, `keep_recent_tokens = 20000`,
+   (default: `context_window = None`, `reserve_tokens = 16384`, `keep_recent_tokens = 20000`,
    `custom_instructions = ""`), the chatflow only declares `append` (not `replace_context`), and
    unique resolved `model`, `base_url`, and `api_key` inputs exist, the host composes
    `mf-chat.chat-compact` inside `workflows/conversation.json` after optional title generation and
-   before atomic settlement. If compaction triggers, the host publishes the compacted context via
-   `ReplaceContext` while preserving the original turn's display messages and merging `compaction`
-   usages atomically. If compaction is skipped or fails, the primary `Append` result is preserved
-   along with any captured compaction usage. Set `HostConfig::automatic_compaction.enabled = false`
-   to disable host compaction; negative token settings fail validation when opening `ChatHost`.
+   before atomic settlement. When `context_window` is `None`, the host queries `GET {base_url}/models`
+   through `mfn-llm` once per `(base_url, model)` (caching results and non-cancelled misses for the
+   host or TUI session lifetime) and falls back to `DEFAULT_COMPACTION_CONTEXT_WINDOW` (`128000`)
+   when the provider omits window limits or rejects `/models`. Setting `context_window = Some(n)`
+   skips `/models` probing and enforces `n` directly. If compaction triggers, the host publishes
+   the compacted context via `ReplaceContext` while preserving the original turn's display messages
+   and merging `compaction` usages atomically. If compaction is skipped or fails, the primary
+   `Append` result is preserved along with any captured compaction usage. Set
+   `HostConfig::automatic_compaction.enabled = false` to disable host compaction; negative token
+   settings fail validation when opening `ChatHost`.
 2. **User chatflow reuse:** A chatflow can call `{"builtin": "mf-chat.chat-compact"}` directly,
-   optionally reading policy defaults from `context.compaction` or overriding thresholds and models,
+   optionally reading resolved policy defaults (including any API-discovered `context_window`) from
+   `context.compaction`, querying `llm.model_info` directly, or overriding thresholds and models,
    and export `append` / `replace_context`. Declaring `replace_context` causes the host to yield
    automatically so compaction never runs twice.
 3. **Custom compaction:** A chatflow declaring `replace_context` with custom summarization (such as

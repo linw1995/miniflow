@@ -16,9 +16,91 @@ use mf_runtime::{
 use mf_telemetry::{identity::RunId, observation::Observer};
 use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use std::{
+    collections::BTreeMap,
     sync::{Arc, Mutex},
     task::{Wake, Waker},
 };
+
+const CONTEXT_WINDOW_PROBE_TIMEOUT_MS: u64 = 5_000;
+
+type ContextWindowCacheMap = BTreeMap<(String, String), Option<i64>>;
+
+/// Host-scoped cache of provider-advertised context windows keyed by `(base_url, model)`.
+#[derive(Clone, Debug, Default)]
+pub struct ModelContextWindowCache {
+    entries: Arc<Mutex<ContextWindowCacheMap>>,
+}
+
+impl ModelContextWindowCache {
+    pub(crate) fn resolve(
+        &self,
+        config: &crate::CompactionConfig,
+        parameters: Option<&WorkflowArguments>,
+        context: &ExecutionContext,
+    ) -> crate::CompactionContext {
+        if !config.enabled || config.context_window.is_some() {
+            return config.resolved_context(None);
+        }
+        let Some(query) = model_info_query(parameters) else {
+            return config.resolved_context(None);
+        };
+        let key = (
+            query.base_url.trim_end_matches('/').to_owned(),
+            query.model.clone(),
+        );
+        if let Some(cached) = self
+            .entries
+            .lock()
+            .expect("context window cache was not poisoned")
+            .get(&key)
+            .copied()
+        {
+            return config.resolved_context(cached);
+        }
+        let discovered = match mfn_llm::query_model_info(&query, context) {
+            Ok(Some(info)) => info.context_window,
+            Ok(None) => None,
+            Err(_) => {
+                if context.cancellation().failure().is_some() {
+                    // Never cache a cancellation-interrupted probe as an absent window.
+                    return config.resolved_context(None);
+                }
+                None
+            }
+        };
+        self.entries
+            .lock()
+            .expect("context window cache was not poisoned")
+            .insert(key, discovered);
+        config.resolved_context(discovered)
+    }
+}
+
+fn model_info_query(parameters: Option<&WorkflowArguments>) -> Option<mfn_llm::ModelInfoQuery> {
+    let parameters = parameters?;
+    let model = parameters
+        .0
+        .get(&mf_runtime::output_id("params", "model"))?
+        .as_str()?
+        .to_owned();
+    let base_url = parameters
+        .0
+        .get(&mf_runtime::output_id("params", "base_url"))?
+        .as_str()?
+        .to_owned();
+    let api_key = parameters
+        .0
+        .get(&mf_runtime::output_id("params", "api_key"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    Some(mfn_llm::ModelInfoQuery {
+        model,
+        base_url,
+        api_key,
+        timeout_ms: CONTEXT_WINDOW_PROBE_TIMEOUT_MS,
+    })
+}
 
 struct CancelWorkflow(StreamCancellation);
 
@@ -468,7 +550,7 @@ impl TitleGenerationContext {
 #[derive(Clone, Debug, NodeValue)]
 struct CompactionGenerationContext {
     messages: Vec<mfn_llm::ChatMessage>,
-    config: crate::CompactionConfig,
+    config: crate::CompactionContext,
     model: mf_runtime::ValueRef,
     base_url: mf_runtime::ValueRef,
     api_key: mf_runtime::ValueRef,
@@ -478,7 +560,7 @@ impl CompactionGenerationContext {
     fn from_inputs(
         request: &ConversationInputs,
         parameters: Option<&WorkflowArguments>,
-        config: &crate::CompactionConfig,
+        config: &crate::CompactionContext,
     ) -> Result<Option<Self>, ChatError> {
         let Some(parameters) = parameters else {
             return Ok(None);
@@ -559,6 +641,8 @@ struct InvokeWorkflow {
     backend: Arc<dyn ConversationBackend>,
     automatic_titles: bool,
     automatic_compaction: crate::CompactionConfig,
+    context_windows: ModelContextWindowCache,
+    probe_parameters: Option<WorkflowArguments>,
     observer: Observer,
     calls: Arc<Mutex<crate::CallEventCollector>>,
     delivered: Arc<Mutex<Option<ConversationResult>>>,
@@ -579,16 +663,27 @@ impl TypedStreamNode for InvokeWorkflow {
             TypedNodeResult<Self::Output>,
         ) -> Result<(), mf_runtime::NodeExecutionError>,
     ) -> Result<(), mf_runtime::NodeExecutionError> {
+        let compaction = if input.request.context.is_some() || self.compaction_parameters.is_some()
+        {
+            self.context_windows.resolve(
+                &self.automatic_compaction,
+                self.probe_parameters.as_ref(),
+                context,
+            )
+        } else {
+            self.automatic_compaction.resolved_context(None)
+        };
+        context.check_future_limits(None)?;
         if let Some(context) = &mut input.request.context {
             context.title.enabled = self.automatic_titles;
-            context.compaction = crate::CompactionContext::from(&self.automatic_compaction);
+            context.compaction = compaction.clone();
         }
         let title_context =
             TitleGenerationContext::from_inputs(&input.request, self.title_parameters.as_ref())?;
         let compaction_context = CompactionGenerationContext::from_inputs(
             &input.request,
             self.compaction_parameters.as_ref(),
-            &self.automatic_compaction,
+            &compaction,
         )?;
         let calls = &self.calls;
         let response = {
@@ -1004,6 +1099,7 @@ struct PreviewOutput {
 #[derive(Clone, NodeValue)]
 struct PreparedConversation {
     started: TurnStarted,
+    compaction: crate::CompactionContext,
 }
 
 #[derive(serde::Deserialize)]
@@ -1071,6 +1167,9 @@ struct PrepareWorkflow {
     parameters: WorkflowArguments,
     automatic_titles: bool,
     automatic_compaction: crate::CompactionConfig,
+    context_windows: ModelContextWindowCache,
+    probe_parameters: Option<WorkflowArguments>,
+    host_compaction_active: bool,
 }
 
 impl mf_runtime::NodePortContract for PrepareWorkflow {
@@ -1083,21 +1182,34 @@ impl mf_runtime::TaskNode for PrepareWorkflow {
     fn execute(
         &self,
         inputs: mf_runtime::Inputs,
-        _: &mut ExecutionContext,
+        context: &mut ExecutionContext,
     ) -> Result<mf_runtime::NodeResult, mf_runtime::NodeExecutionError> {
         let mut started = TurnStarted::from_values(inputs).map_err(ChatError::from)?;
+        let compaction = if started.request.context.is_some() || self.host_compaction_active {
+            self.context_windows.resolve(
+                &self.automatic_compaction,
+                self.probe_parameters.as_ref(),
+                context,
+            )
+        } else {
+            self.automatic_compaction.resolved_context(None)
+        };
+        context.check_future_limits(None)?;
         if let Some(context) = &mut started.request.context {
             context.title.enabled = self.automatic_titles;
-            context.compaction = crate::CompactionContext::from(&self.automatic_compaction);
+            context.compaction = compaction.clone();
         }
         let mut outputs = self
             .contract
             .arguments(started.request.clone(), &self.parameters)?
             .0;
         outputs.extend(
-            PreparedConversation { started }
-                .into_values()
-                .map_err(ChatError::from)?,
+            PreparedConversation {
+                started,
+                compaction,
+            }
+            .into_values()
+            .map_err(ChatError::from)?,
         );
         Ok(mf_runtime::NodeResult {
             outputs,
@@ -1110,7 +1222,6 @@ struct CompleteWorkflow {
     outputs: Vec<String>,
     title_parameters: Option<WorkflowArguments>,
     compaction_parameters: Option<WorkflowArguments>,
-    automatic_compaction: crate::CompactionConfig,
     capture: CompletionCapture,
 }
 
@@ -1153,7 +1264,7 @@ impl mf_runtime::TypedTaskNode for CompleteWorkflow {
         let compaction_context = CompactionGenerationContext::from_inputs(
             &input.started.request,
             self.compaction_parameters.as_ref(),
-            &self.automatic_compaction,
+            &input.compaction,
         )?;
         Ok(InvocationEmission {
             event: InvocationEvent {
@@ -1342,6 +1453,8 @@ fn compose_conversation(
     parameters: &WorkflowArguments,
     automatic_titles: bool,
     automatic_compaction: &crate::CompactionConfig,
+    context_windows: ModelContextWindowCache,
+    probe_parameters: Option<WorkflowArguments>,
     invocation: &Invocation,
     title_parameters: Option<WorkflowArguments>,
     compaction_parameters: Option<WorkflowArguments>,
@@ -1429,7 +1542,10 @@ fn compose_conversation(
             "inputs":PreparedConversation::ports(), "outputs":InvocationEmission::ports(),
             "references":metadata.context_references.iter().map(|reference| &reference.output).collect::<Vec<_>>()
         },
-        "inputs":{"started":{"from":{"node":"prepare_workflow","port":"started"}}}
+        "inputs":{
+            "started":{"from":{"node":"prepare_workflow","port":"started"}},
+            "compaction":{"from":{"node":"prepare_workflow","port":"compaction"}}
+        }
     }));
     let route = nodes
         .iter_mut()
@@ -1511,6 +1627,9 @@ fn compose_conversation(
             parameters: parameters.clone(),
             automatic_titles,
             automatic_compaction: automatic_compaction.clone(),
+            context_windows,
+            probe_parameters,
+            host_compaction_active: compaction_parameters.is_some(),
         },
         NodeMetadata::default(),
     )
@@ -1520,7 +1639,6 @@ fn compose_conversation(
             outputs: result_outputs,
             title_parameters,
             compaction_parameters,
-            automatic_compaction: automatic_compaction.clone(),
             capture,
         },
         metadata,
@@ -1562,6 +1680,29 @@ pub fn run_conversation_with_preview(
     observer: Option<&Observer>,
     preview: Option<PreviewConsumer>,
 ) -> Result<ReconciledCompletion, ChatError> {
+    run_conversation_with_context_windows(
+        database,
+        request,
+        backend,
+        cancellation,
+        automatic_titles,
+        observer,
+        preview,
+        ModelContextWindowCache::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_conversation_with_context_windows(
+    database: &ChatDatabase,
+    request: BeginTurnInputs,
+    backend: Arc<dyn ConversationBackend>,
+    cancellation: StreamCancellation,
+    automatic_titles: bool,
+    observer: Option<&Observer>,
+    preview: Option<PreviewConsumer>,
+    context_windows: ModelContextWindowCache,
+) -> Result<ReconciledCompletion, ChatError> {
     let automatic_compaction = crate::CompactionConfig::default();
     run_observed_conversation(
         database,
@@ -1574,6 +1715,7 @@ pub fn run_conversation_with_preview(
         ConversationPresentation {
             preview,
             tools: None,
+            context_windows,
         },
     )
 }
@@ -1581,6 +1723,7 @@ pub fn run_conversation_with_preview(
 pub(super) struct ConversationPresentation {
     pub preview: Option<PreviewConsumer>,
     pub tools: Option<crate::ToolExecutionMetrics>,
+    pub context_windows: ModelContextWindowCache,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1595,7 +1738,11 @@ pub(super) fn run_observed_conversation(
     presentation: ConversationPresentation,
 ) -> Result<ReconciledCompletion, ChatError> {
     automatic_compaction.validate()?;
-    let ConversationPresentation { preview, tools } = presentation;
+    let ConversationPresentation {
+        preview,
+        tools,
+        context_windows,
+    } = presentation;
     ensure!(
         std::path::Path::new(&request.database_path) == database.path(),
         InvalidSnafu {
@@ -1651,6 +1798,14 @@ pub(super) fn run_observed_conversation(
             Ok::<_, ChatError>(ChatContract::from_manifest(manifest)?.alternatives)
         })
         .transpose()?;
+    let probe_parameters = automatic_compaction
+        .enabled
+        .then(|| {
+            backend
+                .builtin_compaction_parameters()
+                .or_else(|| backend.builtin_title_parameters())
+        })
+        .flatten();
     let compaction_parameters = (automatic_compaction.enabled
         && composed_alternatives
             .is_none_or(|alternatives| alternatives == crate::ResultAlternatives::Append))
@@ -1672,6 +1827,8 @@ pub(super) fn run_observed_conversation(
             parameters,
             automatic_titles,
             automatic_compaction,
+            context_windows,
+            probe_parameters,
             &invocation,
             title_parameters,
             compaction_parameters,
@@ -1687,6 +1844,8 @@ pub(super) fn run_observed_conversation(
                 backend,
                 automatic_titles,
                 automatic_compaction: automatic_compaction.clone(),
+                context_windows,
+                probe_parameters,
                 observer: observer.clone(),
                 calls: Arc::clone(&calls),
                 delivered: Arc::clone(&delivered),
@@ -1910,6 +2069,8 @@ mod tests {
             parameters,
             false,
             &crate::CompactionConfig::default(),
+            ModelContextWindowCache::default(),
+            None,
             &Invocation::new("session"),
             None,
             None,
@@ -2311,9 +2472,12 @@ mod tests {
                 "mf_chat.workflow.complete",
                 PreparedConversation::ports(),
                 InvocationEmission::ports(),
-                PreparedConversation { started: input }
-                    .into_values()
-                    .unwrap(),
+                PreparedConversation {
+                    started: input,
+                    compaction: crate::CompactionContext::default(),
+                }
+                .into_values()
+                .unwrap(),
             ),
         ] {
             let adapter = registry
