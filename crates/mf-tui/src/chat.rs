@@ -141,12 +141,18 @@ pub enum ChatEvent {
     Loaded {
         session: Session,
         page: MessagePage,
+        context_tokens: Option<u64>,
     },
     Models(Result<Vec<ModelInfo>, String>),
     ModelSelected {
         model: Option<String>,
+        context_window: Option<u64>,
         automatic: bool,
         warning: Option<String>,
+    },
+    ContextWindow {
+        model: String,
+        context_window: Option<u64>,
     },
     Submitted {
         session: Session,
@@ -387,6 +393,7 @@ impl Controller {
         }
         self.emit(ChatEvent::ModelSelected {
             model: update.model,
+            context_window: update.context_window,
             automatic: true,
             warning: update.warning,
         });
@@ -408,6 +415,15 @@ impl Controller {
     fn run(mut self) -> Result<(), ChatRunError> {
         if self.model_selection.needs_default_model() && !self.closed.load(Ordering::Acquire) {
             self.discover_default_model();
+        } else if !self.closed.load(Ordering::Acquire)
+            && let Some(model) = self.model_selection.display_model()
+            && let Some(window) = self.model_selection.probe_context_window(&model)
+            && !self.closed.load(Ordering::Acquire)
+        {
+            self.emit(ChatEvent::ContextWindow {
+                model,
+                context_window: Some(window),
+            });
         }
         while !self.closed.load(Ordering::Acquire) {
             match self.input.recv_timeout(Duration::from_millis(50)) {
@@ -454,7 +470,12 @@ impl Controller {
                 let after = (end > PAGE_SIZE as i64).then_some(end - PAGE_SIZE as i64 - 1);
                 let mut page = self.database.messages(&session_id, PAGE_SIZE, after)?;
                 page.messages.retain(|record| record.message.sequence < end);
-                self.emit(ChatEvent::Loaded { session, page });
+                let context_tokens = self.database.context_tokens(&session.id)?;
+                self.emit(ChatEvent::Loaded {
+                    session,
+                    page,
+                    context_tokens,
+                });
             }
             ChatCommand::ListModels => {
                 let result = self
@@ -467,12 +488,23 @@ impl Controller {
             }
             ChatCommand::SelectModel { model } => {
                 ensure!(self.retained.is_none(), BusySnafu);
+                let needs_probe = self.model_selection.cached_context_window(&model).is_none();
                 let update = self.model_selection.select_model(&model)?;
                 self.emit(ChatEvent::ModelSelected {
                     model: update.model,
+                    context_window: update.context_window,
                     automatic: false,
                     warning: update.warning,
                 });
+                if needs_probe
+                    && let Some(window) = self.model_selection.probe_context_window(&model)
+                    && !self.closed.load(Ordering::Acquire)
+                {
+                    self.emit(ChatEvent::ContextWindow {
+                        model,
+                        context_window: Some(window),
+                    });
+                }
             }
             ChatCommand::Submit { session_id, prompt } => {
                 ensure!(

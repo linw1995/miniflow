@@ -21,7 +21,7 @@ mod usage;
 pub use call_events::{CallEventCollector, CallEventError};
 pub mod workflow;
 
-pub use context::ModelContext;
+pub use context::{ModelContext, context_tokens};
 pub use contract::{
     CallUsage, Completion, ConversationContext, ConversationInputs, ConversationResult,
     MessageUpdate, ModelContextRevision, ResultAlternatives, TitleContext, UncommittedCompletion,

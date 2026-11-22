@@ -10,7 +10,7 @@ use mf_runtime::{
     NodeValue, PortSpec, PreparedNode, StreamCancellation, StreamExecutionSnafu, ValueRef,
     ValueType, WorkflowArguments, WorkflowInputError, WorkflowInputSchema,
 };
-use mfn_llm::{LIST_MODELS_KIND, ModelInfo, ModelListOutputs};
+use mfn_llm::{LIST_MODELS_KIND, MODEL_INFO_KIND, ModelInfo, ModelInfoOutputs, ModelListOutputs};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -130,6 +130,7 @@ impl ModelSelectionCancellation {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelSelectionUpdate {
     pub model: Option<String>,
+    pub context_window: Option<u64>,
     pub warning: Option<String>,
 }
 
@@ -143,6 +144,8 @@ pub struct ModelSelection {
     pending_profile: Option<ProfilePreferences>,
     needs_default_model: bool,
     list_models_node: Option<PreparedNode>,
+    model_info_node: Option<PreparedNode>,
+    model_context_windows: BTreeMap<(String, String), Option<u64>>,
     cancellation: ModelSelectionCancellation,
 }
 
@@ -172,6 +175,10 @@ impl ModelSelection {
             .is_some()
             .then(prepare_list_models_node)
             .transpose()?;
+        let model_info_node = provider_ports
+            .is_some()
+            .then(prepare_model_info_node)
+            .transpose()?;
         Ok(Self {
             preferences_path: prefs_path,
             profile,
@@ -181,6 +188,8 @@ impl ModelSelection {
             pending_profile: merged.preferences_changed.then_some(merged.updated_profile),
             needs_default_model: merged.needs_default_model,
             list_models_node,
+            model_info_node,
+            model_context_windows: BTreeMap::new(),
             cancellation: ModelSelectionCancellation::new(),
         })
     }
@@ -234,6 +243,7 @@ impl ModelSelection {
             field: "model selection",
             reason: "provider base_url is not configured",
         })?;
+        let base_url = endpoint.base_url.clone();
         let cancellation = self.cancellation.begin_query();
         let executed = model_list_context(endpoint, cancellation).and_then(|mut context| {
             let task = node
@@ -245,7 +255,56 @@ impl ModelSelection {
         self.cancellation.finish_query();
         let executed = executed?;
         let outputs = <ModelListOutputs as NodeValue>::from_values(executed.outputs)?;
+        self.record_model_windows(&base_url, &outputs.models);
         Ok(outputs.models)
+    }
+
+    /// Returns the cached context window lookup state for `model` on the current endpoint.
+    ///
+    /// Returns `None` if no lookup has been cached yet, `Some(None)` if the endpoint did not
+    /// advertise a positive window, and `Some(Some(tokens))` if a positive window is known.
+    pub fn cached_context_window(&self, model: &str) -> Option<Option<u64>> {
+        let endpoint = self.resolved_endpoint()?;
+        let normalized = endpoint.base_url.trim_end_matches('/');
+        if normalized.is_empty() {
+            return None;
+        }
+        self.model_context_windows
+            .get(&(normalized.to_owned(), model.to_owned()))
+            .copied()
+    }
+
+    /// Resolves the context window for `model`, reusing the per-endpoint cache or querying the
+    /// registered `llm.model_info` node.
+    pub fn probe_context_window(&mut self, model: &str) -> Option<u64> {
+        if let Some(cached) = self.cached_context_window(model) {
+            return cached;
+        }
+        let endpoint = self.resolved_endpoint()?;
+        let normalized = endpoint.base_url.trim_end_matches('/').to_owned();
+        let node = self.model_info_node.as_ref()?;
+        let cancellation = self.cancellation.begin_query();
+        let executed =
+            model_info_context(model, endpoint, cancellation.clone()).and_then(|mut context| {
+                let task = node
+                    .execution
+                    .as_task_node()
+                    .expect("llm.model_info is a task node");
+                task.execute(Inputs::new(), &mut context)
+            });
+        self.cancellation.finish_query();
+        if cancellation.failure().is_some() || self.cancellation.is_cancelled() {
+            return None;
+        }
+        let discovered = executed
+            .ok()
+            .and_then(|result| <ModelInfoOutputs as NodeValue>::from_values(result.outputs).ok())
+            .and_then(|outputs| positive_context_window(outputs.context_window));
+        if !normalized.is_empty() {
+            self.model_context_windows
+                .insert((normalized, model.to_owned()), discovered);
+        }
+        discovered
     }
 
     /// Selects the first available provider model when startup has no explicit/saved/env model,
@@ -256,6 +315,7 @@ impl ModelSelection {
         if self.cancellation.is_cancelled() {
             return ModelSelectionUpdate {
                 model: None,
+                context_window: None,
                 warning: None,
             };
         }
@@ -277,11 +337,17 @@ impl ModelSelection {
             .map(|error| error.to_string());
             return ModelSelectionUpdate {
                 model: Some(first.id),
+                context_window: positive_context_window(first.context_window),
                 warning,
             };
         }
+        let fallback = self.display_model();
+        let context_window = fallback
+            .as_deref()
+            .and_then(|model| self.cached_context_window(model).flatten());
         ModelSelectionUpdate {
-            model: self.display_model(),
+            model: fallback,
+            context_window,
             warning: None,
         }
     }
@@ -317,10 +383,25 @@ impl ModelSelection {
         )
         .err()
         .map(|error| error.to_string());
+        let context_window = self.cached_context_window(model).flatten();
         Ok(ModelSelectionUpdate {
             model: Some(model.to_owned()),
+            context_window,
             warning,
         })
+    }
+
+    fn record_model_windows(&mut self, base_url: &str, models: &[ModelInfo]) {
+        let normalized = base_url.trim_end_matches('/');
+        if normalized.is_empty() {
+            return;
+        }
+        for model in models {
+            self.model_context_windows.insert(
+                (normalized.to_owned(), model.id.clone()),
+                positive_context_window(model.context_window),
+            );
+        }
     }
 
     fn resolved_endpoint(&self) -> Option<ModelListEndpoint> {
@@ -344,6 +425,68 @@ fn prepare_list_models_node() -> Result<PreparedNode, ChatError> {
             "timeout_ms": MODEL_LIST_TIMEOUT_MS,
         }))
         .context(BackendBuildSnafu)
+}
+
+fn prepare_model_info_node() -> Result<PreparedNode, ChatError> {
+    let registry = NodeRegistry::from_inventory()?;
+    let factory = registry.get(MODEL_INFO_KIND).context(InvalidSnafu {
+        field: "model selection",
+        reason: "llm.model_info node is not registered",
+    })?;
+    factory
+        .instantiate(serde_json::json!({
+            "model": {"$ref": "params.model"},
+            "base_url": {"$ref": "params.base_url"},
+            "api_key": {"$ref": "params.api_key"},
+            "timeout_ms": MODEL_LIST_TIMEOUT_MS,
+        }))
+        .context(BackendBuildSnafu)
+}
+
+fn positive_context_window(window: Option<i64>) -> Option<u64> {
+    window
+        .and_then(|value| u64::try_from(value).ok())
+        .filter(|&value| value > 0)
+}
+
+fn model_info_context(
+    model: &str,
+    endpoint: ModelListEndpoint,
+    cancellation: StreamCancellation,
+) -> Result<ExecutionContext, mf_runtime::NodeExecutionError> {
+    let source: FlowNode<()> = FlowNode {
+        definition_id: "params".into(),
+        node: (),
+        metadata: NodeMetadata {
+            ports: NodePorts {
+                inputs: Vec::new(),
+                outputs: vec![
+                    PortSpec::new("model", ValueType::String, true),
+                    PortSpec::new("base_url", ValueType::String, true),
+                    PortSpec::new("api_key", ValueType::String, true),
+                ],
+            },
+            ..Default::default()
+        },
+        output_keys: OnceLock::new(),
+    };
+    let mut context = ExecutionContext::for_message(
+        &source,
+        NodeResult {
+            outputs: [
+                ("model".into(), ValueRef::from(model)),
+                ("base_url".into(), ValueRef::from(endpoint.base_url)),
+                (
+                    "api_key".into(),
+                    ValueRef::from(endpoint.api_key.unwrap_or_default()).into_secret(),
+                ),
+            ]
+            .into(),
+            ..Default::default()
+        },
+    )?;
+    context.set_cancellation(cancellation);
+    Ok(context)
 }
 
 fn model_list_context(
@@ -1109,6 +1252,10 @@ mod tests {
                 {"id": "first-model", "context_window": 131072},
                 {"id": "second-model", "context_window": 65536}
             ])),
+            Reply::models(json!([
+                {"id": "first-model", "context_window": 131072},
+                {"id": "second-model", "context_window": 65536}
+            ])),
         ]);
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("chat.sqlite");
@@ -1132,6 +1279,7 @@ mod tests {
 
         let discovered = selection.discover_default_model();
         assert_eq!(discovered.model.as_deref(), Some("first-model"));
+        assert_eq!(discovered.context_window, Some(131_072));
         assert_eq!(discovered.warning, None);
         assert!(!selection.needs_default_model());
         assert_eq!(selection.display_model().as_deref(), Some("first-model"));
@@ -1142,11 +1290,13 @@ mod tests {
 
         let selected = selection.select_model("second-model").unwrap();
         assert_eq!(selected.model.as_deref(), Some("second-model"));
+        assert_eq!(selected.context_window, Some(65_536));
         assert_eq!(selected.warning, None);
         assert!(selection.select_model("   ").is_err());
 
-        // Re-preparing without explicit parameters reuses saved base_url and second-model.
-        let reopened = ModelSelection::prepare(
+        // Re-preparing without explicit parameters reuses saved base_url and second-model,
+        // and probe_context_window discovers second-model's window via llm.model_info.
+        let mut reopened = ModelSelection::prepare(
             &db_path,
             "default",
             &contract,
@@ -1155,6 +1305,14 @@ mod tests {
         .unwrap();
         assert!(!reopened.needs_default_model());
         assert_eq!(reopened.display_model().as_deref(), Some("second-model"));
+        assert_eq!(reopened.cached_context_window("second-model"), None);
+        assert_eq!(reopened.probe_context_window("second-model"), Some(65_536));
+        assert_eq!(
+            reopened.cached_context_window("second-model"),
+            Some(Some(65_536))
+        );
+        // Subsequent probes reuse the cached value without hitting the server again.
+        assert_eq!(reopened.probe_context_window("second-model"), Some(65_536));
     }
 
     #[test]
@@ -1181,6 +1339,7 @@ mod tests {
         let outcome = selection.discover_default_model();
         assert_eq!(outcome.model, None);
         assert_eq!(outcome.warning, None);
+        assert_eq!(selection.probe_context_window("first-model"), None);
     }
 
     #[test]
