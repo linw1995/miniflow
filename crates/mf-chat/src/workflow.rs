@@ -32,6 +32,24 @@ pub struct ModelContextWindowCache {
 }
 
 impl ModelContextWindowCache {
+    /// Records provider-advertised context windows returned by a `/models` listing.
+    pub fn record_models(&self, base_url: &str, models: &[mfn_llm::ModelInfo]) {
+        let normalized = base_url.trim_end_matches('/');
+        if normalized.is_empty() {
+            return;
+        }
+        let mut entries = self
+            .entries
+            .lock()
+            .expect("context window cache was not poisoned");
+        for model in models {
+            entries.insert(
+                (normalized.to_owned(), model.id.clone()),
+                model.context_window,
+            );
+        }
+    }
+
     pub(crate) fn resolve(
         &self,
         config: &crate::CompactionConfig,

@@ -11,6 +11,7 @@ description = "Terminal observation of locally launched miniflow workflows"
 mf-chat.workspace = true
 mf-runtime.workspace = true
 mf-telemetry = { workspace = true, features = ["snapshot"] }
+mfn-llm.workspace = true
 
 # Terminal input, rendering, and workflow graph layout.
 chrono = { workspace = true, features = ["std"] }

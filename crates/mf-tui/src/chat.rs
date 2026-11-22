@@ -5,7 +5,8 @@ use crate::{
     runner::{PreparedRunner, RunnerError, RunnerInvocation},
 };
 use mf_chat::contract::{
-    ChatContract, CompletionState, ConversationExit, ReconciledCompletion, TurnExit,
+    ChatContract, CompletionState, ConversationExit, ProviderParameterPorts, ReconciledCompletion,
+    TurnExit,
 };
 use mf_chat::{ChatDatabase, Invocation, MessagePage, Session, SessionPage, UncommittedCompletion};
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
@@ -22,6 +23,7 @@ use std::{
     time::Duration,
 };
 
+mod preferences;
 mod preview;
 pub use preview::LivePreview;
 mod transcript;
@@ -29,6 +31,7 @@ mod ui;
 pub use ui::run_chat;
 const QUEUE_CAPACITY: usize = 16;
 const PAGE_SIZE: usize = 50;
+const MODEL_LIST_TIMEOUT_MS: u64 = 5_000;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -66,6 +69,13 @@ pub enum ChatRunError {
     MissingReply,
     #[snafu(display("invalid chat options: {reason}"))]
     Options { reason: &'static str },
+    #[snafu(display("invalid chat preferences {path:?}: {reason}"))]
+    Preferences { path: PathBuf, reason: String },
+    #[snafu(display("invalid chat preferences JSON in {path:?}: {source}"))]
+    PreferencesJson {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -92,7 +102,29 @@ impl ChatLaunch {
         let runner =
             PreparedRunner::load(executable, mf_chat::contract::MAX_RECOVERY_BYTES as u64)?;
         let contract = ChatContract::from_manifest(runner.manifest())?;
-        let parameters = options.run.workflow_arguments(&contract.parameters)?;
+        let parameters = options
+            .run
+            .parsed_workflow_arguments(&contract.parameters)?;
+        let provider_ports = contract.provider_parameter_ports();
+        let saved_store =
+            preferences::load_store(&preferences::preferences_path(&options.database_path))?;
+        let saved = saved_store
+            .profiles
+            .get(&options.profile)
+            .cloned()
+            .unwrap_or_default();
+        let merged = preferences::merge_parameters(
+            &contract.parameters,
+            provider_ports.as_ref(),
+            &saved,
+            &parameters,
+            |name| std::env::var_os(name),
+        )?;
+        preferences::validate_launch_parameters(
+            &contract.parameters,
+            provider_ports.as_ref(),
+            &merged.effective,
+        )?;
         Ok(Self {
             runner,
             contract,
@@ -110,6 +142,10 @@ pub enum ChatCommand {
         session_id: String,
         before: Option<i64>,
     },
+    ListModels,
+    SelectModel {
+        model: String,
+    },
     Submit {
         session_id: Option<String>,
         prompt: String,
@@ -126,6 +162,12 @@ pub enum ChatEvent {
     Loaded {
         session: Session,
         page: MessagePage,
+    },
+    Models(Result<Vec<mfn_llm::ModelInfo>, String>),
+    ModelSelected {
+        model: Option<String>,
+        automatic: bool,
+        warning: Option<String>,
     },
     Submitted {
         session: Session,
@@ -164,6 +206,10 @@ pub struct ChatController {
     compacting: Arc<Mutex<(Option<Invocation>, bool)>>,
     presented_compacting: AtomicBool,
     presented_invocation: Mutex<Option<Invocation>>,
+    supports_model_selection: bool,
+    initial_model: Option<String>,
+    loading_default_model: bool,
+    model_query_cancel: Arc<Mutex<Option<mf_runtime::StreamCancellation>>>,
     closed: Arc<AtomicBool>,
     busy: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
@@ -172,6 +218,47 @@ pub struct ChatController {
 impl ChatController {
     pub fn open(launch: ChatLaunch) -> Result<Self, ChatRunError> {
         let database = Arc::new(ChatDatabase::open(&launch.options.database_path)?);
+        let provider_ports = launch.contract.provider_parameter_ports();
+        let prefs_path = preferences::preferences_path(database.path());
+        let saved_store = preferences::load_store(&prefs_path)?;
+        let saved = saved_store
+            .profiles
+            .get(&launch.options.profile)
+            .cloned()
+            .unwrap_or_default();
+        let merged = preferences::merge_parameters(
+            &launch.contract.parameters,
+            provider_ports.as_ref(),
+            &saved,
+            &launch.parameters,
+            |name| std::env::var_os(name),
+        )?;
+        preferences::validate_launch_parameters(
+            &launch.contract.parameters,
+            provider_ports.as_ref(),
+            &merged.effective,
+        )?;
+        if merged.preferences_changed {
+            preferences::persist_profile(
+                &prefs_path,
+                &launch.options.profile,
+                merged.updated_profile,
+            )?;
+        }
+        let supports_model_selection = provider_ports.is_some();
+        let loading_default_model = merged.needs_default_model;
+        let initial_model = if loading_default_model {
+            None
+        } else {
+            provider_ports.as_ref().and_then(|ports| {
+                preferences::resolve_display_model(
+                    &launch.contract.parameters,
+                    ports,
+                    &merged.effective,
+                    |name| std::env::var_os(name),
+                )
+            })
+        };
         let (commands, input) = mpsc::sync_channel(QUEUE_CAPACITY);
         let (output, events) = mpsc::sync_channel(QUEUE_CAPACITY);
         let closed = Arc::new(AtomicBool::new(false));
@@ -179,8 +266,13 @@ impl ChatController {
         let cancel = Arc::new(AtomicBool::new(false));
         let preview = Arc::new(Mutex::new(LivePreview::default()));
         let compacting = Arc::new(Mutex::new((None, false)));
+        let model_query_cancel = Arc::new(Mutex::new(None));
         let controller = Controller {
             launch: Arc::new(launch),
+            parameters: merged.effective,
+            provider_ports,
+            needs_default_model: loading_default_model,
+            model_query_cancel: Arc::clone(&model_query_cancel),
             database: Arc::clone(&database),
             input,
             output,
@@ -208,11 +300,24 @@ impl ChatController {
             compacting,
             presented_compacting: AtomicBool::new(false),
             presented_invocation: Mutex::new(None),
+            supports_model_selection,
+            initial_model,
+            loading_default_model,
+            model_query_cancel,
             closed,
             busy,
             cancel,
             worker: Some(worker),
         })
+    }
+    pub fn supports_model_selection(&self) -> bool {
+        self.supports_model_selection
+    }
+    pub fn initial_model(&self) -> Option<&str> {
+        self.initial_model.as_deref()
+    }
+    pub fn loading_default_model(&self) -> bool {
+        self.loading_default_model
     }
     pub fn send(&self, command: ChatCommand) -> Result<(), ChatRunError> {
         ensure!(!self.closed.load(Ordering::Acquire), ClosedSnafu);
@@ -244,6 +349,12 @@ impl ChatController {
     }
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Release);
+        self.cancel_model_query("chat request cancelled");
+    }
+    fn cancel_model_query(&self, message: &str) {
+        if let Some(cancellation) = self.model_query_cancel.lock().unwrap().as_ref() {
+            cancellation.cancel(mf_runtime::StreamExecutionSnafu { message }.build());
+        }
     }
     pub fn try_event(&self) -> Option<ChatEvent> {
         let event = self
@@ -313,6 +424,7 @@ impl ChatController {
     }
     fn join_worker(&mut self) -> Result<(), ChatRunError> {
         self.closed.store(true, Ordering::Release);
+        self.cancel_model_query("chat controller closed");
         if let Some(worker) = self.worker.take() {
             match worker.join() {
                 Ok(result) => result?,
@@ -338,6 +450,10 @@ struct Retained {
 }
 struct Controller {
     launch: Arc<ChatLaunch>,
+    parameters: mf_runtime::WorkflowArguments,
+    provider_ports: Option<ProviderParameterPorts>,
+    needs_default_model: bool,
+    model_query_cancel: Arc<Mutex<Option<mf_runtime::StreamCancellation>>>,
     database: Arc<ChatDatabase>,
     input: Receiver<ChatCommand>,
     output: SyncSender<ChatEvent>,
@@ -352,6 +468,92 @@ struct Controller {
 impl Controller {
     fn emit(&self, event: ChatEvent) {
         emit(&self.output, &self.closed, event);
+    }
+
+    fn resolved_display_model(&self) -> Option<String> {
+        self.provider_ports.as_ref().and_then(|ports| {
+            preferences::resolve_display_model(
+                &self.launch.contract.parameters,
+                ports,
+                &self.parameters,
+                |name| std::env::var_os(name),
+            )
+        })
+    }
+
+    fn fetch_models(&self) -> Result<Vec<mfn_llm::ModelInfo>, String> {
+        let Some(ports) = &self.provider_ports else {
+            return Err("workflow does not expose model selection parameters".into());
+        };
+        let Some(query) = preferences::resolve_model_list_query(
+            &self.launch.contract.parameters,
+            ports,
+            &self.parameters,
+            MODEL_LIST_TIMEOUT_MS,
+            |name| std::env::var_os(name),
+        ) else {
+            return Err("provider base_url is not configured".into());
+        };
+        let cancellation = mf_runtime::StreamCancellation::default();
+        {
+            let mut slot = self.model_query_cancel.lock().unwrap();
+            *slot = Some(cancellation.clone());
+            if self.closed.load(Ordering::Acquire) {
+                cancellation.cancel(
+                    mf_runtime::StreamExecutionSnafu {
+                        message: "chat controller closed",
+                    }
+                    .build(),
+                );
+            }
+        }
+        let mut context = mf_runtime::ExecutionContext::default();
+        context.set_cancellation(cancellation);
+        let result = mfn_llm::list_models(&query, &context);
+        *self.model_query_cancel.lock().unwrap() = None;
+        match result {
+            Ok(models) => {
+                self.context_windows.record_models(&query.base_url, &models);
+                Ok(models)
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn discover_default_model(&mut self) {
+        let fetched = self.fetch_models();
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        if let Ok(models) = fetched
+            && let Some(first) = models.first()
+            && let Some(ports) = &self.provider_ports
+        {
+            self.parameters.0.insert(
+                ports.model.clone(),
+                mf_runtime::ValueRef::from(first.id.as_str()),
+            );
+            let warning = preferences::persist_selected_model(
+                &preferences::preferences_path(self.database.path()),
+                &self.launch.options.profile,
+                &self.launch.contract.parameters,
+                &ports.model,
+                &first.id,
+            )
+            .err()
+            .map(|error| error.to_string());
+            self.emit(ChatEvent::ModelSelected {
+                model: Some(first.id.clone()),
+                automatic: true,
+                warning,
+            });
+            return;
+        }
+        self.emit(ChatEvent::ModelSelected {
+            model: self.resolved_display_model(),
+            automatic: true,
+            warning: None,
+        });
     }
 }
 
@@ -368,6 +570,9 @@ fn emit(output: &SyncSender<ChatEvent>, closed: &AtomicBool, mut event: ChatEven
 
 impl Controller {
     fn run(mut self) -> Result<(), ChatRunError> {
+        if self.needs_default_model && !self.closed.load(Ordering::Acquire) {
+            self.discover_default_model();
+        }
         while !self.closed.load(Ordering::Acquire) {
             match self.input.recv_timeout(Duration::from_millis(50)) {
                 Ok(command) => {
@@ -414,6 +619,42 @@ impl Controller {
                 let mut page = self.database.messages(&session_id, PAGE_SIZE, after)?;
                 page.messages.retain(|record| record.message.sequence < end);
                 self.emit(ChatEvent::Loaded { session, page });
+            }
+            ChatCommand::ListModels => {
+                let result = self.fetch_models();
+                if !self.closed.load(Ordering::Acquire) {
+                    self.emit(ChatEvent::Models(result));
+                }
+            }
+            ChatCommand::SelectModel { model } => {
+                ensure!(self.retained.is_none(), BusySnafu);
+                ensure!(
+                    !model.trim().is_empty(),
+                    OptionsSnafu {
+                        reason: "model must not be empty"
+                    }
+                );
+                let ports = self.provider_ports.as_ref().context(OptionsSnafu {
+                    reason: "workflow does not support model selection",
+                })?;
+                self.parameters.0.insert(
+                    ports.model.clone(),
+                    mf_runtime::ValueRef::from(model.as_str()),
+                );
+                let warning = preferences::persist_selected_model(
+                    &preferences::preferences_path(self.database.path()),
+                    &self.launch.options.profile,
+                    &self.launch.contract.parameters,
+                    &ports.model,
+                    &model,
+                )
+                .err()
+                .map(|error| error.to_string());
+                self.emit(ChatEvent::ModelSelected {
+                    model: Some(model),
+                    automatic: false,
+                    warning,
+                });
             }
             ChatCommand::Submit { session_id, prompt } => {
                 ensure!(
@@ -464,7 +705,7 @@ impl Controller {
     ) -> Result<(), ChatRunError> {
         let parameters = mf_runtime::resolve_workflow_inputs(
             &self.launch.contract.parameters,
-            &self.launch.parameters,
+            &self.parameters,
             |name| std::env::var_os(name),
         )?;
         let invocation = Invocation::new(&session.id);
