@@ -247,6 +247,65 @@ pub fn preview_executable(path: &Path) -> Result<u8, RunError> {
     preview_description(description)
 }
 
+/// Interactive presentation of a described workflow that never executes.
+struct PreviewSession {
+    view: ObservationView,
+    reader: ObservationReader,
+    capture: CaptureView,
+}
+
+impl PreviewSession {
+    fn new(description: WorkflowDescription) -> Result<Self, RunError> {
+        let view = ObservationView::new(&description)?;
+        let reader =
+            ObservationReader::detached(description, RunId::new()).context(ReceiverSnafu)?;
+        Ok(Self {
+            view,
+            reader,
+            capture: CaptureView::default(),
+        })
+    }
+
+    /// Draw the current frame. Nothing is observed, so elapsed time stays zero.
+    fn draw(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<Box<dyn Write>>>,
+    ) -> Result<(), RunError> {
+        self.view.draw_observation(
+            terminal,
+            &self.reader,
+            &self.capture,
+            Duration::ZERO,
+            None,
+            Presentation::Preview,
+        )
+    }
+
+    /// Apply one terminal event, returning the exit code when the session closes.
+    fn handle(
+        &mut self,
+        event: Event,
+        terminal: &mut Terminal<CrosstermBackend<Box<dyn Write>>>,
+    ) -> Result<Option<u8>, RunError> {
+        match event {
+            Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+                if quit_requested(&self.view, &key) {
+                    return Ok(Some(0));
+                }
+                self.view.handle_key(key.code, &self.reader);
+            }
+            Event::Mouse(mouse) => self.view.handle_mouse(mouse),
+            Event::Resize(width, height) => {
+                terminal
+                    .resize(Rect::new(0, 0, width, height))
+                    .context(TerminalSnafu)?;
+            }
+            _ => {}
+        }
+        Ok(None)
+    }
+}
+
 /// Inspect an already described workflow graph without launching it.
 ///
 /// Built-in Flows resolve to a description without a compiled executable, so the
@@ -256,9 +315,7 @@ pub fn preview_description(description: WorkflowDescription) -> Result<u8, RunEr
         return TerminalRequiredSnafu.fail();
     }
     let area = terminal_area().context(TerminalSnafu)?;
-    let mut view = ObservationView::new(&description)?;
-    let reader = ObservationReader::detached(description, RunId::new()).context(ReceiverSnafu)?;
-    let capture = CaptureView::default();
+    let mut session = PreviewSession::new(description)?;
     let signal = SignalGuard::register().context(TerminalSnafu)?;
     let guard = TerminalGuard::enter().context(TerminalSnafu)?;
     let mut terminal = Terminal::with_options(
@@ -270,36 +327,15 @@ pub fn preview_description(description: WorkflowDescription) -> Result<u8, RunEr
     .context(TerminalSnafu)?;
     let result = (|| {
         loop {
-            view.draw_observation(
-                &mut terminal,
-                &reader,
-                &capture,
-                Duration::ZERO,
-                None,
-                Presentation::Preview,
-            )?;
+            session.draw(&mut terminal)?;
             if signal.interrupted.swap(false, Ordering::Relaxed) {
                 return Ok(0);
             }
-            if !event::poll(Duration::from_millis(100)).context(TerminalSnafu)? {
-                continue;
-            }
-            match event::read().context(TerminalSnafu)? {
-                Event::Key(key)
-                    if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
-                {
-                    if quit_requested(&view, &key) {
-                        return Ok(0);
-                    }
-                    view.handle_key(key.code, &reader);
-                }
-                Event::Mouse(mouse) => view.handle_mouse(mouse),
-                Event::Resize(width, height) => {
-                    terminal
-                        .resize(Rect::new(0, 0, width, height))
-                        .context(TerminalSnafu)?;
-                }
-                _ => {}
+            if event::poll(Duration::from_millis(100)).context(TerminalSnafu)?
+                && let Some(code) =
+                    session.handle(event::read().context(TerminalSnafu)?, &mut terminal)?
+            {
+                return Ok(code);
             }
         }
     })();
@@ -2053,41 +2089,6 @@ fn draw(
             .context(TerminalSnafu)?;
         return Ok(());
     }
-    terminal
-        .draw(|frame| {
-            render_execution_frame(
-                frame,
-                root_layout,
-                pip_layout,
-                description,
-                snapshot,
-                capture,
-                elapsed,
-                view_state,
-                receiver,
-                status,
-                presentation,
-            );
-        })
-        .context(TerminalSnafu)?;
-    Ok(())
-}
-
-/// Render one execution frame from prepared observation inputs.
-#[allow(clippy::too_many_arguments)]
-fn render_execution_frame(
-    frame: &mut Frame<'_>,
-    root_layout: &GraphLayout,
-    pip_layout: &GraphLayout,
-    description: &WorkflowDescription,
-    snapshot: &StateSnapshot,
-    capture: &CaptureView,
-    elapsed: Duration,
-    view_state: &mut ViewState,
-    receiver: &ObservationReader,
-    status: Option<ExitStatus>,
-    presentation: Presentation,
-) {
     let layout = root_layout;
     view_state.follow_latest(snapshot, layout);
     let pass = view_state.pass(snapshot);
@@ -2105,208 +2106,144 @@ fn render_execution_frame(
         &view_state.history_offsets(),
         &view_state.iteration_items,
     );
-    let [header, body, footer] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(1),
-        Constraint::Length(2),
-    ])
-    .areas(frame.area());
-    let phase = status.map_or_else(
-        || "Running".to_owned(),
-        |status| format!("Exited: {}", exit_code(status)),
-    );
-    let workflow = snapshot
-        .workflow_outcome
-        .map_or("Unknown", |outcome| match outcome {
+    terminal.draw(|frame| {
+        let [header, body, footer] = Layout::vertical([
+            Constraint::Length(1), Constraint::Min(1), Constraint::Length(2),
+        ]).areas(frame.area());
+        let phase = status.map_or_else(|| "Running".to_owned(), |status| format!("Exited: {}", exit_code(status)));
+        let workflow = snapshot.workflow_outcome.map_or("Unknown", |outcome| match outcome {
             mf_telemetry::event::Outcome::Succeeded => "Succeeded",
             mf_telemetry::event::Outcome::Failed => "Failed",
         });
-    let scope = if view_state.path.is_empty() {
-        "root".to_owned()
-    } else {
-        format!("{:?}", view_state.path)
-    };
-    let pass_label = if let Some(item) = iteration {
-        format!(
-            "  |  Item: {}  |  Iteration invocation: {}",
-            item.identity.index.get(),
-            item.identity.invocation.get()
-        )
-    } else if static_body {
-        "  |  No retained iteration item records".into()
-    } else {
-        pass.map_or(String::new(), |pass| {
+        let scope = if view_state.path.is_empty() {
+            "root".to_owned()
+        } else {
+            format!("{:?}", view_state.path)
+        };
+        let pass_label = if let Some(item) = iteration { format!("  |  Item: {}  |  Iteration invocation: {}", item.identity.index.get(), item.identity.invocation.get()) } else if static_body { "  |  No retained iteration item records".into() } else { pass.map_or(String::new(), |pass| {
             let index = pass.path.last().map_or(0, |entry| entry.index().get());
-            let scope_label = if pass
-                .path
-                .last()
-                .is_some_and(mf_telemetry::event::LoopPathEntry::is_call)
-            {
-                "Call".to_owned()
-            } else {
-                format!("Pass: {index}")
-            };
+            let scope_label = if pass.path.last().is_some_and(mf_telemetry::event::LoopPathEntry::is_call) { "Call".to_owned() } else { format!("Pass: {index}") };
             match pass.stream_invocation {
                 Some(owner) => format!("  |  Invocation: {owner}  |  {scope_label}"),
                 None => format!("  |  {scope_label}"),
             }
-        })
-    };
-    frame.render_widget(Paragraph::new(match presentation {
+        }) };
+        frame.render_widget(Paragraph::new(match presentation {
             Presentation::Live => format!(
                 "{}  |  Workflow: {workflow}  |  Process: {phase}  |  Scope: {scope}{pass_label}  |  {:.1}s",
                 connection_summary(layout), elapsed.as_secs_f64()
             ),
             Presentation::Preview => format!(
                 "{}  |  Preview  |  Scope: {scope}{pass_label}  |  {} nodes",
-                connection_summary(layout),
-                layout.nodes().len()
+                connection_summary(layout), layout.nodes().len()
             ),
         }), header);
-    let (graph, details) = if view_state.details_visible {
-        let [graph, details] =
-            Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)])
-                .areas(body);
-        (graph, Some(details))
-    } else {
-        (body, None)
-    };
-    let graph = if view_state.graph_notice.is_some() || layout.unresolved_count() > 0 {
-        let [warning, graph] =
-            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(graph);
-        frame.render_widget(
-            Paragraph::new(
-                view_state
-                    .graph_notice
-                    .clone()
-                    .unwrap_or_else(|| routing_warning(layout)),
-            )
-            .style(Style::default().fg(Color::Yellow)),
-            warning,
-        );
-        graph
-    } else {
-        graph
-    };
-    view_state.reveal(layout, graph);
-    view_state.mouse_graph = graph;
-    let mut graph_view = GraphView::new(layout)
-        .reader(receiver)
-        .selected(view_state.selected)
-        .offset(view_state.offset.0, view_state.offset.1)
-        .elapsed_ns(elapsed.as_nanos().min(u64::MAX as u128) as u64)
-        .minimap(!view_state.minimap_hidden);
-    graph_view = graph_view.nodes(&display_nodes);
-    let minimap_area = graph_view.minimap_area(graph);
-    frame.render_widget(graph_view, graph);
-    let observations = display_nodes.as_slice();
-    let pip_nodes = inline_observations_with_items(
-        pip_layout,
-        description,
-        snapshot,
-        &view_state.history_offsets(),
-        &view_state.iteration_items,
-    );
-    let pip_views = execution_pips(pip_layout, &pip_nodes, description, snapshot);
-    view_state.mouse_overlays = parallel_pip_areas(pip_views.len(), graph).0;
-    view_state.mouse_overlays.extend(minimap_area);
-    draw_parallel_pips(
-        frame,
-        graph,
-        pip_layout,
-        &pip_nodes,
-        receiver,
-        elapsed.as_nanos().min(u64::MAX as u128) as u64,
-        pip_views,
-    );
-    if let Some(details) = details {
-        view_state.details_height = usize::from(details.height.saturating_sub(2));
-        let selected = view_state.selected;
-        let collapsed_cluster = layout.is_collapsed_cluster(selected);
-        let selected_node = (!collapsed_cluster)
-            .then(|| {
-                layout
-                    .sources(selected)
-                    .first()
-                    .and_then(|source| observations.get(*source))
-            })
-            .flatten();
-        let cluster = layout.cluster_of(selected).map(|cluster| {
-            let cluster = &layout.clusters()[cluster];
-            if collapsed_cluster {
-                collapsed_cluster_details(cluster, layout.sources(selected), observations)
-            } else {
-                format!(
-                    "Cluster: {}\n{}\nMembers: {}\n",
-                    display_text(&cluster.label),
-                    display_text(&cluster.annotation),
-                    cluster.members.len()
-                )
-            }
-        });
-        let mut bindings = binding_details(description, &view_state.path, selected_node);
-        bindings.push_str(&flow_invocation_details(
+        let (graph, details) = if view_state.details_visible {
+            let [graph, details] = Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)]).areas(body);
+            (graph, Some(details))
+        } else {
+            (body, None)
+        };
+        let graph = if view_state.graph_notice.is_some() || layout.unresolved_count() > 0 {
+            let [warning, graph] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(graph);
+            frame.render_widget(Paragraph::new(view_state.graph_notice.clone().unwrap_or_else(|| routing_warning(layout))).style(Style::default().fg(Color::Yellow)), warning);
+            graph
+        } else { graph };
+        view_state.reveal(layout, graph);
+        view_state.mouse_graph = graph;
+        let mut graph_view = GraphView::new(layout)
+            .reader(receiver)
+            .selected(view_state.selected)
+            .offset(view_state.offset.0, view_state.offset.1)
+            .elapsed_ns(elapsed.as_nanos().min(u64::MAX as u128) as u64)
+            .minimap(!view_state.minimap_hidden);
+        graph_view = graph_view.nodes(&display_nodes);
+        let minimap_area = graph_view.minimap_area(graph);
+        frame.render_widget(graph_view, graph);
+        let observations = display_nodes.as_slice();
+        let pip_nodes = inline_observations_with_items(
+            pip_layout,
             description,
             snapshot,
-            &view_state.path,
-            selected_node,
-            pass,
-            iteration,
-        ));
-        if let Some(node) = selected_node.filter(|node| node.kind == "builtin.llm") {
-            bindings.push_str(&crate::performance::details(
-                &crate::performance::node_calls(receiver, node),
-            ));
+            &view_state.history_offsets(),
+            &view_state.iteration_items,
+        );
+        let pip_views = execution_pips(pip_layout, &pip_nodes, description, snapshot);
+        view_state.mouse_overlays = parallel_pip_areas(pip_views.len(), graph).0;
+        view_state.mouse_overlays.extend(minimap_area);
+        draw_parallel_pips(
+            frame,
+            graph,
+            pip_layout,
+            &pip_nodes,
+            receiver,
+            elapsed.as_nanos().min(u64::MAX as u128) as u64,
+            pip_views,
+        );
+        if let Some(details) = details {
+            view_state.details_height = usize::from(details.height.saturating_sub(2));
+            let selected = view_state.selected;
+            let collapsed_cluster = layout.is_collapsed_cluster(selected);
+            let selected_node = (!collapsed_cluster)
+                .then(|| {
+                    layout
+                        .sources(selected)
+                        .first()
+                        .and_then(|source| observations.get(*source))
+                })
+                .flatten();
+            let cluster = layout.cluster_of(selected).map(|cluster| {
+                let cluster = &layout.clusters()[cluster];
+                if collapsed_cluster {
+                    collapsed_cluster_details(cluster, layout.sources(selected), observations)
+                } else {
+                    format!(
+                        "Cluster: {}\n{}\nMembers: {}\n",
+                        display_text(&cluster.label),
+                        display_text(&cluster.annotation),
+                        cluster.members.len()
+                    )
+                }
+            });
+            let mut bindings = binding_details(description, &view_state.path, selected_node);
+            bindings.push_str(&flow_invocation_details(description, snapshot, &view_state.path, selected_node, pass, iteration));
+            if let Some(node) = selected_node.filter(|node| node.kind == "builtin.llm") {
+                bindings.push_str(&crate::performance::details(&crate::performance::node_calls(receiver, node)));
+            }
+            let details_body = format!(
+                "{}\n{}\n{}\n{}",
+                view_state.graph_notice.as_deref().unwrap_or_default(),
+                cluster.unwrap_or_default(),
+                details_text(selected_node, pass, snapshot, capture, &bindings),
+                layout.routing_details(selected)
+            );
+            let (window, offset) = details_window(&details_body, usize::from(details.width.saturating_sub(2)), usize::from(details.height.saturating_sub(2)), view_state.details_offset);
+            view_state.details_offset = offset;
+            frame.render_widget(Paragraph::new(window)
+                .block(Block::default().title("Details · d hide").title_bottom("PgUp/PgDn scroll").borders(Borders::ALL)), details);
         }
-        let details_body = format!(
-            "{}\n{}\n{}\n{}",
-            view_state.graph_notice.as_deref().unwrap_or_default(),
-            cluster.unwrap_or_default(),
-            details_text(selected_node, pass, snapshot, capture, &bindings),
-            layout.routing_details(selected)
-        );
-        let (window, offset) = details_window(
-            &details_body,
-            usize::from(details.width.saturating_sub(2)),
-            usize::from(details.height.saturating_sub(2)),
-            view_state.details_offset,
-        );
-        view_state.details_offset = offset;
-        frame.render_widget(
-            Paragraph::new(window).block(
-                Block::default()
-                    .title("Details · d hide")
-                    .title_bottom("PgUp/PgDn scroll")
-                    .borders(Borders::ALL),
+        let lifecycle = &snapshot.lifecycle;
+        let controls = match presentation {
+            Presentation::Preview => "q close",
+            Presentation::Live if status.is_some() => "q/Enter close",
+            Presentation::Live => "Ctrl-C interrupt",
+        };
+        let observation_line = match presentation {
+            Presentation::Live => format!(
+                "Delivery: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}",
+                lifecycle.completeness, lifecycle.known_missing_count, lifecycle.local_drops,
+                snapshot.observation.errors + snapshot.observation.protocol_conflicts + lifecycle.protocol_conflicts, snapshot.traces.observed_spans,
             ),
-            details,
-        );
-    }
-    let lifecycle = &snapshot.lifecycle;
-    let controls = match presentation {
-        Presentation::Preview => "q close",
-        Presentation::Live if status.is_some() => "q/Enter close",
-        Presentation::Live => "Ctrl-C interrupt",
-    };
-    let observation_line = match presentation {
-        Presentation::Live => format!(
-            "Delivery: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}",
-            lifecycle.completeness,
-            lifecycle.known_missing_count,
-            lifecycle.local_drops,
-            snapshot.observation.errors
-                + snapshot.observation.protocol_conflicts
-                + lifecycle.protocol_conflicts,
-            snapshot.traces.observed_spans,
-        ),
-        // A preview receives nothing, so reporting delivery or loss counts would
-        // present unobserved state as fact.
-        Presentation::Preview => "Description: static | no execution observed".to_owned(),
-    };
-    frame.render_widget(Paragraph::new(format!(
+            // A preview receives nothing, so reporting delivery or loss counts would
+            // present unobserved state as fact.
+            Presentation::Preview => "Description: static | no execution observed".to_owned(),
+        };
+        frame.render_widget(Paragraph::new(format!(
             "{observation_line}\nArrows/wheel pan | Tab/click select | m minimap | d details | ? help | {controls}",
         )), footer);
-    draw_help(frame, view_state);
+        draw_help(frame, view_state);
+    }).context(TerminalSnafu)?;
+    Ok(())
 }
 
 fn draw_help(frame: &mut Frame<'_>, state: &ViewState) {
@@ -7874,42 +7811,101 @@ mod tests {
         assert!(!chat.contains(" Running: execute "), "{chat}");
     }
 
-    fn render_preview(
-        view: &mut ObservationView,
-        reader: &ObservationReader,
-        width: u16,
-        height: u16,
-    ) -> String {
-        let mut terminal =
-            Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
-        let snapshot = reader.snapshot();
-        let capture = CaptureView::default();
-        terminal
-            .draw(|frame| {
-                render_execution_frame(
-                    frame,
-                    &view.root,
-                    &view.pip_layout,
-                    &view.description,
-                    &snapshot,
-                    &capture,
-                    Duration::ZERO,
-                    &mut view.state,
-                    reader,
-                    None,
-                    Presentation::Preview,
-                );
-            })
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        (0..height)
-            .map(|y| {
-                (0..width)
-                    .map(|x| buffer[(x, y)].symbol())
-                    .collect::<String>()
-            })
+    #[derive(Clone, Default)]
+    struct SharedOutput(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedOutput {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn render_crossterm_grid(bytes: &[u8], width: usize, height: usize) -> String {
+        let mut grid = vec![vec![' '; width]; height];
+        let mut row = 0usize;
+        let mut col = 0usize;
+        let text = String::from_utf8_lossy(bytes);
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\x1b' && chars.peek() == Some(&'[') {
+                chars.next();
+                let mut params = String::new();
+                let mut final_byte = '\0';
+                for next in chars.by_ref() {
+                    if ('@'..='~').contains(&next) {
+                        final_byte = next;
+                        break;
+                    }
+                    params.push(next);
+                }
+                if final_byte == 'H' || final_byte == 'f' {
+                    let mut parts = params.split(';');
+                    let r = parts
+                        .next()
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .unwrap_or(1);
+                    let c = parts
+                        .next()
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .unwrap_or(1);
+                    row = r.saturating_sub(1);
+                    col = c.saturating_sub(1);
+                } else if final_byte == 'G' {
+                    col = params.parse::<usize>().unwrap_or(1).saturating_sub(1);
+                } else if final_byte == 'C' {
+                    col = col.saturating_add(params.parse::<usize>().unwrap_or(1));
+                }
+                continue;
+            }
+            if ch == '\r' {
+                col = 0;
+            } else if ch == '\n' {
+                row += 1;
+            } else if !ch.is_control() {
+                if row < height && col < width {
+                    grid[row][col] = ch;
+                }
+                col += 1;
+            }
+        }
+        grid.into_iter()
+            .map(|line| line.into_iter().collect::<String>())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn render_observation_screen(
+        view: &mut ObservationView,
+        reader: &ObservationReader,
+        capture: &CaptureView,
+        elapsed: Duration,
+        status: Option<ExitStatus>,
+        presentation: Presentation,
+    ) -> String {
+        let output = SharedOutput::default();
+        let mut terminal = Terminal::with_options(
+            CrosstermBackend::new(Box::new(output.clone()) as Box<dyn Write>),
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 0, 100, 24)),
+            },
+        )
+        .unwrap();
+        view.draw_observation(
+            &mut terminal,
+            reader,
+            capture,
+            elapsed,
+            status,
+            presentation,
+        )
+        .unwrap();
+        let bytes = output.0.lock().unwrap();
+        render_crossterm_grid(&bytes, 100, 24)
     }
 
     #[test]
@@ -7917,16 +7913,106 @@ mod tests {
         let description = scope_fixture();
         let mut view = ObservationView::new(&description).unwrap();
         let reader = ObservationReader::detached(description, RunId::new()).unwrap();
-        let preview = render_preview(&mut view, &reader, 100, 24);
+        let capture = CaptureView::default();
+        let preview = render_observation_screen(
+            &mut view,
+            &reader,
+            &capture,
+            Duration::ZERO,
+            None,
+            Presentation::Preview,
+        );
         assert!(preview.contains("Preview  |  Scope: root"), "{preview}");
         assert!(preview.contains("Description: static"), "{preview}");
         assert!(preview.contains("q close"), "{preview}");
         assert!(!preview.contains("Process:"), "{preview}");
         assert!(!preview.contains("Delivery:"), "{preview}");
         assert!(!preview.contains("Ctrl-C interrupt"), "{preview}");
+
+        // The same description keeps observed framing when a run is supervised.
+        let running = render_observation_screen(
+            &mut view,
+            &reader,
+            &capture,
+            Duration::from_secs(1),
+            None,
+            Presentation::Live,
+        );
+        assert!(running.contains("Process: Running"), "{running}");
+        assert!(running.contains("Delivery:"), "{running}");
+        assert!(running.contains("Ctrl-C interrupt"), "{running}");
+
+        let exited = render_observation_screen(
+            &mut view,
+            &reader,
+            &capture,
+            Duration::from_secs(1),
+            Some(ExitStatus::from_raw(0)),
+            Presentation::Live,
+        );
+        assert!(exited.contains("Process: Exited: 0"), "{exited}");
+        assert!(exited.contains("q/Enter close"), "{exited}");
+
         // Keys still navigate the described graph; only execution state is absent.
         let selected = view.state.selected;
         view.handle_key(KeyCode::Tab, &reader);
         assert_ne!(view.state.selected, selected);
+    }
+
+    fn preview_session_terminal() -> Terminal<CrosstermBackend<Box<dyn Write>>> {
+        Terminal::with_options(
+            CrosstermBackend::new(Box::new(io::sink()) as Box<dyn Write>),
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 0, 100, 24)),
+            },
+        )
+        .unwrap()
+    }
+
+    fn key(code: KeyCode) -> Event {
+        Event::Key(crossterm::event::KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    #[test]
+    fn preview_session_closes_on_explicit_requests_only() {
+        let mut terminal = preview_session_terminal();
+        let mut session = PreviewSession::new(scope_fixture()).unwrap();
+        session.draw(&mut terminal).unwrap();
+        let selected = session.view.state.selected;
+        for event in [
+            key(KeyCode::Tab),
+            key(KeyCode::Char('d')),
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 4,
+                row: 6,
+                modifiers: KeyModifiers::NONE,
+            }),
+            Event::Resize(80, 20),
+            Event::FocusGained,
+        ] {
+            assert_eq!(session.handle(event, &mut terminal).unwrap(), None);
+        }
+        assert_ne!(session.view.state.selected, selected);
+        assert!(session.view.state.details_visible);
+        // The resized frame still draws after the viewport change.
+        session.draw(&mut terminal).unwrap();
+        // Esc dismisses the details overlay before closing the preview session.
+        assert_eq!(
+            session.handle(key(KeyCode::Esc), &mut terminal).unwrap(),
+            None
+        );
+        assert!(!session.view.state.details_visible);
+        for closing in [
+            key(KeyCode::Char('q')),
+            key(KeyCode::Enter),
+            Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+            )),
+            key(KeyCode::Esc),
+        ] {
+            assert_eq!(session.handle(closing, &mut terminal).unwrap(), Some(0));
+        }
     }
 }
