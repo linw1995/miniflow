@@ -282,13 +282,18 @@ fn resolve_string_parameter(
         .map(str::to_owned)
 }
 
-pub fn resolve_model_list_query(
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelListEndpoint {
+    pub base_url: String,
+    pub api_key: Option<String>,
+}
+
+pub fn resolve_model_list_endpoint(
     schema: &WorkflowInputSchema,
     provider_ports: &ProviderParameterPorts,
     parameters: &WorkflowArguments,
-    timeout_ms: u64,
     mut environment: impl FnMut(&str) -> Option<OsString>,
-) -> Option<mfn_llm::ModelListQuery> {
+) -> Option<ModelListEndpoint> {
     let base_url = resolve_string_parameter(
         schema,
         parameters,
@@ -303,11 +308,7 @@ pub fn resolve_model_list_query(
         .as_deref()
         .and_then(|port| resolve_string_parameter(schema, parameters, port, &mut environment))
         .filter(|value| !value.is_empty());
-    Some(mfn_llm::ModelListQuery {
-        base_url,
-        api_key,
-        timeout_ms,
-    })
+    Some(ModelListEndpoint { base_url, api_key })
 }
 
 pub fn resolve_display_model(
@@ -611,24 +612,23 @@ mod tests {
             resolve_display_model(&schema, &ports, &empty, |_| None).as_deref(),
             Some("your-model")
         );
-        let default_query =
-            resolve_model_list_query(&schema, &ports, &empty, 5_000, |_| None).unwrap();
-        assert_eq!(default_query.base_url, "https://api.openai.com/v1");
-        assert_eq!(default_query.api_key, None);
-        assert_eq!(default_query.timeout_ms, 5_000);
+        let default_endpoint =
+            resolve_model_list_endpoint(&schema, &ports, &empty, |_| None).unwrap();
+        assert_eq!(default_endpoint.base_url, "https://api.openai.com/v1");
+        assert_eq!(default_endpoint.api_key, None);
 
         // Picks up env-bound api_key and ignores empty base_url.
-        let env_query = resolve_model_list_query(&schema, &ports, &empty, 5_000, |name| {
+        let env_endpoint = resolve_model_list_endpoint(&schema, &ports, &empty, |name| {
             (name == "OPENAI_API_KEY").then(|| OsString::from("env-token"))
         })
         .unwrap();
-        assert_eq!(env_query.api_key.as_deref(), Some("env-token"));
+        assert_eq!(env_endpoint.api_key.as_deref(), Some("env-token"));
 
         let blank_base = WorkflowArguments(BTreeMap::from([(
             "params.base_url".into(),
             ValueRef::from("   "),
         )]));
-        assert!(resolve_model_list_query(&schema, &ports, &blank_base, 5_000, |_| None).is_none());
+        assert!(resolve_model_list_endpoint(&schema, &ports, &blank_base, |_| None).is_none());
 
         // Saved secret or ill-typed entries are ignored during merge.
         let saved_with_secret = ProfilePreferences {

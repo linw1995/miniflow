@@ -630,7 +630,7 @@ resources on session change, eviction, or exit.
 Pickers use arrows and Enter; Esc closes them. For chatflows exposing unambiguous provider startup
 parameters (`model`/`base_url` or `llm_model`/`llm_base_url`, plus optional `api_key`/`llm_api_key`),
 the header displays the active model, `Ctrl+L` opens an incremental-filter model selector backed by
-`GET {base_url}/models`, and non-secret startup parameters plus the selected model are persisted per
+the `llm.list_models` node (`GET {base_url}/models`), and non-secret startup parameters plus the selected model are persisted per
 `--chat-profile` in a sibling `<chat-db>.preferences.json` file (mode `0600` on Unix; secret
 parameters such as `api_key` are never persisted). Subsequent launches reuse saved non-secret
 parameters when omitted from the CLI; explicit CLI arguments always override and update saved

@@ -48,6 +48,12 @@ pub enum ChatRunError {
     Observation { source: RunError },
     #[snafu(transparent)]
     Runner { source: RunnerError },
+    #[snafu(transparent)]
+    NodeRegistry {
+        source: mf_runtime::NodeRegistryError,
+    },
+    #[snafu(transparent)]
+    NodeBuild { source: mf_runtime::NodeBuildError },
     #[snafu(display("could not {operation}: {source}"))]
     Io {
         operation: &'static str,
@@ -218,6 +224,9 @@ impl ChatController {
             )?;
         }
         let supports_model_selection = provider_ports.is_some();
+        let list_models_node = supports_model_selection
+            .then(prepare_list_models_node)
+            .transpose()?;
         let loading_default_model = merged.needs_default_model;
         let initial_model = if loading_default_model {
             None
@@ -242,6 +251,7 @@ impl ChatController {
             launch: Arc::new(launch),
             parameters: merged.effective,
             provider_ports,
+            list_models_node,
             needs_default_model: loading_default_model,
             model_query_cancel: Arc::clone(&model_query_cancel),
             database: Arc::clone(&database),
@@ -400,6 +410,7 @@ struct Controller {
     launch: Arc<ChatLaunch>,
     parameters: mf_runtime::WorkflowArguments,
     provider_ports: Option<ProviderParameterPorts>,
+    list_models_node: Option<mf_runtime::PreparedNode>,
     needs_default_model: bool,
     model_query_cancel: Arc<Mutex<Option<mf_runtime::StreamCancellation>>>,
     database: Arc<ChatDatabase>,
@@ -411,6 +422,61 @@ struct Controller {
     retained: Option<Retained>,
     preview: Arc<Mutex<LivePreview>>,
 }
+
+fn prepare_list_models_node() -> Result<mf_runtime::PreparedNode, ChatRunError> {
+    let registry = mf_runtime::NodeRegistry::from_inventory()?;
+    let factory = registry
+        .get(mfn_llm::LIST_MODELS_KIND)
+        .context(OptionsSnafu {
+            reason: "llm.list_models node is not registered",
+        })?;
+    Ok(factory.instantiate(serde_json::json!({
+        "base_url": {"$ref": "params.base_url"},
+        "api_key": {"$ref": "params.api_key"},
+        "timeout_ms": MODEL_LIST_TIMEOUT_MS,
+    }))?)
+}
+
+fn model_list_context(
+    endpoint: preferences::ModelListEndpoint,
+    cancellation: mf_runtime::StreamCancellation,
+) -> Result<mf_runtime::ExecutionContext, mf_runtime::NodeExecutionError> {
+    let source: mf_runtime::FlowNode<()> = mf_runtime::FlowNode {
+        definition_id: "params".into(),
+        node: (),
+        metadata: mf_runtime::NodeMetadata {
+            ports: mf_runtime::NodePorts {
+                inputs: Vec::new(),
+                outputs: vec![
+                    mf_runtime::PortSpec::new("base_url", mf_runtime::ValueType::String, true),
+                    mf_runtime::PortSpec::new("api_key", mf_runtime::ValueType::String, true),
+                ],
+            },
+            ..Default::default()
+        },
+        output_keys: std::sync::OnceLock::new(),
+    };
+    let mut context = mf_runtime::ExecutionContext::for_message(
+        &source,
+        mf_runtime::NodeResult {
+            outputs: [
+                (
+                    "base_url".into(),
+                    mf_runtime::ValueRef::from(endpoint.base_url),
+                ),
+                (
+                    "api_key".into(),
+                    mf_runtime::ValueRef::from(endpoint.api_key.unwrap_or_default()).into_secret(),
+                ),
+            ]
+            .into(),
+            ..Default::default()
+        },
+    )?;
+    context.set_cancellation(cancellation);
+    Ok(context)
+}
+
 impl Controller {
     fn emit(&self, event: ChatEvent) {
         emit(&self.output, &self.closed, event);
@@ -428,14 +494,13 @@ impl Controller {
     }
 
     fn fetch_models(&self) -> Result<Vec<mfn_llm::ModelInfo>, String> {
-        let Some(ports) = &self.provider_ports else {
+        let (Some(ports), Some(node)) = (&self.provider_ports, &self.list_models_node) else {
             return Err("workflow does not expose model selection parameters".into());
         };
-        let Some(query) = preferences::resolve_model_list_query(
+        let Some(endpoint) = preferences::resolve_model_list_endpoint(
             &self.launch.contract.parameters,
             ports,
             &self.parameters,
-            MODEL_LIST_TIMEOUT_MS,
             |name| std::env::var_os(name),
         ) else {
             return Err("provider base_url is not configured".into());
@@ -453,11 +518,16 @@ impl Controller {
                 );
             }
         }
-        let mut context = mf_runtime::ExecutionContext::default();
-        context.set_cancellation(cancellation);
-        let result = mfn_llm::list_models(&query, &context);
+        let executed = model_list_context(endpoint, cancellation).and_then(|mut context| {
+            let task = node.execution.as_task_node().expect("llm.list_models task");
+            task.execute(mf_runtime::Inputs::new(), &mut context)
+        });
         *self.model_query_cancel.lock().unwrap() = None;
-        result.map_err(|error| error.to_string())
+        let executed = executed.map_err(|error| error.to_string())?;
+        let outputs =
+            <mfn_llm::ModelListOutputs as mf_runtime::NodeValue>::from_values(executed.outputs)
+                .map_err(|error| error.to_string())?;
+        Ok(outputs.models)
     }
 
     fn discover_default_model(&mut self) {
