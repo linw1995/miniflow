@@ -1873,7 +1873,6 @@ dependencies = [
  "mf-runtime",
  "mf-telemetry",
  "mfn-core",
- "mfn-llm",
  "nix",
  "object",
  "opentelemetry-proto",

@@ -1,21 +1,34 @@
-//! Persisted non-secret startup preferences for interactive chat sessions.
+//! Persisted non-secret startup preferences and native provider model selection for chat hosts.
 
-use super::{ChatRunError, IoSnafu, PreferencesJsonSnafu, PreferencesSnafu};
-use mf_chat::contract::ProviderParameterPorts;
-use mf_runtime::{ValueRef, WorkflowArguments, WorkflowInputSchema};
+use crate::{
+    ChatError,
+    contract::{ChatContract, ProviderParameterPorts},
+    error::*,
+};
+use mf_runtime::{
+    ExecutionContext, FlowNode, Inputs, NodeMetadata, NodePorts, NodeRegistry, NodeResult,
+    NodeValue, PortSpec, PreparedNode, StreamCancellation, StreamExecutionSnafu, ValueRef,
+    ValueType, WorkflowArguments, WorkflowInputError, WorkflowInputSchema,
+};
+use mfn_llm::{LIST_MODELS_KIND, ModelInfo, ModelListOutputs};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use snafu::{ResultExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 use std::{
     collections::BTreeMap,
     ffi::OsString,
     fs::File,
     io::{self, Read, Write},
     path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 const PREFERENCES_VERSION: u32 = 1;
 const MAX_PREFERENCES_BYTES: usize = 1024 * 1024;
+const MODEL_LIST_TIMEOUT_MS: u64 = 15_000;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -36,26 +49,347 @@ impl Default for ChatPreferencesStore {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ProfilePreferences {
+struct ProfilePreferences {
     #[serde(default)]
-    pub parameters: BTreeMap<String, Value>,
+    parameters: BTreeMap<String, Value>,
 }
 
 #[derive(Clone, Debug)]
-pub struct MergedParameters {
-    pub effective: WorkflowArguments,
-    pub updated_profile: ProfilePreferences,
-    pub preferences_changed: bool,
-    pub needs_default_model: bool,
+struct MergedParameters {
+    effective: WorkflowArguments,
+    updated_profile: ProfilePreferences,
+    preferences_changed: bool,
+    needs_default_model: bool,
 }
 
-pub fn preferences_path(database_path: &Path) -> PathBuf {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ModelListEndpoint {
+    base_url: String,
+    api_key: Option<String>,
+}
+
+/// Cross-thread handle that cancels in-flight provider model queries.
+#[derive(Clone, Debug, Default)]
+pub struct ModelSelectionCancellation {
+    state: Arc<CancellationState>,
+}
+
+#[derive(Debug, Default)]
+struct CancellationState {
+    cancelled: AtomicBool,
+    active: Mutex<Option<StreamCancellation>>,
+}
+
+impl ModelSelectionCancellation {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Cancels only the currently in-flight query without preventing future queries.
+    pub fn cancel_active(&self) {
+        if let Some(active) = self.state.active.lock().unwrap().as_ref() {
+            active.cancel(
+                StreamExecutionSnafu {
+                    message: "model query cancelled",
+                }
+                .build(),
+            );
+        }
+    }
+
+    /// Marks the handle permanently cancelled and aborts any in-flight query.
+    pub fn cancel(&self) {
+        self.state.cancelled.store(true, Ordering::Release);
+        self.cancel_active();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.state.cancelled.load(Ordering::Acquire)
+    }
+
+    fn begin_query(&self) -> StreamCancellation {
+        let cancellation = StreamCancellation::default();
+        *self.state.active.lock().unwrap() = Some(cancellation.clone());
+        if self.is_cancelled() {
+            cancellation.cancel(
+                StreamExecutionSnafu {
+                    message: "model query cancelled",
+                }
+                .build(),
+            );
+        }
+        cancellation
+    }
+
+    fn finish_query(&self) {
+        *self.state.active.lock().unwrap() = None;
+    }
+}
+
+/// Result of selecting or automatically discovering the active chat model.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelSelectionUpdate {
+    pub model: Option<String>,
+    pub warning: Option<String>,
+}
+
+/// Manages chat launch parameter preferences and interactive provider model selection.
+pub struct ModelSelection {
+    preferences_path: PathBuf,
+    profile: String,
+    schema: WorkflowInputSchema,
+    provider_ports: Option<ProviderParameterPorts>,
+    effective: WorkflowArguments,
+    pending_profile: Option<ProfilePreferences>,
+    needs_default_model: bool,
+    list_models_node: Option<PreparedNode>,
+    cancellation: ModelSelectionCancellation,
+}
+
+impl ModelSelection {
+    /// Loads saved preferences, merges and validates explicit launch parameters, and prepares
+    /// the registered `llm.list_models` node when the contract exposes provider ports.
+    ///
+    /// Does not write preferences to disk; call [`Self::commit_startup_preferences`] once the
+    /// caller holds database ownership.
+    pub fn prepare(
+        database_path: &Path,
+        profile: impl Into<String>,
+        contract: &ChatContract,
+        explicit: &WorkflowArguments,
+    ) -> Result<Self, ChatError> {
+        let profile = profile.into();
+        let prefs_path = preferences_path(database_path);
+        let provider_ports = contract.provider_parameter_ports();
+        let merged = resolve_launch_preferences(
+            &contract.parameters,
+            provider_ports.as_ref(),
+            &prefs_path,
+            &profile,
+            explicit,
+        )?;
+        let list_models_node = provider_ports
+            .is_some()
+            .then(prepare_list_models_node)
+            .transpose()?;
+        Ok(Self {
+            preferences_path: prefs_path,
+            profile,
+            schema: contract.parameters.clone(),
+            provider_ports,
+            effective: merged.effective,
+            pending_profile: merged.preferences_changed.then_some(merged.updated_profile),
+            needs_default_model: merged.needs_default_model,
+            list_models_node,
+            cancellation: ModelSelectionCancellation::new(),
+        })
+    }
+
+    /// Persists startup parameter changes computed during [`Self::prepare`], if any.
+    pub fn commit_startup_preferences(&mut self) -> Result<(), ChatError> {
+        let Some(profile_prefs) = self.pending_profile.take() else {
+            return Ok(());
+        };
+        if let Err(error) =
+            persist_profile(&self.preferences_path, &self.profile, profile_prefs.clone())
+        {
+            self.pending_profile = Some(profile_prefs);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub fn cancellation(&self) -> ModelSelectionCancellation {
+        self.cancellation.clone()
+    }
+
+    pub fn supports_model_selection(&self) -> bool {
+        self.provider_ports.is_some()
+    }
+
+    pub fn needs_default_model(&self) -> bool {
+        self.needs_default_model
+    }
+
+    pub fn display_model(&self) -> Option<String> {
+        self.provider_ports.as_ref().and_then(|ports| {
+            resolve_display_model(&self.schema, ports, &self.effective, |name| {
+                std::env::var_os(name)
+            })
+        })
+    }
+
+    pub fn effective_parameters(&self) -> &WorkflowArguments {
+        &self.effective
+    }
+
+    /// Lists available models from the configured provider endpoint using the registered
+    /// `llm.list_models` node.
+    pub fn list_models(&mut self) -> Result<Vec<ModelInfo>, ChatError> {
+        let node = self.list_models_node.as_ref().context(InvalidSnafu {
+            field: "model selection",
+            reason: "workflow does not expose model selection parameters",
+        })?;
+        let endpoint = self.resolved_endpoint().context(InvalidSnafu {
+            field: "model selection",
+            reason: "provider base_url is not configured",
+        })?;
+        let cancellation = self.cancellation.begin_query();
+        let executed = model_list_context(endpoint, cancellation).and_then(|mut context| {
+            let task = node
+                .execution
+                .as_task_node()
+                .expect("llm.list_models is a task node");
+            task.execute(Inputs::new(), &mut context)
+        });
+        self.cancellation.finish_query();
+        let executed = executed?;
+        let outputs = <ModelListOutputs as NodeValue>::from_values(executed.outputs)?;
+        Ok(outputs.models)
+    }
+
+    /// Selects the first available provider model when startup has no explicit/saved/env model,
+    /// falling back to the schema default if discovery fails or returns no models.
+    pub fn discover_default_model(&mut self) -> ModelSelectionUpdate {
+        self.needs_default_model = false;
+        let fetched = self.list_models();
+        if self.cancellation.is_cancelled() {
+            return ModelSelectionUpdate {
+                model: None,
+                warning: None,
+            };
+        }
+        if let Ok(models) = fetched
+            && let Some(first) = models.into_iter().find(|info| !info.id.trim().is_empty())
+            && let Some(ports) = &self.provider_ports
+        {
+            self.effective
+                .0
+                .insert(ports.model.clone(), ValueRef::from(first.id.as_str()));
+            let warning = persist_selected_model(
+                &self.preferences_path,
+                &self.profile,
+                &self.schema,
+                &ports.model,
+                &first.id,
+            )
+            .err()
+            .map(|error| error.to_string());
+            return ModelSelectionUpdate {
+                model: Some(first.id),
+                warning,
+            };
+        }
+        ModelSelectionUpdate {
+            model: self.display_model(),
+            warning: None,
+        }
+    }
+
+    /// Updates the active model parameter in memory and attempts to persist it for future runs.
+    pub fn select_model(&mut self, model: &str) -> Result<ModelSelectionUpdate, ChatError> {
+        ensure!(
+            !model.trim().is_empty(),
+            InvalidSnafu {
+                field: "model",
+                reason: "model must not be empty",
+            }
+        );
+        let model_port = self
+            .provider_ports
+            .as_ref()
+            .context(InvalidSnafu {
+                field: "model selection",
+                reason: "workflow does not support model selection",
+            })?
+            .model
+            .clone();
+        self.effective
+            .0
+            .insert(model_port.clone(), ValueRef::from(model));
+        self.needs_default_model = false;
+        let warning = persist_selected_model(
+            &self.preferences_path,
+            &self.profile,
+            &self.schema,
+            &model_port,
+            model,
+        )
+        .err()
+        .map(|error| error.to_string());
+        Ok(ModelSelectionUpdate {
+            model: Some(model.to_owned()),
+            warning,
+        })
+    }
+
+    fn resolved_endpoint(&self) -> Option<ModelListEndpoint> {
+        let ports = self.provider_ports.as_ref()?;
+        resolve_model_list_endpoint(&self.schema, ports, &self.effective, |name| {
+            std::env::var_os(name)
+        })
+    }
+}
+
+fn prepare_list_models_node() -> Result<PreparedNode, ChatError> {
+    let registry = NodeRegistry::from_inventory()?;
+    let factory = registry.get(LIST_MODELS_KIND).context(InvalidSnafu {
+        field: "model selection",
+        reason: "llm.list_models node is not registered",
+    })?;
+    factory
+        .instantiate(serde_json::json!({
+            "base_url": {"$ref": "params.base_url"},
+            "api_key": {"$ref": "params.api_key"},
+            "timeout_ms": MODEL_LIST_TIMEOUT_MS,
+        }))
+        .context(BackendBuildSnafu)
+}
+
+fn model_list_context(
+    endpoint: ModelListEndpoint,
+    cancellation: StreamCancellation,
+) -> Result<ExecutionContext, mf_runtime::NodeExecutionError> {
+    let source: FlowNode<()> = FlowNode {
+        definition_id: "params".into(),
+        node: (),
+        metadata: NodeMetadata {
+            ports: NodePorts {
+                inputs: Vec::new(),
+                outputs: vec![
+                    PortSpec::new("base_url", ValueType::String, true),
+                    PortSpec::new("api_key", ValueType::String, true),
+                ],
+            },
+            ..Default::default()
+        },
+        output_keys: OnceLock::new(),
+    };
+    let mut context = ExecutionContext::for_message(
+        &source,
+        NodeResult {
+            outputs: [
+                ("base_url".into(), ValueRef::from(endpoint.base_url)),
+                (
+                    "api_key".into(),
+                    ValueRef::from(endpoint.api_key.unwrap_or_default()).into_secret(),
+                ),
+            ]
+            .into(),
+            ..Default::default()
+        },
+    )?;
+    context.set_cancellation(cancellation);
+    Ok(context)
+}
+
+fn preferences_path(database_path: &Path) -> PathBuf {
     let mut name = database_path.as_os_str().to_os_string();
     name.push(".preferences.json");
     PathBuf::from(name)
 }
 
-fn load_store(path: &Path) -> Result<ChatPreferencesStore, ChatRunError> {
+fn load_store(path: &Path) -> Result<ChatPreferencesStore, ChatError> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -64,6 +398,7 @@ fn load_store(path: &Path) -> Result<ChatPreferencesStore, ChatRunError> {
         Err(error) => {
             return Err(error).context(IoSnafu {
                 operation: "open chat preferences",
+                path: path.to_path_buf(),
             });
         }
     };
@@ -72,6 +407,7 @@ fn load_store(path: &Path) -> Result<ChatPreferencesStore, ChatRunError> {
         .read_to_end(&mut bytes)
         .context(IoSnafu {
             operation: "read chat preferences",
+            path: path.to_path_buf(),
         })?;
     ensure!(
         bytes.len() <= MAX_PREFERENCES_BYTES,
@@ -94,12 +430,12 @@ fn load_store(path: &Path) -> Result<ChatPreferencesStore, ChatRunError> {
     Ok(store)
 }
 
-fn save_store(path: &Path, store: &ChatPreferencesStore) -> Result<(), ChatRunError> {
+fn save_store(path: &Path, store: &ChatPreferencesStore) -> Result<(), ChatError> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let mut bytes = serde_json::to_vec_pretty(store)?;
+    let mut bytes = serde_json::to_vec_pretty(store).context(JsonSnafu)?;
     bytes.push(b'\n');
     ensure!(
         bytes.len() <= MAX_PREFERENCES_BYTES,
@@ -114,17 +450,21 @@ fn save_store(path: &Path, store: &ChatPreferencesStore) -> Result<(), ChatRunEr
         .tempfile_in(parent)
         .context(IoSnafu {
             operation: "create temporary chat preferences file",
+            path: parent.to_path_buf(),
         })?;
     temp.write_all(&bytes).context(IoSnafu {
         operation: "write chat preferences",
+        path: path.to_path_buf(),
     })?;
     temp.as_file().sync_all().context(IoSnafu {
         operation: "sync chat preferences",
+        path: path.to_path_buf(),
     })?;
     temp.persist(path)
         .map_err(|error| error.error)
         .context(IoSnafu {
             operation: "replace chat preferences",
+            path: path.to_path_buf(),
         })?;
     Ok(())
 }
@@ -142,7 +482,7 @@ fn merge_parameters(
     saved: &ProfilePreferences,
     explicit: &WorkflowArguments,
     mut environment: impl FnMut(&str) -> Option<OsString>,
-) -> Result<MergedParameters, ChatRunError> {
+) -> Result<MergedParameters, ChatError> {
     let base_url_changed = provider_ports.is_some_and(|ports| {
         if explicit.0.contains_key(&ports.model) {
             return false;
@@ -189,9 +529,10 @@ fn merge_parameters(
     for (name, value) in &explicit.0 {
         effective.0.insert(name.clone(), value.clone());
         if is_persistable_parameter(schema, name, value) {
-            updated_profile
-                .parameters
-                .insert(name.clone(), serde_json::to_value(value)?);
+            updated_profile.parameters.insert(
+                name.clone(),
+                serde_json::to_value(value).context(JsonSnafu)?,
+            );
         }
     }
     schema.mark_secrets(&mut effective);
@@ -222,7 +563,7 @@ fn validate_launch_parameters(
     schema: &WorkflowInputSchema,
     provider_ports: Option<&ProviderParameterPorts>,
     merged: &WorkflowArguments,
-) -> Result<(), mf_runtime::WorkflowInputError> {
+) -> Result<(), WorkflowInputError> {
     schema.validate_values(merged)?;
     if let Some(ports) = provider_ports
         && !merged.0.contains_key(&ports.model)
@@ -238,13 +579,13 @@ fn validate_launch_parameters(
     }
 }
 
-pub fn resolve_launch_preferences(
+fn resolve_launch_preferences(
     schema: &WorkflowInputSchema,
     provider_ports: Option<&ProviderParameterPorts>,
     prefs_path: &Path,
     profile: &str,
     explicit: &WorkflowArguments,
-) -> Result<MergedParameters, ChatRunError> {
+) -> Result<MergedParameters, ChatError> {
     let saved_store = load_store(prefs_path)?;
     let saved = saved_store
         .profiles
@@ -282,13 +623,7 @@ fn resolve_string_parameter(
         .map(str::to_owned)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ModelListEndpoint {
-    pub base_url: String,
-    pub api_key: Option<String>,
-}
-
-pub fn resolve_model_list_endpoint(
+fn resolve_model_list_endpoint(
     schema: &WorkflowInputSchema,
     provider_ports: &ProviderParameterPorts,
     parameters: &WorkflowArguments,
@@ -311,7 +646,7 @@ pub fn resolve_model_list_endpoint(
     Some(ModelListEndpoint { base_url, api_key })
 }
 
-pub fn resolve_display_model(
+fn resolve_display_model(
     schema: &WorkflowInputSchema,
     provider_ports: &ProviderParameterPorts,
     parameters: &WorkflowArguments,
@@ -321,23 +656,23 @@ pub fn resolve_display_model(
         .filter(|value| !value.trim().is_empty())
 }
 
-pub fn persist_profile(
+fn persist_profile(
     path: &Path,
     profile: &str,
     preferences: ProfilePreferences,
-) -> Result<(), ChatRunError> {
+) -> Result<(), ChatError> {
     let mut store = load_store(path)?;
     store.profiles.insert(profile.to_owned(), preferences);
     save_store(path, &store)
 }
 
-pub fn persist_selected_model(
+fn persist_selected_model(
     path: &Path,
     profile: &str,
     schema: &WorkflowInputSchema,
     model_port: &str,
     model: &str,
-) -> Result<(), ChatRunError> {
+) -> Result<(), ChatError> {
     let value = ValueRef::from(model);
     if !is_persistable_parameter(schema, model_port, &value) {
         return Ok(());
@@ -356,6 +691,7 @@ pub fn persist_selected_model(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mfn_llm::test_support::{Reply, Server};
     use serde_json::json;
 
     fn sample_schema() -> WorkflowInputSchema {
@@ -397,6 +733,69 @@ mod tests {
         }
     }
 
+    fn model_selectable_contract() -> ChatContract {
+        let definition: mf_runtime::WorkflowDefinition = serde_json::from_value(json!({
+            "version": "2026-10-03",
+            "dependencies": {},
+            "nodes": [
+                {"id": "params", "kind": "builtin.identity", "config": {}},
+                {"id": "start", "kind": "builtin.llm", "config": {"model": "fixture-model"}}
+            ],
+            "outputs": [
+                {"name": "append", "node": "start", "port": "append"}
+            ]
+        }))
+        .unwrap();
+        let description = mf_runtime::describe_graph(&mf_runtime::CompiledGraph {
+            definition: definition.clone(),
+            execution_order: vec!["params".into(), "start".into()],
+            relations: Default::default(),
+            children: Default::default(),
+        })
+        .unwrap();
+        let input_schema: WorkflowInputSchema = serde_json::from_value(json!({
+            "inputs": {
+                "start": {
+                    "messages": {
+                        "type": ValueType::List(Box::new(ValueType::Object)),
+                        "required": true
+                    }
+                },
+                "params": {
+                    "model": {
+                        "type": "string",
+                        "required": true,
+                        "binding": {"default": "fallback-model", "secret": false}
+                    },
+                    "base_url": {
+                        "type": "string",
+                        "required": true,
+                        "binding": {"default": "", "secret": false}
+                    },
+                    "api_key": {
+                        "type": "string",
+                        "required": false,
+                        "binding": {"default": "", "secret": true}
+                    }
+                }
+            },
+            "stdin": {}
+        }))
+        .unwrap();
+        let manifest = mf_runtime::WorkflowManifest {
+            version: mf_runtime::WorkflowManifestVersion::V2026_11_18,
+            definition,
+            entry: "chat.json".into(),
+            sources: BTreeMap::new(),
+            descriptor: mf_runtime::RunnerDescriptor {
+                description,
+                input_schema,
+                node_targets: Vec::new(),
+            },
+        };
+        ChatContract::from_manifest(&manifest).unwrap()
+    }
+
     #[test]
     fn merge_persists_non_secret_explicit_inputs_and_never_persists_secrets() {
         let schema = sample_schema();
@@ -417,7 +816,6 @@ mod tests {
             |_| None,
         )
         .unwrap();
-
         assert!(merged.preferences_changed);
         assert!(merged.needs_default_model);
         assert_eq!(
@@ -453,7 +851,6 @@ mod tests {
             ]),
         };
 
-        // Restart without explicit CLI args reuses both base_url and model.
         let reused = merge_parameters(
             &schema,
             Some(&ports),
@@ -481,7 +878,6 @@ mod tests {
             Some("saved-model")
         );
         assert!(!reused.effective.0.contains_key("params.unknown"));
-        // Unknown entries from other chatflows stay preserved in the profile store.
         assert!(
             reused
                 .updated_profile
@@ -489,7 +885,6 @@ mod tests {
                 .contains_key("params.unknown")
         );
 
-        // Explicit new base_url without explicit model drops stale saved model.
         let switched_endpoint = WorkflowArguments(BTreeMap::from([(
             "params.base_url".into(),
             ValueRef::from("http://127.0.0.1:9090/v1"),
@@ -545,29 +940,24 @@ mod tests {
         std::fs::write(&path, "{invalid json").unwrap();
         assert!(matches!(
             load_store(&path),
-            Err(ChatRunError::PreferencesJson { .. })
+            Err(ChatError::PreferencesJson { .. })
         ));
 
         std::fs::write(&path, json!({"version": 99, "profiles": {}}).to_string()).unwrap();
         assert!(matches!(
             load_store(&path),
-            Err(ChatRunError::Preferences { .. })
+            Err(ChatError::Preferences { .. })
         ));
 
-        // Oversized files and non-file paths are rejected cleanly.
         std::fs::write(&path, vec![b' '; MAX_PREFERENCES_BYTES + 1]).unwrap();
         assert!(matches!(
             load_store(&path),
-            Err(ChatRunError::Preferences { .. })
+            Err(ChatError::Preferences { .. })
         ));
         let dir_path = dir.path().join("not-a-file");
         std::fs::create_dir(&dir_path).unwrap();
-        assert!(matches!(
-            load_store(&dir_path),
-            Err(ChatRunError::Io { .. })
-        ));
+        assert!(matches!(load_store(&dir_path), Err(ChatError::Io { .. })));
 
-        // Serialized stores exceeding the size limit are refused before writing.
         let mut oversized = ChatPreferencesStore::default();
         oversized.profiles.insert(
             "default".into(),
@@ -580,10 +970,9 @@ mod tests {
         );
         assert!(matches!(
             save_store(&path, &oversized),
-            Err(ChatRunError::Preferences { .. })
+            Err(ChatError::Preferences { .. })
         ));
 
-        // Unchanged model and non-persistable ports are no-ops.
         let clean_path = preferences_path(&dir.path().join("clean.sqlite"));
         persist_profile(
             &clean_path,
@@ -607,7 +996,6 @@ mod tests {
         let ports = sample_ports();
         let empty = WorkflowArguments::default();
 
-        // Falls back to schema defaults when no explicit value or env var exists.
         assert_eq!(
             resolve_display_model(&schema, &ports, &empty, |_| None).as_deref(),
             Some("your-model")
@@ -617,7 +1005,6 @@ mod tests {
         assert_eq!(default_endpoint.base_url, "https://api.openai.com/v1");
         assert_eq!(default_endpoint.api_key, None);
 
-        // Picks up env-bound api_key and ignores empty base_url.
         let env_endpoint = resolve_model_list_endpoint(&schema, &ports, &empty, |name| {
             (name == "OPENAI_API_KEY").then(|| OsString::from("env-token"))
         })
@@ -630,7 +1017,6 @@ mod tests {
         )]));
         assert!(resolve_model_list_endpoint(&schema, &ports, &blank_base, |_| None).is_none());
 
-        // Saved secret or ill-typed entries are ignored during merge.
         let saved_with_secret = ProfilePreferences {
             parameters: BTreeMap::from([
                 ("params.api_key".into(), json!("leaked-in-file")),
@@ -680,5 +1066,84 @@ mod tests {
             validate_launch_parameters(&schema, Some(&ports), &WorkflowArguments::default())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn model_selection_discovers_lists_switches_and_persists_models_natively() {
+        let server = Server::start_models(vec![
+            Reply::models(json!([
+                {"id": "first-model", "context_window": 131072},
+                {"id": "second-model", "context_window": 65536}
+            ])),
+            Reply::models(json!([
+                {"id": "first-model", "context_window": 131072},
+                {"id": "second-model", "context_window": 65536}
+            ])),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("chat.sqlite");
+        let contract = model_selectable_contract();
+        let explicit = WorkflowArguments(BTreeMap::from([
+            (
+                "params.base_url".into(),
+                ValueRef::from(server.base_url.as_str()),
+            ),
+            ("params.api_key".into(), ValueRef::from("sk-test")),
+        ]));
+
+        let mut selection =
+            ModelSelection::prepare(&db_path, "default", &contract, &explicit).unwrap();
+        assert!(selection.supports_model_selection());
+        assert!(selection.needs_default_model());
+        assert!(!preferences_path(&db_path).exists());
+
+        selection.commit_startup_preferences().unwrap();
+        assert!(preferences_path(&db_path).exists());
+
+        let discovered = selection.discover_default_model();
+        assert_eq!(discovered.model.as_deref(), Some("first-model"));
+        assert_eq!(discovered.warning, None);
+        assert!(!selection.needs_default_model());
+        assert_eq!(selection.display_model().as_deref(), Some("first-model"));
+
+        let listed = selection.list_models().unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[1].id, "second-model");
+
+        let selected = selection.select_model("second-model").unwrap();
+        assert_eq!(selected.model.as_deref(), Some("second-model"));
+        assert_eq!(selected.warning, None);
+        assert!(selection.select_model("   ").is_err());
+
+        // Re-preparing without explicit parameters reuses saved base_url and second-model.
+        let reopened = ModelSelection::prepare(
+            &db_path,
+            "default",
+            &contract,
+            &WorkflowArguments::default(),
+        )
+        .unwrap();
+        assert!(!reopened.needs_default_model());
+        assert_eq!(reopened.display_model().as_deref(), Some("second-model"));
+    }
+
+    #[test]
+    fn model_selection_cancellation_aborts_default_discovery_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("chat.sqlite");
+        let contract = model_selectable_contract();
+        let mut selection = ModelSelection::prepare(
+            &db_path,
+            "default",
+            &contract,
+            &WorkflowArguments::default(),
+        )
+        .unwrap();
+        let cancel = selection.cancellation();
+        cancel.cancel();
+        assert!(cancel.is_cancelled());
+        let outcome = selection.discover_default_model();
+        assert_eq!(outcome.model, None);
+        assert_eq!(outcome.warning, None);
     }
 }

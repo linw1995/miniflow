@@ -746,7 +746,7 @@ struct ChatView {
     supports_model_selection: bool,
     active_model: Option<String>,
     loading_default_model: bool,
-    models: Option<Vec<mfn_llm::ModelInfo>>,
+    models: Option<Vec<mf_chat::ModelInfo>>,
     models_error: Option<String>,
     model_filter: String,
     pending: Option<Option<u64>>,
@@ -1546,7 +1546,7 @@ impl ChatView {
         }
         false
     }
-    fn filtered_models(&self) -> Vec<&mfn_llm::ModelInfo> {
+    fn filtered_models(&self) -> Vec<&mf_chat::ModelInfo> {
         let Some(models) = &self.models else {
             return Vec::new();
         };
@@ -4266,12 +4266,12 @@ mod tests {
         // Receive provider models and verify badges + current highlight.
         view.event(
             ChatEvent::Models(Ok(vec![
-                mfn_llm::ModelInfo {
+                mf_chat::ModelInfo {
                     id: "model-alpha".into(),
                     context_window: Some(128_000),
                     ..Default::default()
                 },
-                mfn_llm::ModelInfo {
+                mf_chat::ModelInfo {
                     id: "model-beta".into(),
                     name: Some("Beta Fast".into()),
                     context_window: Some(64_000),
@@ -4396,15 +4396,15 @@ mod tests {
         view.active_model = Some("m1".into());
         view.event(
             ChatEvent::Models(Ok(vec![
-                mfn_llm::ModelInfo {
+                mf_chat::ModelInfo {
                     id: "m1".into(),
                     ..Default::default()
                 },
-                mfn_llm::ModelInfo {
+                mf_chat::ModelInfo {
                     id: "m2".into(),
                     ..Default::default()
                 },
-                mfn_llm::ModelInfo {
+                mf_chat::ModelInfo {
                     id: "m3".into(),
                     ..Default::default()
                 },
