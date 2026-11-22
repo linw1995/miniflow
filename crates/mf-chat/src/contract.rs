@@ -111,6 +111,13 @@ pub use recovery::{
     UncommittedCompletion,
 };
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderParameterPorts {
+    pub model: String,
+    pub base_url: String,
+    pub api_key: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ChatContract {
     pub parameters: WorkflowInputSchema,
@@ -250,6 +257,45 @@ impl ChatContract {
             inputs,
             alternatives,
         })
+    }
+
+    /// Locates unambiguous startup parameter ports for provider endpoint and model selection.
+    pub fn provider_parameter_ports(&self) -> Option<ProviderParameterPorts> {
+        for (model_name, base_url_name, api_key_name) in [
+            ("model", "base_url", "api_key"),
+            ("llm_model", "llm_base_url", "llm_api_key"),
+        ] {
+            let Ok(Some(model)) = self.unique_string_parameter(model_name) else {
+                continue;
+            };
+            let Ok(Some(base_url)) = self.unique_string_parameter(base_url_name) else {
+                continue;
+            };
+            let Ok(api_key) = self.unique_string_parameter(api_key_name) else {
+                continue;
+            };
+            return Some(ProviderParameterPorts {
+                model,
+                base_url,
+                api_key,
+            });
+        }
+        None
+    }
+
+    fn unique_string_parameter(&self, name: &str) -> Result<Option<String>, ()> {
+        let mut candidates = self
+            .parameters
+            .inputs
+            .iter()
+            .filter_map(|(node, ports)| ports.get(name).map(|port| (node, port)));
+        let Some((node, port)) = candidates.next() else {
+            return Ok(None);
+        };
+        if candidates.next().is_some() || port.value_type != mf_runtime::ValueType::String {
+            return Err(());
+        }
+        Ok(Some(mf_runtime::output_id(node, name)))
     }
 
     /// Reuses unambiguous public provider inputs; returned title facts decide actual composition.
@@ -629,5 +675,74 @@ mod output_tests {
         ));
         assert!(decoder.result().is_none());
         assert!(decoder.finish().is_err());
+    }
+
+    #[test]
+    fn provider_parameter_ports_recognizes_standard_and_llm_prefixed_triples() {
+        let contract_with_inputs = |inputs: serde_json::Value| ChatContract {
+            parameters: serde_json::from_value(json!({ "inputs": inputs, "stdin": {} })).unwrap(),
+            answer_stream: false,
+            tool_call_delta_stream: false,
+            streaming: false,
+            inputs: BTreeMap::new(),
+            alternatives: ResultAlternatives::Append,
+        };
+
+        let standard = contract_with_inputs(json!({
+            "params": {
+                "model": {"type": "string", "required": true},
+                "base_url": {"type": "string", "required": true},
+                "api_key": {"type": "string", "required": false}
+            }
+        }));
+        assert_eq!(
+            standard.provider_parameter_ports(),
+            Some(ProviderParameterPorts {
+                model: "params.model".into(),
+                base_url: "params.base_url".into(),
+                api_key: Some("params.api_key".into()),
+            })
+        );
+
+        let keyless_prefixed = contract_with_inputs(json!({
+            "params": {
+                "llm_model": {"type": "string", "required": true},
+                "llm_base_url": {"type": "string", "required": true}
+            }
+        }));
+        assert_eq!(
+            keyless_prefixed.provider_parameter_ports(),
+            Some(ProviderParameterPorts {
+                model: "params.llm_model".into(),
+                base_url: "params.llm_base_url".into(),
+                api_key: None,
+            })
+        );
+
+        let ambiguous = contract_with_inputs(json!({
+            "a": {"model": {"type": "string", "required": true}},
+            "b": {
+                "model": {"type": "string", "required": true},
+                "base_url": {"type": "string", "required": true}
+            }
+        }));
+        assert_eq!(ambiguous.provider_parameter_ports(), None);
+
+        let missing_base_url = contract_with_inputs(json!({
+            "params": {"model": {"type": "string", "required": true}}
+        }));
+        assert_eq!(missing_base_url.provider_parameter_ports(), None);
+
+        let ambiguous_api_key = contract_with_inputs(json!({
+            "params": {
+                "model": {"type": "string", "required": true},
+                "base_url": {"type": "string", "required": true},
+                "api_key": {"type": "string", "required": false}
+            },
+            "other": {
+                "api_key": {"type": "string", "required": false}
+            }
+        }));
+        assert_eq!(ambiguous_api_key.provider_parameter_ports(), None);
     }
 }

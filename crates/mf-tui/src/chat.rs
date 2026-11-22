@@ -7,7 +7,10 @@ use crate::{
 use mf_chat::contract::{
     ChatContract, CompletionState, ConversationExit, ReconciledCompletion, TurnExit,
 };
-use mf_chat::{ChatDatabase, Invocation, MessagePage, Session, SessionPage, UncommittedCompletion};
+use mf_chat::{
+    ChatDatabase, Invocation, MessagePage, ModelInfo, ModelSelection, ModelSelectionCancellation,
+    Session, SessionPage, UncommittedCompletion,
+};
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
     io,
@@ -92,7 +95,15 @@ impl ChatLaunch {
         let runner =
             PreparedRunner::load(executable, mf_chat::contract::MAX_RECOVERY_BYTES as u64)?;
         let contract = ChatContract::from_manifest(runner.manifest())?;
-        let parameters = options.run.workflow_arguments(&contract.parameters)?;
+        let parameters = options
+            .run
+            .parsed_workflow_arguments(&contract.parameters)?;
+        ModelSelection::prepare(
+            &options.database_path,
+            &options.profile,
+            &contract,
+            &parameters,
+        )?;
         Ok(Self {
             runner,
             contract,
@@ -110,6 +121,10 @@ pub enum ChatCommand {
         session_id: String,
         before: Option<i64>,
     },
+    ListModels,
+    SelectModel {
+        model: String,
+    },
     Submit {
         session_id: Option<String>,
         prompt: String,
@@ -126,6 +141,12 @@ pub enum ChatEvent {
     Loaded {
         session: Session,
         page: MessagePage,
+    },
+    Models(Result<Vec<ModelInfo>, String>),
+    ModelSelected {
+        model: Option<String>,
+        automatic: bool,
+        warning: Option<String>,
     },
     Submitted {
         session: Session,
@@ -158,6 +179,10 @@ pub struct ChatController {
     preview: Arc<Mutex<LivePreview>>,
     preview_revision: AtomicU64,
     presented_invocation: Mutex<Option<Invocation>>,
+    supports_model_selection: bool,
+    initial_model: Option<String>,
+    loading_default_model: bool,
+    model_selection_cancel: ModelSelectionCancellation,
     closed: Arc<AtomicBool>,
     busy: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
@@ -166,6 +191,21 @@ pub struct ChatController {
 impl ChatController {
     pub fn open(launch: ChatLaunch) -> Result<Self, ChatRunError> {
         let database = Arc::new(ChatDatabase::open(&launch.options.database_path)?);
+        let mut model_selection = ModelSelection::prepare(
+            database.path(),
+            &launch.options.profile,
+            &launch.contract,
+            &launch.parameters,
+        )?;
+        model_selection.commit_startup_preferences()?;
+        let supports_model_selection = model_selection.supports_model_selection();
+        let loading_default_model = model_selection.needs_default_model();
+        let initial_model = if loading_default_model {
+            None
+        } else {
+            model_selection.display_model()
+        };
+        let model_selection_cancel = model_selection.cancellation();
         let (commands, input) = mpsc::sync_channel(QUEUE_CAPACITY);
         let (output, events) = mpsc::sync_channel(QUEUE_CAPACITY);
         let closed = Arc::new(AtomicBool::new(false));
@@ -174,6 +214,7 @@ impl ChatController {
         let preview = Arc::new(Mutex::new(LivePreview::default()));
         let controller = Controller {
             launch: Arc::new(launch),
+            model_selection,
             database: Arc::clone(&database),
             input,
             output,
@@ -197,11 +238,24 @@ impl ChatController {
             preview,
             preview_revision: AtomicU64::new(0),
             presented_invocation: Mutex::new(None),
+            supports_model_selection,
+            initial_model,
+            loading_default_model,
+            model_selection_cancel,
             closed,
             busy,
             cancel,
             worker: Some(worker),
         })
+    }
+    pub fn supports_model_selection(&self) -> bool {
+        self.supports_model_selection
+    }
+    pub fn initial_model(&self) -> Option<&str> {
+        self.initial_model.as_deref()
+    }
+    pub fn loading_default_model(&self) -> bool {
+        self.loading_default_model
     }
     pub fn send(&self, command: ChatCommand) -> Result<(), ChatRunError> {
         ensure!(!self.closed.load(Ordering::Acquire), ClosedSnafu);
@@ -233,6 +287,7 @@ impl ChatController {
     }
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Release);
+        self.model_selection_cancel.cancel_active();
     }
     pub fn try_event(&self) -> Option<ChatEvent> {
         let event = self
@@ -283,6 +338,7 @@ impl ChatController {
     }
     fn join_worker(&mut self) -> Result<(), ChatRunError> {
         self.closed.store(true, Ordering::Release);
+        self.model_selection_cancel.cancel();
         if let Some(worker) = self.worker.take() {
             match worker.join() {
                 Ok(result) => result?,
@@ -308,6 +364,7 @@ struct Retained {
 }
 struct Controller {
     launch: Arc<ChatLaunch>,
+    model_selection: ModelSelection,
     database: Arc<ChatDatabase>,
     input: Receiver<ChatCommand>,
     output: SyncSender<ChatEvent>,
@@ -317,9 +374,22 @@ struct Controller {
     retained: Option<Retained>,
     preview: Arc<Mutex<LivePreview>>,
 }
+
 impl Controller {
     fn emit(&self, event: ChatEvent) {
         emit(&self.output, &self.closed, event);
+    }
+
+    fn discover_default_model(&mut self) {
+        let update = self.model_selection.discover_default_model();
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        self.emit(ChatEvent::ModelSelected {
+            model: update.model,
+            automatic: true,
+            warning: update.warning,
+        });
     }
 }
 
@@ -336,6 +406,9 @@ fn emit(output: &SyncSender<ChatEvent>, closed: &AtomicBool, mut event: ChatEven
 
 impl Controller {
     fn run(mut self) -> Result<(), ChatRunError> {
+        if self.model_selection.needs_default_model() && !self.closed.load(Ordering::Acquire) {
+            self.discover_default_model();
+        }
         while !self.closed.load(Ordering::Acquire) {
             match self.input.recv_timeout(Duration::from_millis(50)) {
                 Ok(command) => {
@@ -382,6 +455,24 @@ impl Controller {
                 let mut page = self.database.messages(&session_id, PAGE_SIZE, after)?;
                 page.messages.retain(|record| record.message.sequence < end);
                 self.emit(ChatEvent::Loaded { session, page });
+            }
+            ChatCommand::ListModels => {
+                let result = self
+                    .model_selection
+                    .list_models()
+                    .map_err(|error| error.to_string());
+                if !self.closed.load(Ordering::Acquire) {
+                    self.emit(ChatEvent::Models(result));
+                }
+            }
+            ChatCommand::SelectModel { model } => {
+                ensure!(self.retained.is_none(), BusySnafu);
+                let update = self.model_selection.select_model(&model)?;
+                self.emit(ChatEvent::ModelSelected {
+                    model: update.model,
+                    automatic: false,
+                    warning: update.warning,
+                });
             }
             ChatCommand::Submit { session_id, prompt } => {
                 ensure!(
@@ -432,7 +523,7 @@ impl Controller {
     ) -> Result<(), ChatRunError> {
         let parameters = mf_runtime::resolve_workflow_inputs(
             &self.launch.contract.parameters,
-            &self.launch.parameters,
+            self.model_selection.effective_parameters(),
             |name| std::env::var_os(name),
         )?;
         let invocation = Invocation::new(&session.id);

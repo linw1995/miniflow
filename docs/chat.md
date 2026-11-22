@@ -619,6 +619,7 @@ resources on session change, eviction, or exit.
 | Insert a newline | Enter while editing |
 | Browse messages / return to editing | Esc / i |
 | Open commands | Ctrl+P |
+| Select model (when exposed by chatflow) | Ctrl+L |
 | Toggle execution panel | Ctrl+E |
 | Select next / previous tool group while browsing | j / k, or Tab / Shift+Tab |
 | Manually expand / collapse selected tool group | Space while browsing, or Ctrl+T |
@@ -626,7 +627,16 @@ resources on session change, eviction, or exit.
 | Cancel current execution | Ctrl+C |
 | Quit after cleanup | Ctrl+Q |
 
-Pickers use arrows and Enter; Esc closes them. Save/discard actions operate on the retained full
+Pickers use arrows and Enter; Esc closes them. For chatflows exposing unambiguous provider startup
+parameters (`model`/`base_url` or `llm_model`/`llm_base_url`, plus optional `api_key`/`llm_api_key`),
+the header displays the active model, `Ctrl+L` opens an incremental-filter model selector backed by
+the `llm.list_models` node (`GET {base_url}/models`), and non-secret startup parameters plus the selected model are persisted per
+`--chat-profile` in a sibling `<chat-db>.preferences.json` file (mode `0600` on Unix; secret
+parameters such as `api_key` are never persisted). Subsequent launches reuse saved non-secret
+parameters when omitted from the CLI; explicit CLI arguments always override and update saved
+preferences. If no model is configured by CLI arguments, saved preferences, or an environment
+binding (or if the CLI switches `base_url` without specifying a model), startup queries `/models`
+once and defaults to the first model returned by the provider. Save/discard actions operate on the retained full
 result without running generation. Unsaved display additions remain visible across user-only reloads;
 context replacement is marked pending, not published. Failed records stay visibly unsuccessful,
 including failed results with tool records or no assistant answer. Saving a failed audit result does
