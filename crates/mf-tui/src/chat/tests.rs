@@ -918,8 +918,18 @@ fn controller_discovers_first_model_lists_switches_and_reuses_preferences() {
         ]
     })
     .to_string();
-    let server =
-        MockModelsServer::start(vec![(200, body.clone()), (200, body.clone()), (200, body)]);
+    let unlisted_body = json!({
+        "data": [
+            {"id": "unlisted-model", "context_window": 262_144}
+        ]
+    })
+    .to_string();
+    let server = MockModelsServer::start(vec![
+        (200, body.clone()),
+        (200, body.clone()),
+        (200, body),
+        (200, unlisted_body),
+    ]);
     let root = tempfile::tempdir().unwrap();
     let manifest = model_selectable_manifest();
     let mut first_launch = launch_runner(root.path(), &manifest, "#!/bin/sh\nexit 0\n");
@@ -1006,6 +1016,37 @@ fn controller_discovers_first_model_lists_switches_and_reuses_preferences() {
         } => {
             assert_eq!(model, "second-model");
             assert_eq!(context_window, Some(65_536));
+        }
+        other => panic!("unexpected event: {}", std::any::type_name_of_val(&other)),
+    }
+
+    // Selecting an uncached model emits ModelSelected immediately and probes its window.
+    reopened
+        .send(ChatCommand::SelectModel {
+            model: "unlisted-model".into(),
+        })
+        .unwrap();
+    match next(&reopened) {
+        ChatEvent::ModelSelected {
+            model,
+            context_window,
+            automatic,
+            warning,
+        } => {
+            assert_eq!(model.as_deref(), Some("unlisted-model"));
+            assert_eq!(context_window, None);
+            assert!(!automatic);
+            assert!(warning.is_none());
+        }
+        other => panic!("unexpected event: {}", std::any::type_name_of_val(&other)),
+    }
+    match next(&reopened) {
+        ChatEvent::ContextWindow {
+            model,
+            context_window,
+        } => {
+            assert_eq!(model, "unlisted-model");
+            assert_eq!(context_window, Some(262_144));
         }
         other => panic!("unexpected event: {}", std::any::type_name_of_val(&other)),
     }

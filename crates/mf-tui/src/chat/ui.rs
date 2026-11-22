@@ -4628,24 +4628,19 @@ mod tests {
         let mut view = ChatView::new(launch.runner.description()).unwrap();
         let controller = ChatController::open(launch).unwrap();
 
-        // Model selected with 500k context window starts at 0.0%/500k for a new chat.
+        // Model selected before window discovery starts without a window, then updates on
+        // the matching ContextWindow event while ignoring stale models.
         view.supports_model_selection = true;
         view.event(
             ChatEvent::ModelSelected {
                 model: Some("model-500k".into()),
-                context_window: Some(500_000),
+                context_window: None,
                 automatic: true,
                 warning: None,
             },
             &controller,
         );
-        let initial = render(&view, 100, 30);
-        assert!(
-            initial.contains("New chat  ·  model-500k  ·  0.0%/500k"),
-            "{initial}"
-        );
-
-        // Stale ContextWindow event for another model is ignored.
+        assert_eq!(view.active_context_window, None);
         view.event(
             ChatEvent::ContextWindow {
                 model: "other-model".into(),
@@ -4653,7 +4648,20 @@ mod tests {
             },
             &controller,
         );
+        assert_eq!(view.active_context_window, None);
+        view.event(
+            ChatEvent::ContextWindow {
+                model: "model-500k".into(),
+                context_window: Some(500_000),
+            },
+            &controller,
+        );
         assert_eq!(view.active_context_window, Some(500_000));
+        let initial = render(&view, 100, 30);
+        assert!(
+            initial.contains("New chat  ·  model-500k  ·  0.0%/500k"),
+            "{initial}"
+        );
 
         // Committed append turn updates context usage to 61.4%/500k.
         let invocation = Invocation::new("session-1");
