@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-28",
+  "version": "2026-11-13",
   "dependencies": {
     "chat": {
       "package": "mf-chat",
@@ -181,6 +181,182 @@
       }
     },
     {
+      "id": "resolved_title_usages",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "title",
+              "port": "usages"
+            },
+            {
+              "node": "no_title_usages",
+              "port": "value"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "prepare_compact",
+      "kind": "mf_chat.compact.prepare",
+      "inputs": {
+        "completed": {
+          "from": {
+            "node": "route",
+            "port": "completed"
+          }
+        }
+      }
+    },
+    {
+      "id": "compact_route",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "yes",
+            "condition": {
+              "source": {
+                "output": "prepare_compact.enabled",
+                "path": ""
+              },
+              "operator": "eq",
+              "value": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "compact",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "compact"
+      },
+      "inputs": {
+        "params.messages": {
+          "from": {
+            "node": "prepare_compact",
+            "port": "messages"
+          }
+        },
+        "params.append_messages": {
+          "from": {
+            "node": "prepare_compact",
+            "port": "append_messages"
+          }
+        },
+        "params.usages": {
+          "from": {
+            "node": "prepare_compact",
+            "port": "usages"
+          }
+        },
+        "params.enabled": {
+          "from": {
+            "node": "prepare_compact",
+            "port": "enabled"
+          }
+        },
+        "params.context_window": {
+          "from": {
+            "node": "prepare_compact",
+            "port": "context_window"
+          }
+        },
+        "params.reserve_tokens": {
+          "from": {
+            "node": "prepare_compact",
+            "port": "reserve_tokens"
+          }
+        },
+        "params.keep_recent_tokens": {
+          "from": {
+            "node": "prepare_compact",
+            "port": "keep_recent_tokens"
+          }
+        },
+        "params.custom_instructions": {
+          "from": {
+            "node": "prepare_compact",
+            "port": "custom_instructions"
+          }
+        },
+        "params.model": {
+          "from": {
+            "node": "prepare_compact",
+            "port": "model"
+          }
+        },
+        "params.base_url": {
+          "from": {
+            "node": "prepare_compact",
+            "port": "base_url"
+          }
+        },
+        "params.api_key": {
+          "from": {
+            "node": "prepare_compact",
+            "port": "api_key"
+          }
+        }
+      }
+    },
+    {
+      "id": "compact_applied",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "yes",
+            "condition": {
+              "source": {
+                "output": "compact.compacted",
+                "path": ""
+              },
+              "operator": "eq",
+              "value": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "compacted_messages",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "from": {
+            "node": "compact",
+            "port": "messages"
+          }
+        }
+      }
+    },
+    {
+      "id": "unchanged_context",
+      "kind": "builtin.constant",
+      "config": {
+        "value": null
+      }
+    },
+    {
+      "id": "no_compact_messages",
+      "kind": "builtin.constant",
+      "config": {
+        "value": null
+      }
+    },
+    {
+      "id": "no_compact_usages",
+      "kind": "builtin.constant",
+      "config": {
+        "value": []
+      }
+    },
+    {
       "id": "finish",
       "kind": "mf_chat.conversation.finish",
       "inputs": {
@@ -201,13 +377,35 @@
           ]
         },
         "title_usages": {
+          "from": {
+            "node": "resolved_title_usages",
+            "port": "value"
+          }
+        },
+        "compacted_messages": {
           "exclusive": [
             {
-              "node": "title",
+              "node": "compacted_messages",
+              "port": "value"
+            },
+            {
+              "node": "unchanged_context",
+              "port": "value"
+            },
+            {
+              "node": "no_compact_messages",
+              "port": "value"
+            }
+          ]
+        },
+        "compaction_usages": {
+          "exclusive": [
+            {
+              "node": "compact",
               "port": "usages"
             },
             {
-              "node": "no_title_usages",
+              "node": "no_compact_usages",
               "port": "value"
             }
           ]
@@ -238,6 +436,9 @@
   "flows": {
     "title": {
       "builtin": "mf-chat.chat-title"
+    },
+    "compact": {
+      "builtin": "mf-chat.chat-compact"
     }
   },
   "edges": [
@@ -273,6 +474,43 @@
       "from_node": "title_available",
       "from_output": "yes",
       "to_node": "selected_title"
+    },
+    {
+      "from_node": "resolved_title_usages",
+      "to_node": "prepare_compact"
+    },
+    {
+      "from_node": "prepare_compact",
+      "to_node": "compact_route"
+    },
+    {
+      "from_node": "compact_route",
+      "from_output": "yes",
+      "to_node": "compact"
+    },
+    {
+      "from_node": "compact_route",
+      "from_output": "else",
+      "to_node": "no_compact_messages"
+    },
+    {
+      "from_node": "compact_route",
+      "from_output": "else",
+      "to_node": "no_compact_usages"
+    },
+    {
+      "from_node": "compact",
+      "to_node": "compact_applied"
+    },
+    {
+      "from_node": "compact_applied",
+      "from_output": "yes",
+      "to_node": "compacted_messages"
+    },
+    {
+      "from_node": "compact_applied",
+      "from_output": "else",
+      "to_node": "unchanged_context"
     }
   ]
 }

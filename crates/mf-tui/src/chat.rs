@@ -182,6 +182,7 @@ impl ChatController {
             cancel: Arc::clone(&cancel),
             retained: None,
             preview: preview.clone(),
+            context_windows: mf_chat::ModelContextWindowCache::default(),
         };
         let worker = thread::Builder::new()
             .name("mf-chat-controller".into())
@@ -316,6 +317,7 @@ struct Controller {
     cancel: Arc<AtomicBool>,
     retained: Option<Retained>,
     preview: Arc<Mutex<LivePreview>>,
+    context_windows: mf_chat::ModelContextWindowCache,
 }
 impl Controller {
     fn emit(&self, event: ChatEvent) {
@@ -496,7 +498,7 @@ impl Controller {
                 preview.lock().unwrap().apply(event)
             })
         });
-        let resolution = mf_chat::workflow::run_conversation_with_preview(
+        let resolution = mf_chat::workflow::run_conversation_with_context_windows(
             &self.database,
             request,
             Arc::new(backend),
@@ -504,6 +506,7 @@ impl Controller {
             true,
             None,
             preview_consumer,
+            self.context_windows.clone(),
         );
         let outcome = captured
             .lock()
@@ -617,6 +620,12 @@ impl mf_chat::ConversationBackend for ExternalBackend {
         self.launch
             .contract
             .builtin_title_parameters(&self.parameters)
+    }
+
+    fn builtin_compaction_parameters(&self) -> Option<mf_runtime::WorkflowArguments> {
+        self.launch
+            .contract
+            .builtin_compaction_parameters(&self.parameters)
     }
 
     fn invoke(
