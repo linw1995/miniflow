@@ -1,9 +1,15 @@
 pub mod call;
 pub mod flows;
+pub mod model_info;
 pub mod tools;
 pub use call::{
     CallOutcome, ToolCall, ToolCallDelta, ToolCallEvent, ToolDefinition, ToolResult,
     TranscriptError, TranscriptMode, validate_transcript,
+};
+pub use model_info::{
+    LIST_MODELS_KIND, MODEL_INFO_KIND, ModelInfo, ModelInfoInputs, ModelInfoOutputs,
+    ModelInfoQuery, ModelListInputs, ModelListOutputs, ModelListQuery, list_models,
+    prepare_list_models, prepare_model_info, query_model_info,
 };
 mod streaming;
 #[cfg(feature = "test-support")]
@@ -317,6 +323,28 @@ impl PreparedConfig {
     }
 }
 
+fn validate_base_url(field: &str, value: &str) -> Result<String, LlmConfigError> {
+    let base = url::Url::parse(value).context(BaseUrlSnafu)?;
+    ensure!(
+        matches!(base.scheme(), "http" | "https") && base.host_str().is_some(),
+        InvalidConfigSnafu {
+            field,
+            requirement: "an absolute HTTP or HTTPS URL",
+        }
+    );
+    ensure!(
+        base.username().is_empty()
+            && base.password().is_none()
+            && base.query().is_none()
+            && base.fragment().is_none(),
+        InvalidConfigSnafu {
+            field,
+            requirement: "no embedded credentials, query, or fragment",
+        }
+    );
+    Ok(base.as_str().trim_end_matches('/').to_owned())
+}
+
 fn validate_field(field: &str, value: &ValueRef) -> Result<(), LlmConfigError> {
     let requirement = match field {
         "attribution" if value.contains_secret() => Some("public accounting labels"),
@@ -346,24 +374,7 @@ fn validate_field(field: &str, value: &ValueRef) -> Result<(), LlmConfigError> {
         }
         "max_tokens" | "timeout_ms" if value.as_f64() == Some(0.0) => Some("a positive integer"),
         "base_url" => {
-            let base = url::Url::parse(value.as_str().unwrap()).context(BaseUrlSnafu)?;
-            ensure!(
-                matches!(base.scheme(), "http" | "https") && base.host_str().is_some(),
-                InvalidConfigSnafu {
-                    field,
-                    requirement: "an absolute HTTP or HTTPS URL",
-                }
-            );
-            ensure!(
-                base.username().is_empty()
-                    && base.password().is_none()
-                    && base.query().is_none()
-                    && base.fragment().is_none(),
-                InvalidConfigSnafu {
-                    field,
-                    requirement: "no embedded credentials, query, or fragment",
-                }
-            );
+            validate_base_url(field, value.as_str().unwrap())?;
             None
         }
         _ => None,
@@ -372,6 +383,40 @@ fn validate_field(field: &str, value: &ValueRef) -> Result<(), LlmConfigError> {
         return InvalidConfigSnafu { field, requirement }.fail();
     }
     Ok(())
+}
+
+fn build_http_client() -> Result<ReqwestClient, reqwest::Error> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        // A prepared node can outlive the reactor of an earlier execution scope.
+        .pool_max_idle_per_host(0)
+        .build()
+        .map(ReqwestClient::from)
+}
+
+fn resolve_api_key(
+    api_key: Option<&Shared<String>>,
+    api_key_env: &str,
+) -> Result<String, LlmExecutionError> {
+    if let Some(key) = api_key {
+        Ok(key
+            .value()
+            .as_str()
+            .expect("validated credential")
+            .to_owned())
+    } else {
+        let key = std::env::var(api_key_env).context(CredentialsSnafu {
+            variable: api_key_env,
+        })?;
+        ensure!(
+            !key.is_empty(),
+            EmptyCredentialsSnafu {
+                variable: api_key_env,
+            }
+        );
+        Ok(key)
+    }
 }
 
 /// Validates literals and template syntax without resolving runtime values.
@@ -432,6 +477,8 @@ pub enum LlmExecutionError {
     EncodeRequest { source: serde_json::Error },
     #[snafu(display("could not normalize LLM response metadata"))]
     NormalizeResponse { source: serde_json::Error },
+    #[snafu(display("LLM model listing is invalid JSON"))]
+    ModelInfoResponse { source: serde_json::Error },
     #[snafu(transparent)]
     Future {
         source: mf_runtime::FutureExecutionError,
@@ -462,16 +509,7 @@ struct LlmNode {
 impl LlmNode {
     fn client(&self) -> Result<ReqwestClient, LlmExecutionError> {
         self.client
-            .get_or_init(|| {
-                reqwest::Client::builder()
-                    .redirect(reqwest::redirect::Policy::none())
-                    .retry(reqwest::retry::never())
-                    // A prepared node can outlive the reactor of an earlier execution scope.
-                    .pool_max_idle_per_host(0)
-                    .build()
-                    .map(ReqwestClient::from)
-                    .map_err(Arc::new)
-            })
+            .get_or_init(|| build_http_client().map_err(Arc::new))
             .as_ref()
             .cloned()
             .map_err(Arc::clone)
@@ -574,23 +612,7 @@ impl LlmNode {
         emitter: &mut TypedEmitter<'_, '_, LlmEmission>,
         deadline: Instant,
     ) -> Result<(Result<CompletionResponse, LlmExecutionError>, CallUsage), LlmExecutionError> {
-        let key = if let Some(key) = &config.api_key {
-            key.value()
-                .as_str()
-                .expect("validated credential")
-                .to_owned()
-        } else {
-            let key = std::env::var(&config.api_key_env).context(CredentialsSnafu {
-                variable: &config.api_key_env,
-            })?;
-            ensure!(
-                !key.is_empty(),
-                EmptyCredentialsSnafu {
-                    variable: &config.api_key_env
-                }
-            );
-            key
-        };
+        let key = resolve_api_key(config.api_key.as_ref(), &config.api_key_env)?;
         let keyless = key.is_empty();
         let mut openai = OpenAIConfig::new(key).with_base_url(&config.base_url);
         if keyless {
