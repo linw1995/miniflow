@@ -56,6 +56,13 @@ impl Reply {
             "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}
         }))
     }
+
+    pub fn models(models: Value) -> Self {
+        Self::json(json!({
+            "object": "list",
+            "data": models
+        }))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -67,21 +74,37 @@ pub struct Request {
 pub struct Server {
     pub base_url: String,
     requests: Arc<Mutex<Vec<Request>>>,
+    model_requests: Arc<Mutex<Vec<Request>>>,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
 
 impl Server {
     pub fn start(replies: Vec<Reply>) -> Self {
+        Self::spawn(replies, None)
+    }
+
+    pub fn start_with_models(replies: Vec<Reply>, model_replies: Vec<Reply>) -> Self {
+        Self::spawn(replies, Some(model_replies))
+    }
+
+    pub fn start_models(model_replies: Vec<Reply>) -> Self {
+        Self::spawn(Vec::new(), Some(model_replies))
+    }
+
+    fn spawn(replies: Vec<Reply>, model_replies: Option<Vec<Reply>>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let base_url = format!("http://{}/prefix/v1", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = requests.clone();
+        let model_requests = Arc::new(Mutex::new(Vec::new()));
+        let captured_models = model_requests.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let shutdown = stop.clone();
         let worker = thread::spawn(move || {
             let mut index = 0;
+            let mut model_index = 0;
             while !shutdown.load(Ordering::SeqCst) {
                 let (mut socket, _) = match listener.accept() {
                     Ok(connection) => connection,
@@ -113,27 +136,63 @@ impl Server {
                                 name.eq_ignore_ascii_case("content-length")
                                     .then(|| value.trim().parse().unwrap())
                             })
-                            .unwrap();
+                            .unwrap_or(0);
                         if bytes.len() >= offset + 4 + length {
-                            break Some(Request {
-                                headers,
-                                body: serde_json::from_slice(
-                                    &bytes[offset + 4..offset + 4 + length],
-                                )
-                                .unwrap(),
-                            });
+                            let body = if length == 0 {
+                                Value::Null
+                            } else {
+                                serde_json::from_slice(&bytes[offset + 4..offset + 4 + length])
+                                    .unwrap()
+                            };
+                            break Some(Request { headers, body });
                         }
                     }
                 };
                 let Some(request) = request else { continue };
-                captured.lock().unwrap().push(request);
-                let reply = replies.get(index).cloned().unwrap_or_else(|| {
-                    let mut reply =
-                        Reply::json(json!({"error": {"message": "unexpected request"}}));
-                    reply.status = 500;
+                let is_models_request = request
+                    .headers
+                    .lines()
+                    .next()
+                    .and_then(|line| {
+                        let mut parts = line.split_whitespace();
+                        let method = parts.next()?;
+                        let path = parts.next()?;
+                        Some(method == "GET" && path.ends_with("/models"))
+                    })
+                    .unwrap_or(false);
+                let reply = if is_models_request {
+                    captured_models.lock().unwrap().push(request);
+                    match &model_replies {
+                        Some(list) => {
+                            let reply = list.get(model_index).cloned().unwrap_or_else(|| {
+                                let mut reply = Reply::json(
+                                    json!({"error": {"message": "unexpected models request"}}),
+                                );
+                                reply.status = 500;
+                                reply
+                            });
+                            model_index += 1;
+                            reply
+                        }
+                        None => {
+                            let mut reply = Reply::json(
+                                json!({"error": {"message": "models endpoint not configured"}}),
+                            );
+                            reply.status = 404;
+                            reply
+                        }
+                    }
+                } else {
+                    captured.lock().unwrap().push(request);
+                    let reply = replies.get(index).cloned().unwrap_or_else(|| {
+                        let mut reply =
+                            Reply::json(json!({"error": {"message": "unexpected request"}}));
+                        reply.status = 500;
+                        reply
+                    });
+                    index += 1;
                     reply
-                });
-                index += 1;
+                };
                 thread::sleep(reply.header_delay);
                 let content_type = if reply
                     .headers
@@ -179,6 +238,7 @@ impl Server {
         Self {
             base_url,
             requests,
+            model_requests,
             stop,
             worker: Some(worker),
         }
@@ -186,6 +246,10 @@ impl Server {
 
     pub fn requests(&self) -> Vec<Request> {
         self.requests.lock().unwrap().clone()
+    }
+
+    pub fn model_requests(&self) -> Vec<Request> {
+        self.model_requests.lock().unwrap().clone()
     }
 
     pub fn wait_for_requests(&self, count: usize) {
