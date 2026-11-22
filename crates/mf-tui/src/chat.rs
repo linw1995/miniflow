@@ -229,7 +229,6 @@ impl ChatController {
             cancel: Arc::clone(&cancel),
             retained: None,
             preview: preview.clone(),
-            context_windows: mf_chat::ModelContextWindowCache::default(),
         };
         let worker = thread::Builder::new()
             .name("mf-chat-controller".into())
@@ -380,7 +379,6 @@ struct Controller {
     cancel: Arc<AtomicBool>,
     retained: Option<Retained>,
     preview: Arc<Mutex<LivePreview>>,
-    context_windows: mf_chat::ModelContextWindowCache,
 }
 
 impl Controller {
@@ -629,7 +627,7 @@ impl Controller {
             true,
             None,
             preview_consumer,
-            self.context_windows.clone(),
+            self.model_selection.context_windows(),
         );
         let outcome = captured
             .lock()
