@@ -7,8 +7,8 @@ pub use call::{
     TranscriptError, TranscriptMode, validate_transcript,
 };
 pub use model_info::{
-    MODEL_INFO_KIND, ModelInfo, ModelInfoInputs, ModelInfoOutputs, ModelInfoQuery,
-    prepare_model_info, query_model_info,
+    MODEL_INFO_KIND, ModelInfo, ModelInfoInputs, ModelInfoOutputs, ModelInfoQuery, ModelListQuery,
+    list_models, prepare_model_info, query_model_info,
 };
 mod streaming;
 #[cfg(feature = "test-support")]

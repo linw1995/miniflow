@@ -5,7 +5,8 @@ use mf_runtime::{
     NodeValue, PortSpec, StreamCancellation, ValueType,
 };
 use mfn_llm::{
-    LlmExecutionError, MODEL_INFO_KIND, ModelInfoOutputs, ModelInfoQuery, query_model_info,
+    LlmExecutionError, MODEL_INFO_KIND, ModelInfoOutputs, ModelInfoQuery, ModelListQuery,
+    list_models, query_model_info,
 };
 use serde_json::json;
 use std::{error::Error, time::Duration};
@@ -287,6 +288,48 @@ fn model_info_node_fails_fast_on_missing_credentials_and_preserves_cancellation(
         .unwrap_err();
     assert!(error.to_string().contains("cancelled"), "{error}");
     assert!(server.model_requests().is_empty());
+}
+
+#[test]
+fn list_models_preserves_provider_order_normalizes_entries_and_deduplicates_ids() {
+    let server = Server::start_models(vec![Reply::models(json!([
+        {"id": ""},
+        {"id": "   "},
+        {"owned_by": "missing-id"},
+        {
+            "id": "first-model",
+            "name": "First Model",
+            "context_length": 131072,
+            "max_output_tokens": 8192
+        },
+        {
+            "id": "second-model",
+            "owned_by": "provider"
+        },
+        {
+            "id": "first-model",
+            "context_length": 4096
+        }
+    ]))]);
+    let mut query = ModelListQuery::new(&server.base_url);
+    query.api_key = Some("list-key".into());
+    let models = list_models(&query, &ExecutionContext::default()).unwrap();
+    assert_eq!(models.len(), 2);
+    assert_eq!(models[0].id, "first-model");
+    assert_eq!(models[0].name.as_deref(), Some("First Model"));
+    assert_eq!(models[0].context_window, Some(131_072));
+    assert_eq!(models[0].max_output_tokens, Some(8_192));
+    assert_eq!(models[1].id, "second-model");
+    assert_eq!(models[1].owned_by.as_deref(), Some("provider"));
+    assert_eq!(models[1].context_window, None);
+    let requests = server.model_requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .headers
+            .to_ascii_lowercase()
+            .contains("authorization: bearer list-key")
+    );
 }
 
 #[test]

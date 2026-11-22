@@ -47,6 +47,25 @@ pub struct ModelInfo {
     pub max_output_tokens: Option<i64>,
 }
 
+/// Parameters for a direct read-only `/models` listing.
+#[derive(Clone, Debug)]
+pub struct ModelListQuery {
+    pub base_url: String,
+    /// When `None` or empty, the request omits the `Authorization` header.
+    pub api_key: Option<String>,
+    pub timeout_ms: u64,
+}
+
+impl ModelListQuery {
+    pub fn new(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            api_key: None,
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+        }
+    }
+}
+
 /// Parameters for a direct read-only `/models` lookup.
 #[derive(Clone, Debug)]
 pub struct ModelInfoQuery {
@@ -205,6 +224,47 @@ fn shared_client() -> Result<ReqwestClient, LlmExecutionError> {
         .context(ClientInitializationSnafu)
 }
 
+/// Queries `GET {base_url}/models` once and returns all normalized models in provider order.
+///
+/// Entries without a nonblank string `id` are ignored, and duplicate IDs keep their first entry.
+pub fn list_models(
+    query: &ModelListQuery,
+    context: &ExecutionContext,
+) -> Result<Vec<ModelInfo>, LlmExecutionError> {
+    let client = shared_client()?;
+    list_models_with_client(&client, query, context)
+}
+
+fn list_models_with_client(
+    client: &ReqwestClient,
+    query: &ModelListQuery,
+    context: &ExecutionContext,
+) -> Result<Vec<ModelInfo>, LlmExecutionError> {
+    ensure!(
+        query.timeout_ms > 0,
+        InvalidConfigSnafu {
+            field: "timeout_ms",
+            requirement: "a positive integer",
+        }
+    );
+    let base_url = validate_base_url("base_url", &query.base_url)?;
+    let deadline = Instant::now()
+        .checked_add(Duration::from_millis(query.timeout_ms))
+        .context(DeadlineRangeSnafu)?;
+    context.check_future_limits(Some(deadline))?;
+    let endpoint = format!("{base_url}/models");
+    let api_key = query
+        .api_key
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let client = client.clone();
+    let result =
+        context.execute_future(fetch_models_list(client, endpoint, api_key), Some(deadline))??;
+    context.check_future_limits(Some(deadline))?;
+    Ok(result)
+}
+
 /// Queries `GET {base_url}/models` once and returns normalized metadata for `query.model`.
 ///
 /// Returns `Ok(None)` when the endpoint returns a valid listing that does not include
@@ -230,32 +290,14 @@ fn query_model_info_with_client(
             requirement: "a nonblank identifier",
         }
     );
-    ensure!(
-        query.timeout_ms > 0,
-        InvalidConfigSnafu {
-            field: "timeout_ms",
-            requirement: "a positive integer",
-        }
-    );
-    let base_url = validate_base_url("base_url", &query.base_url)?;
-    let deadline = Instant::now()
-        .checked_add(Duration::from_millis(query.timeout_ms))
-        .context(DeadlineRangeSnafu)?;
-    context.check_future_limits(Some(deadline))?;
-    let endpoint = format!("{base_url}/models");
-    let api_key = query
-        .api_key
-        .as_deref()
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned);
-    let model = query.model.clone();
-    let client = client.clone();
-    let result = context.execute_future(
-        fetch_model_info(client, endpoint, api_key, model),
-        Some(deadline),
-    )??;
-    context.check_future_limits(Some(deadline))?;
-    Ok(result)
+    let list_query = ModelListQuery {
+        base_url: query.base_url.clone(),
+        api_key: query.api_key.clone(),
+        timeout_ms: query.timeout_ms,
+    };
+    Ok(list_models_with_client(client, &list_query, context)?
+        .into_iter()
+        .find(|info| info.id == query.model))
 }
 
 fn transport_provider_error(error: rig_core::http_client::Error) -> LlmExecutionError {
@@ -269,12 +311,11 @@ fn transport_provider_error(error: rig_core::http_client::Error) -> LlmExecution
     .into_error(source)
 }
 
-async fn fetch_model_info(
+async fn fetch_models_list(
     client: ReqwestClient,
     endpoint: String,
     api_key: Option<String>,
-    model: String,
-) -> Result<Option<ModelInfo>, LlmExecutionError> {
+) -> Result<Vec<ModelInfo>, LlmExecutionError> {
     let mut builder = Request::get(&endpoint).header("accept", "application/json");
     if let Some(key) = api_key {
         builder = builder.header("authorization", format!("Bearer {key}"));
@@ -298,10 +339,10 @@ async fn fetch_model_info(
         );
         bytes.extend_from_slice(&chunk);
     }
-    parse_models_listing(&bytes, &model)
+    parse_models_list(&bytes)
 }
 
-fn parse_models_listing(bytes: &[u8], model: &str) -> Result<Option<ModelInfo>, LlmExecutionError> {
+fn parse_models_list(bytes: &[u8]) -> Result<Vec<ModelInfo>, LlmExecutionError> {
     let root: Value = serde_json::from_slice(bytes).context(ModelInfoResponseSnafu)?;
     let data = root
         .get("data")
@@ -309,10 +350,28 @@ fn parse_models_listing(bytes: &[u8], model: &str) -> Result<Option<ModelInfo>, 
         .context(InvalidResponseSnafu {
             requirement: "a JSON object with a data array",
         })?;
-    Ok(data
-        .iter()
-        .find(|entry| entry.get("id").and_then(Value::as_str) == Some(model))
-        .map(|entry| extract_model_info(entry, model)))
+    let mut seen = std::collections::BTreeSet::new();
+    let mut models = Vec::with_capacity(data.len());
+    for entry in data {
+        let Some(id) = entry
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+        else {
+            continue;
+        };
+        if seen.insert(id.to_owned()) {
+            models.push(extract_model_info(entry, id));
+        }
+    }
+    Ok(models)
+}
+
+#[cfg(test)]
+fn parse_models_listing(bytes: &[u8], model: &str) -> Result<Option<ModelInfo>, LlmExecutionError> {
+    Ok(parse_models_list(bytes)?
+        .into_iter()
+        .find(|info| info.id == model))
 }
 
 fn extract_model_info(entry: &Value, model_id: &str) -> ModelInfo {

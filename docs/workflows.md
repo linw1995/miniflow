@@ -1144,8 +1144,8 @@ feature disabled.
 
 #### Read-only model metadata lookup
 
-`mfn-llm` also registers the read-only task node `llm.model_info` and exports `mfn_llm::query_model_info` for querying
-provider-advertised model metadata from `GET {base_url}/models`.
+`mfn-llm` also registers the read-only task node `llm.model_info` and exports `mfn_llm::query_model_info` and
+`mfn_llm::list_models` for querying provider-advertised model metadata from `GET {base_url}/models`.
 
 Configuration uses the same connection and credential contract as `builtin.llm`: required `model`, optional `base_url`
 (default `https://api.openai.com/v1`), one of `api_key_env` (default `OPENAI_API_KEY`) or a runtime `api_key`
