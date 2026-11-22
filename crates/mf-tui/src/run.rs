@@ -228,6 +228,88 @@ pub fn run_executable(path: &Path) -> Result<u8, RunError> {
     run_executable_with_options(path, &RunOptions::default())
 }
 
+/// Whether the terminal presentation describes a launched workflow or a static preview.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Presentation {
+    /// A launched workflow whose observations arrive over the local receiver.
+    Live,
+    /// A compiled workflow inspected from its embedded manifest, without execution.
+    Preview,
+}
+
+/// Inspect a compiled workflow graph without launching it.
+///
+/// The embedded manifest supplies the description, and the session state stays
+/// empty, so the terminal shows node structure, routing, and bindings instead of
+/// observed status. Startup inputs are irrelevant here and never validated.
+pub fn preview_executable(path: &Path) -> Result<u8, RunError> {
+    let description = read_manifest(path).context(ManifestSnafu)?.description()?;
+    preview_description(description)
+}
+
+/// Inspect an already described workflow graph without launching it.
+///
+/// Built-in Flows resolve to a description without a compiled executable, so the
+/// description is the only input this presentation needs.
+pub fn preview_description(description: WorkflowDescription) -> Result<u8, RunError> {
+    if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+        return TerminalRequiredSnafu.fail();
+    }
+    let area = terminal_area().context(TerminalSnafu)?;
+    let mut view = ObservationView::new(&description)?;
+    let reader = ObservationReader::detached(description, RunId::new()).context(ReceiverSnafu)?;
+    let capture = CaptureView::default();
+    let signal = SignalGuard::register().context(TerminalSnafu)?;
+    let guard = TerminalGuard::enter().context(TerminalSnafu)?;
+    let mut terminal = Terminal::with_options(
+        CrosstermBackend::new(Box::new(io::stderr()) as Box<dyn Write>),
+        TerminalOptions {
+            viewport: Viewport::Fixed(area),
+        },
+    )
+    .context(TerminalSnafu)?;
+    let result = (|| {
+        loop {
+            view.draw_observation(
+                &mut terminal,
+                &reader,
+                &capture,
+                Duration::ZERO,
+                None,
+                Presentation::Preview,
+            )?;
+            if signal.interrupted.swap(false, Ordering::Relaxed) {
+                return Ok(0);
+            }
+            if !event::poll(Duration::from_millis(100)).context(TerminalSnafu)? {
+                continue;
+            }
+            match event::read().context(TerminalSnafu)? {
+                Event::Key(key)
+                    if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+                {
+                    if quit_requested(&view, &key) {
+                        return Ok(0);
+                    }
+                    view.handle_key(key.code, &reader);
+                }
+                Event::Mouse(mouse) => view.handle_mouse(mouse),
+                Event::Resize(width, height) => {
+                    terminal
+                        .resize(Rect::new(0, 0, width, height))
+                        .context(TerminalSnafu)?;
+                }
+                _ => {}
+            }
+        }
+    })();
+    *terminal.backend_mut() = CrosstermBackend::new(Box::new(io::sink()));
+    drop(terminal);
+    drop(guard);
+    drop(signal);
+    result
+}
+
 pub fn run_executable_with_options(path: &Path, options: &RunOptions) -> Result<u8, RunError> {
     if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
         return TerminalRequiredSnafu.fail();
@@ -747,7 +829,7 @@ struct Capture {
     record_bytes: Vec<u8>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct CaptureView {
     pub stdout_open: bool,
     pub stderr_open: bool,
@@ -1351,6 +1433,19 @@ impl ViewState {
     }
 }
 
+/// Whether the key asks to leave the terminal presentation.
+fn quit_requested(view: &ObservationView, key: &crossterm::event::KeyEvent) -> bool {
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return true;
+    }
+    !view.state.help_visible
+        && (matches!(key.code, KeyCode::Char('q') | KeyCode::Enter)
+            || (key.code == KeyCode::Esc
+                && !view.can_collapse_body()
+                && !view.state.traces.visible
+                && !view.state.details_visible))
+}
+
 fn supervise(
     run: &mut LocalRun,
     view: &mut ObservationView,
@@ -1375,15 +1470,9 @@ fn supervise(
                 Event::Key(key)
                     if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                 {
-                    let quit = (!view.state.help_visible
-                        && (matches!(key.code, KeyCode::Char('q') | KeyCode::Enter)
-                            || (key.code == KeyCode::Esc
-                                && !view.can_collapse_body()
-                                && !view.state.traces.visible
-                                && !view.state.details_visible)))
-                        || (key.code == KeyCode::Char('c')
-                            && key.modifiers.contains(KeyModifiers::CONTROL));
-                    if quit && let Some(outcome) = outcome.take() {
+                    if quit_requested(view, &key)
+                        && let Some(outcome) = outcome.take()
+                    {
                         return Ok(outcome);
                     }
                     if key.code == KeyCode::Char('c')
@@ -1391,7 +1480,7 @@ fn supervise(
                     {
                         run.cancel();
                     } else {
-                        view.handle_key(key.code, &observation);
+                        view.handle_key(key.code, &observation.reader);
                     }
                 }
                 Event::Mouse(mouse) => view.handle_mouse(mouse),
@@ -1942,6 +2031,7 @@ fn draw(
     view_state: &mut ViewState,
     receiver: &ObservationReader,
     status: Option<ExitStatus>,
+    presentation: Presentation,
 ) -> Result<(), RunError> {
     if view_state.traces.visible {
         terminal
@@ -1963,6 +2053,41 @@ fn draw(
             .context(TerminalSnafu)?;
         return Ok(());
     }
+    terminal
+        .draw(|frame| {
+            render_execution_frame(
+                frame,
+                root_layout,
+                pip_layout,
+                description,
+                snapshot,
+                capture,
+                elapsed,
+                view_state,
+                receiver,
+                status,
+                presentation,
+            );
+        })
+        .context(TerminalSnafu)?;
+    Ok(())
+}
+
+/// Render one execution frame from prepared observation inputs.
+#[allow(clippy::too_many_arguments)]
+fn render_execution_frame(
+    frame: &mut Frame<'_>,
+    root_layout: &GraphLayout,
+    pip_layout: &GraphLayout,
+    description: &WorkflowDescription,
+    snapshot: &StateSnapshot,
+    capture: &CaptureView,
+    elapsed: Duration,
+    view_state: &mut ViewState,
+    receiver: &ObservationReader,
+    status: Option<ExitStatus>,
+    presentation: Presentation,
+) {
     let layout = root_layout;
     view_state.follow_latest(snapshot, layout);
     let pass = view_state.pass(snapshot);
@@ -1980,126 +2105,208 @@ fn draw(
         &view_state.history_offsets(),
         &view_state.iteration_items,
     );
-    terminal.draw(|frame| {
-        let [header, body, footer] = Layout::vertical([
-            Constraint::Length(1), Constraint::Min(1), Constraint::Length(2),
-        ]).areas(frame.area());
-        let phase = status.map_or_else(|| "Running".to_owned(), |status| format!("Exited: {}", exit_code(status)));
-        let workflow = snapshot.workflow_outcome.map_or("Unknown", |outcome| match outcome {
+    let [header, body, footer] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(2),
+    ])
+    .areas(frame.area());
+    let phase = status.map_or_else(
+        || "Running".to_owned(),
+        |status| format!("Exited: {}", exit_code(status)),
+    );
+    let workflow = snapshot
+        .workflow_outcome
+        .map_or("Unknown", |outcome| match outcome {
             mf_telemetry::event::Outcome::Succeeded => "Succeeded",
             mf_telemetry::event::Outcome::Failed => "Failed",
         });
-        let scope = if view_state.path.is_empty() {
-            "root".to_owned()
-        } else {
-            format!("{:?}", view_state.path)
-        };
-        let pass_label = if let Some(item) = iteration { format!("  |  Item: {}  |  Iteration invocation: {}", item.identity.index.get(), item.identity.invocation.get()) } else if static_body { "  |  No retained iteration item records".into() } else { pass.map_or(String::new(), |pass| {
+    let scope = if view_state.path.is_empty() {
+        "root".to_owned()
+    } else {
+        format!("{:?}", view_state.path)
+    };
+    let pass_label = if let Some(item) = iteration {
+        format!(
+            "  |  Item: {}  |  Iteration invocation: {}",
+            item.identity.index.get(),
+            item.identity.invocation.get()
+        )
+    } else if static_body {
+        "  |  No retained iteration item records".into()
+    } else {
+        pass.map_or(String::new(), |pass| {
             let index = pass.path.last().map_or(0, |entry| entry.index().get());
-            let scope_label = if pass.path.last().is_some_and(mf_telemetry::event::LoopPathEntry::is_call) { "Call".to_owned() } else { format!("Pass: {index}") };
+            let scope_label = if pass
+                .path
+                .last()
+                .is_some_and(mf_telemetry::event::LoopPathEntry::is_call)
+            {
+                "Call".to_owned()
+            } else {
+                format!("Pass: {index}")
+            };
             match pass.stream_invocation {
                 Some(owner) => format!("  |  Invocation: {owner}  |  {scope_label}"),
                 None => format!("  |  {scope_label}"),
             }
-        }) };
-        frame.render_widget(Paragraph::new(format!(
-            "{}  |  Workflow: {workflow}  |  Process: {phase}  |  Scope: {scope}{pass_label}  |  {:.1}s",
-            connection_summary(layout), elapsed.as_secs_f64()
-        )), header);
-        let (graph, details) = if view_state.details_visible {
-            let [graph, details] = Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)]).areas(body);
-            (graph, Some(details))
-        } else {
-            (body, None)
-        };
-        let graph = if view_state.graph_notice.is_some() || layout.unresolved_count() > 0 {
-            let [warning, graph] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(graph);
-            frame.render_widget(Paragraph::new(view_state.graph_notice.clone().unwrap_or_else(|| routing_warning(layout))).style(Style::default().fg(Color::Yellow)), warning);
-            graph
-        } else { graph };
-        view_state.reveal(layout, graph);
-        view_state.mouse_graph = graph;
-        let mut graph_view = GraphView::new(layout)
-            .reader(receiver)
-            .selected(view_state.selected)
-            .offset(view_state.offset.0, view_state.offset.1)
-            .elapsed_ns(elapsed.as_nanos().min(u64::MAX as u128) as u64)
-            .minimap(!view_state.minimap_hidden);
-        graph_view = graph_view.nodes(&display_nodes);
-        let minimap_area = graph_view.minimap_area(graph);
-        frame.render_widget(graph_view, graph);
-        let observations = display_nodes.as_slice();
-        let pip_nodes = inline_observations_with_items(
-            pip_layout,
+        })
+    };
+    frame.render_widget(Paragraph::new(match presentation {
+            Presentation::Live => format!(
+                "{}  |  Workflow: {workflow}  |  Process: {phase}  |  Scope: {scope}{pass_label}  |  {:.1}s",
+                connection_summary(layout), elapsed.as_secs_f64()
+            ),
+            Presentation::Preview => format!(
+                "{}  |  Preview  |  Scope: {scope}{pass_label}  |  {} nodes",
+                connection_summary(layout),
+                layout.nodes().len()
+            ),
+        }), header);
+    let (graph, details) = if view_state.details_visible {
+        let [graph, details] =
+            Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)])
+                .areas(body);
+        (graph, Some(details))
+    } else {
+        (body, None)
+    };
+    let graph = if view_state.graph_notice.is_some() || layout.unresolved_count() > 0 {
+        let [warning, graph] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(graph);
+        frame.render_widget(
+            Paragraph::new(
+                view_state
+                    .graph_notice
+                    .clone()
+                    .unwrap_or_else(|| routing_warning(layout)),
+            )
+            .style(Style::default().fg(Color::Yellow)),
+            warning,
+        );
+        graph
+    } else {
+        graph
+    };
+    view_state.reveal(layout, graph);
+    view_state.mouse_graph = graph;
+    let mut graph_view = GraphView::new(layout)
+        .reader(receiver)
+        .selected(view_state.selected)
+        .offset(view_state.offset.0, view_state.offset.1)
+        .elapsed_ns(elapsed.as_nanos().min(u64::MAX as u128) as u64)
+        .minimap(!view_state.minimap_hidden);
+    graph_view = graph_view.nodes(&display_nodes);
+    let minimap_area = graph_view.minimap_area(graph);
+    frame.render_widget(graph_view, graph);
+    let observations = display_nodes.as_slice();
+    let pip_nodes = inline_observations_with_items(
+        pip_layout,
+        description,
+        snapshot,
+        &view_state.history_offsets(),
+        &view_state.iteration_items,
+    );
+    let pip_views = execution_pips(pip_layout, &pip_nodes, description, snapshot);
+    view_state.mouse_overlays = parallel_pip_areas(pip_views.len(), graph).0;
+    view_state.mouse_overlays.extend(minimap_area);
+    draw_parallel_pips(
+        frame,
+        graph,
+        pip_layout,
+        &pip_nodes,
+        receiver,
+        elapsed.as_nanos().min(u64::MAX as u128) as u64,
+        pip_views,
+    );
+    if let Some(details) = details {
+        view_state.details_height = usize::from(details.height.saturating_sub(2));
+        let selected = view_state.selected;
+        let collapsed_cluster = layout.is_collapsed_cluster(selected);
+        let selected_node = (!collapsed_cluster)
+            .then(|| {
+                layout
+                    .sources(selected)
+                    .first()
+                    .and_then(|source| observations.get(*source))
+            })
+            .flatten();
+        let cluster = layout.cluster_of(selected).map(|cluster| {
+            let cluster = &layout.clusters()[cluster];
+            if collapsed_cluster {
+                collapsed_cluster_details(cluster, layout.sources(selected), observations)
+            } else {
+                format!(
+                    "Cluster: {}\n{}\nMembers: {}\n",
+                    display_text(&cluster.label),
+                    display_text(&cluster.annotation),
+                    cluster.members.len()
+                )
+            }
+        });
+        let mut bindings = binding_details(description, &view_state.path, selected_node);
+        bindings.push_str(&flow_invocation_details(
             description,
             snapshot,
-            &view_state.history_offsets(),
-            &view_state.iteration_items,
-        );
-        let pip_views = execution_pips(pip_layout, &pip_nodes, description, snapshot);
-        view_state.mouse_overlays = parallel_pip_areas(pip_views.len(), graph).0;
-        view_state.mouse_overlays.extend(minimap_area);
-        draw_parallel_pips(
-            frame,
-            graph,
-            pip_layout,
-            &pip_nodes,
-            receiver,
-            elapsed.as_nanos().min(u64::MAX as u128) as u64,
-            pip_views,
-        );
-        if let Some(details) = details {
-            view_state.details_height = usize::from(details.height.saturating_sub(2));
-            let selected = view_state.selected;
-            let collapsed_cluster = layout.is_collapsed_cluster(selected);
-            let selected_node = (!collapsed_cluster)
-                .then(|| {
-                    layout
-                        .sources(selected)
-                        .first()
-                        .and_then(|source| observations.get(*source))
-                })
-                .flatten();
-            let cluster = layout.cluster_of(selected).map(|cluster| {
-                let cluster = &layout.clusters()[cluster];
-                if collapsed_cluster {
-                    collapsed_cluster_details(cluster, layout.sources(selected), observations)
-                } else {
-                    format!(
-                        "Cluster: {}\n{}\nMembers: {}\n",
-                        display_text(&cluster.label),
-                        display_text(&cluster.annotation),
-                        cluster.members.len()
-                    )
-                }
-            });
-            let mut bindings = binding_details(description, &view_state.path, selected_node);
-            bindings.push_str(&flow_invocation_details(description, snapshot, &view_state.path, selected_node, pass, iteration));
-            if let Some(node) = selected_node.filter(|node| node.kind == "builtin.llm") {
-                bindings.push_str(&crate::performance::details(&crate::performance::node_calls(receiver, node)));
-            }
-            let details_body = format!(
-                "{}\n{}\n{}\n{}",
-                view_state.graph_notice.as_deref().unwrap_or_default(),
-                cluster.unwrap_or_default(),
-                details_text(selected_node, pass, snapshot, capture, &bindings),
-                layout.routing_details(selected)
-            );
-            let (window, offset) = details_window(&details_body, usize::from(details.width.saturating_sub(2)), usize::from(details.height.saturating_sub(2)), view_state.details_offset);
-            view_state.details_offset = offset;
-            frame.render_widget(Paragraph::new(window)
-                .block(Block::default().title("Details · d hide").title_bottom("PgUp/PgDn scroll").borders(Borders::ALL)), details);
+            &view_state.path,
+            selected_node,
+            pass,
+            iteration,
+        ));
+        if let Some(node) = selected_node.filter(|node| node.kind == "builtin.llm") {
+            bindings.push_str(&crate::performance::details(
+                &crate::performance::node_calls(receiver, node),
+            ));
         }
-        let lifecycle = &snapshot.lifecycle;
-        let controls = if status.is_some() { "q/Enter close" } else { "Ctrl-C interrupt" };
-        frame.render_widget(Paragraph::new(format!(
-            "Delivery: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}\nArrows/wheel pan | Tab/click select | m minimap | d details | ? help | {controls}",
-            lifecycle.completeness, lifecycle.known_missing_count, lifecycle.local_drops,
-            snapshot.observation.errors + snapshot.observation.protocol_conflicts + lifecycle.protocol_conflicts, snapshot.traces.observed_spans,
+        let details_body = format!(
+            "{}\n{}\n{}\n{}",
+            view_state.graph_notice.as_deref().unwrap_or_default(),
+            cluster.unwrap_or_default(),
+            details_text(selected_node, pass, snapshot, capture, &bindings),
+            layout.routing_details(selected)
+        );
+        let (window, offset) = details_window(
+            &details_body,
+            usize::from(details.width.saturating_sub(2)),
+            usize::from(details.height.saturating_sub(2)),
+            view_state.details_offset,
+        );
+        view_state.details_offset = offset;
+        frame.render_widget(
+            Paragraph::new(window).block(
+                Block::default()
+                    .title("Details · d hide")
+                    .title_bottom("PgUp/PgDn scroll")
+                    .borders(Borders::ALL),
+            ),
+            details,
+        );
+    }
+    let lifecycle = &snapshot.lifecycle;
+    let controls = match presentation {
+        Presentation::Preview => "q close",
+        Presentation::Live if status.is_some() => "q/Enter close",
+        Presentation::Live => "Ctrl-C interrupt",
+    };
+    let observation_line = match presentation {
+        Presentation::Live => format!(
+            "Delivery: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}",
+            lifecycle.completeness,
+            lifecycle.known_missing_count,
+            lifecycle.local_drops,
+            snapshot.observation.errors
+                + snapshot.observation.protocol_conflicts
+                + lifecycle.protocol_conflicts,
+            snapshot.traces.observed_spans,
+        ),
+        // A preview receives nothing, so reporting delivery or loss counts would
+        // present unobserved state as fact.
+        Presentation::Preview => "Description: static | no execution observed".to_owned(),
+    };
+    frame.render_widget(Paragraph::new(format!(
+            "{observation_line}\nArrows/wheel pan | Tab/click select | m minimap | d details | ? help | {controls}",
         )), footer);
-        draw_help(frame, view_state);
-    }).context(TerminalSnafu)?;
-    Ok(())
+    draw_help(frame, view_state);
 }
 
 fn draw_help(frame: &mut Frame<'_>, state: &ViewState) {
@@ -3362,11 +3569,10 @@ impl ObservationView {
         self.state
             .handle_key(key, snapshot, &self.root, traces, logs);
     }
-    pub fn handle_key(&mut self, key: KeyCode, observation: &LocalObservation) {
+    pub fn handle_key(&mut self, key: KeyCode, reader: &ObservationReader) {
         if self.state.handle_help(key) {
             return;
         }
-        let reader = &observation.reader;
         let traces = reader.trace_snapshot();
         if !self
             .state
@@ -3524,17 +3730,40 @@ impl ObservationView {
         terminal: &mut Terminal<CrosstermBackend<Box<dyn Write>>>,
         observation: &LocalObservation,
     ) -> Result<(), RunError> {
+        self.draw_observation(
+            terminal,
+            &observation.reader,
+            &observation.capture_view(),
+            observation.elapsed(),
+            observation.status(),
+            Presentation::Live,
+        )
+    }
+    /// Render the presentation from explicit observation inputs.
+    ///
+    /// Live supervision and static previews differ only in where these values come
+    /// from and how the header and footer label the session.
+    pub fn draw_observation(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<Box<dyn Write>>>,
+        reader: &ObservationReader,
+        capture: &CaptureView,
+        elapsed: Duration,
+        status: Option<ExitStatus>,
+        presentation: Presentation,
+    ) -> Result<(), RunError> {
         draw(
             terminal,
             &self.root,
             &self.pip_layout,
             &self.description,
-            &observation.reader.snapshot_shared(),
-            &observation.capture_view(),
-            observation.elapsed(),
+            &reader.snapshot_shared(),
+            capture,
+            elapsed,
             &mut self.state,
-            &observation.reader,
-            observation.status(),
+            reader,
+            status,
+            presentation,
         )
     }
 
@@ -4893,6 +5122,7 @@ mod tests {
                 &mut view.state,
                 &reader,
                 None,
+                Presentation::Live,
             )
             .unwrap();
             assert_eq!(view.state.mouse_graph, expected);
@@ -4925,6 +5155,7 @@ mod tests {
             &mut view.state,
             &reader,
             None,
+            Presentation::Live,
         )
         .unwrap();
         let resized = Rect::new(0, 1, 80, 17);
@@ -4970,6 +5201,7 @@ mod tests {
                 &mut view.state,
                 &reader,
                 None,
+                Presentation::Live,
             )
             .unwrap();
         };
@@ -7640,5 +7872,61 @@ mod tests {
         let chat = render_chat_execution(&view, &snapshot);
         assert_eq!(chat.matches(" Running: ").count(), 1, "{chat}");
         assert!(!chat.contains(" Running: execute "), "{chat}");
+    }
+
+    fn render_preview(
+        view: &mut ObservationView,
+        reader: &ObservationReader,
+        width: u16,
+        height: u16,
+    ) -> String {
+        let mut terminal =
+            Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        let snapshot = reader.snapshot();
+        let capture = CaptureView::default();
+        terminal
+            .draw(|frame| {
+                render_execution_frame(
+                    frame,
+                    &view.root,
+                    &view.pip_layout,
+                    &view.description,
+                    &snapshot,
+                    &capture,
+                    Duration::ZERO,
+                    &mut view.state,
+                    reader,
+                    None,
+                    Presentation::Preview,
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn preview_presents_a_described_workflow_without_execution_state() {
+        let description = scope_fixture();
+        let mut view = ObservationView::new(&description).unwrap();
+        let reader = ObservationReader::detached(description, RunId::new()).unwrap();
+        let preview = render_preview(&mut view, &reader, 100, 24);
+        assert!(preview.contains("Preview  |  Scope: root"), "{preview}");
+        assert!(preview.contains("Description: static"), "{preview}");
+        assert!(preview.contains("q close"), "{preview}");
+        assert!(!preview.contains("Process:"), "{preview}");
+        assert!(!preview.contains("Delivery:"), "{preview}");
+        assert!(!preview.contains("Ctrl-C interrupt"), "{preview}");
+        // Keys still navigate the described graph; only execution state is absent.
+        let selected = view.state.selected;
+        view.handle_key(KeyCode::Tab, &reader);
+        assert_ne!(view.state.selected, selected);
     }
 }

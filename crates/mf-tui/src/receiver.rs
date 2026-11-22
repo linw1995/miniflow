@@ -97,10 +97,29 @@ pub struct LoopbackReceiver {
     worker: Option<JoinHandle<()>>,
 }
 
+/// Build the shared session context without a listener or serving thread.
+fn session_context(
+    description: WorkflowDescription,
+    run_id: RunId,
+) -> Result<Arc<Context>, ReceiverError> {
+    let workflow_id = description.workflow_id.clone();
+    let state = SessionState::new(description, run_id).context(StateSnafu)?;
+    Ok(Arc::new(Context {
+        state: Arc::new(Mutex::new(state)),
+        snapshots: Mutex::new(SnapshotCapture::default()),
+        traces: Mutex::new(TraceStore::default()),
+        logs: Mutex::new(LogStore::default()),
+        calls: Mutex::new(mf_chat::CallEventCollector::default()),
+        tools: mf_chat::ToolExecutionMetrics::default(),
+        workflow_id,
+        run: run_id,
+        run_id: run_id.to_string(),
+    }))
+}
+
 impl LoopbackReceiver {
     pub fn bind(description: WorkflowDescription, run_id: RunId) -> Result<Self, ReceiverError> {
-        let workflow_id = description.workflow_id.clone();
-        let state = SessionState::new(description, run_id).context(StateSnafu)?;
+        let context = session_context(description, run_id)?;
         let listener = TcpListener::bind("127.0.0.1:0").context(BindSnafu)?;
         let endpoint = format!("http://{}", listener.local_addr().context(BindSnafu)?);
         listener.set_nonblocking(true).context(BindSnafu)?;
@@ -113,17 +132,6 @@ impl LoopbackReceiver {
             let _entered = runtime.enter();
             tokio::net::TcpListener::from_std(listener).context(RuntimeSnafu)?
         };
-        let context = Arc::new(Context {
-            state: Arc::new(Mutex::new(state)),
-            snapshots: Mutex::new(SnapshotCapture::default()),
-            traces: Mutex::new(TraceStore::default()),
-            logs: Mutex::new(LogStore::default()),
-            calls: Mutex::new(mf_chat::CallEventCollector::default()),
-            tools: mf_chat::ToolExecutionMetrics::default(),
-            workflow_id,
-            run: run_id,
-            run_id: run_id.to_string(),
-        });
         let (stop, stopped) = oneshot::channel();
         let shared = Arc::clone(&context);
         let worker = thread::spawn(move || runtime.block_on(serve(listener, shared, stopped)));
@@ -214,6 +222,19 @@ pub struct ObservationReader {
 }
 
 impl ObservationReader {
+    /// Build a reader for a session that never receives workflow records.
+    ///
+    /// Graph previews inspect a compiled workflow without launching it, so the
+    /// session state stays at its initial, empty snapshot.
+    pub fn detached(
+        description: WorkflowDescription,
+        run_id: RunId,
+    ) -> Result<Self, ReceiverError> {
+        Ok(Self {
+            context: session_context(description, run_id)?,
+        })
+    }
+
     pub fn snapshot(&self) -> StateSnapshot {
         self.context
             .state
