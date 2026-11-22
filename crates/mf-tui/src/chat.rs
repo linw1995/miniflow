@@ -11,6 +11,7 @@ use mf_chat::contract::{
 use mf_chat::{ChatDatabase, Invocation, MessagePage, Session, SessionPage, UncommittedCompletion};
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
+    collections::BTreeMap,
     io,
     path::{Path, PathBuf},
     process::ExitStatus,
@@ -157,12 +158,18 @@ pub enum ChatEvent {
     Loaded {
         session: Session,
         page: MessagePage,
+        context_tokens: Option<u64>,
     },
     Models(Result<Vec<mfn_llm::ModelInfo>, String>),
     ModelSelected {
         model: Option<String>,
+        context_window: Option<u64>,
         automatic: bool,
         warning: Option<String>,
+    },
+    ContextWindow {
+        model: String,
+        context_window: Option<u64>,
     },
     Submitted {
         session: Session,
@@ -227,6 +234,9 @@ impl ChatController {
         let list_models_node = supports_model_selection
             .then(prepare_list_models_node)
             .transpose()?;
+        let model_info_node = supports_model_selection
+            .then(prepare_model_info_node)
+            .transpose()?;
         let loading_default_model = merged.needs_default_model;
         let initial_model = if loading_default_model {
             None
@@ -252,6 +262,8 @@ impl ChatController {
             parameters: merged.effective,
             provider_ports,
             list_models_node,
+            model_info_node,
+            model_context_windows: BTreeMap::new(),
             needs_default_model: loading_default_model,
             model_query_cancel: Arc::clone(&model_query_cancel),
             database: Arc::clone(&database),
@@ -411,6 +423,8 @@ struct Controller {
     parameters: mf_runtime::WorkflowArguments,
     provider_ports: Option<ProviderParameterPorts>,
     list_models_node: Option<mf_runtime::PreparedNode>,
+    model_info_node: Option<mf_runtime::PreparedNode>,
+    model_context_windows: BTreeMap<(String, String), Option<u64>>,
     needs_default_model: bool,
     model_query_cancel: Arc<Mutex<Option<mf_runtime::StreamCancellation>>>,
     database: Arc<ChatDatabase>,
@@ -431,6 +445,21 @@ fn prepare_list_models_node() -> Result<mf_runtime::PreparedNode, ChatRunError> 
             reason: "llm.list_models node is not registered",
         })?;
     Ok(factory.instantiate(serde_json::json!({
+        "base_url": {"$ref": "params.base_url"},
+        "api_key": {"$ref": "params.api_key"},
+        "timeout_ms": MODEL_LIST_TIMEOUT_MS,
+    }))?)
+}
+
+fn prepare_model_info_node() -> Result<mf_runtime::PreparedNode, ChatRunError> {
+    let registry = mf_runtime::NodeRegistry::from_inventory()?;
+    let factory = registry
+        .get(mfn_llm::MODEL_INFO_KIND)
+        .context(OptionsSnafu {
+            reason: "llm.model_info node is not registered",
+        })?;
+    Ok(factory.instantiate(serde_json::json!({
+        "model": {"$ref": "params.model"},
         "base_url": {"$ref": "params.base_url"},
         "api_key": {"$ref": "params.api_key"},
         "timeout_ms": MODEL_LIST_TIMEOUT_MS,
@@ -477,6 +506,55 @@ fn model_list_context(
     Ok(context)
 }
 
+fn model_info_context(
+    model: &str,
+    endpoint: preferences::ModelListEndpoint,
+    cancellation: mf_runtime::StreamCancellation,
+) -> Result<mf_runtime::ExecutionContext, mf_runtime::NodeExecutionError> {
+    let source: mf_runtime::FlowNode<()> = mf_runtime::FlowNode {
+        definition_id: "params".into(),
+        node: (),
+        metadata: mf_runtime::NodeMetadata {
+            ports: mf_runtime::NodePorts {
+                inputs: Vec::new(),
+                outputs: vec![
+                    mf_runtime::PortSpec::new("model", mf_runtime::ValueType::String, true),
+                    mf_runtime::PortSpec::new("base_url", mf_runtime::ValueType::String, true),
+                    mf_runtime::PortSpec::new("api_key", mf_runtime::ValueType::String, true),
+                ],
+            },
+            ..Default::default()
+        },
+        output_keys: std::sync::OnceLock::new(),
+    };
+    let mut context = mf_runtime::ExecutionContext::for_message(
+        &source,
+        mf_runtime::NodeResult {
+            outputs: [
+                ("model".into(), mf_runtime::ValueRef::from(model)),
+                (
+                    "base_url".into(),
+                    mf_runtime::ValueRef::from(endpoint.base_url),
+                ),
+                (
+                    "api_key".into(),
+                    mf_runtime::ValueRef::from(endpoint.api_key.unwrap_or_default()).into_secret(),
+                ),
+            ]
+            .into(),
+            ..Default::default()
+        },
+    )?;
+    context.set_cancellation(cancellation);
+    Ok(context)
+}
+
+fn positive_context_window(window: Option<i64>) -> Option<u64> {
+    window
+        .and_then(|value| u64::try_from(value).ok())
+        .filter(|&value| value > 0)
+}
+
 impl Controller {
     fn emit(&self, event: ChatEvent) {
         emit(&self.output, &self.closed, event);
@@ -493,31 +571,68 @@ impl Controller {
         })
     }
 
-    fn fetch_models(&self) -> Result<Vec<mfn_llm::ModelInfo>, String> {
-        let (Some(ports), Some(node)) = (&self.provider_ports, &self.list_models_node) else {
-            return Err("workflow does not expose model selection parameters".into());
-        };
-        let Some(endpoint) = preferences::resolve_model_list_endpoint(
+    fn resolved_endpoint(&self) -> Option<preferences::ModelListEndpoint> {
+        let ports = self.provider_ports.as_ref()?;
+        preferences::resolve_model_list_endpoint(
             &self.launch.contract.parameters,
             ports,
             &self.parameters,
             |name| std::env::var_os(name),
-        ) else {
+        )
+    }
+
+    fn record_model_windows(&mut self, base_url: &str, models: &[mfn_llm::ModelInfo]) {
+        let normalized = base_url.trim_end_matches('/');
+        if normalized.is_empty() {
+            return;
+        }
+        for model in models {
+            self.model_context_windows.insert(
+                (normalized.to_owned(), model.id.clone()),
+                positive_context_window(model.context_window),
+            );
+        }
+    }
+
+    fn cached_context_window(&self, model: &str) -> Option<Option<u64>> {
+        let endpoint = self.resolved_endpoint()?;
+        let normalized = endpoint.base_url.trim_end_matches('/');
+        if normalized.is_empty() {
+            return None;
+        }
+        self.model_context_windows
+            .get(&(normalized.to_owned(), model.to_owned()))
+            .copied()
+    }
+
+    fn begin_model_query_cancellation(&self) -> mf_runtime::StreamCancellation {
+        let cancellation = mf_runtime::StreamCancellation::default();
+        let mut slot = self.model_query_cancel.lock().unwrap();
+        *slot = Some(cancellation.clone());
+        if self.closed.load(Ordering::Acquire) {
+            cancellation.cancel(
+                mf_runtime::StreamExecutionSnafu {
+                    message: "chat controller closed",
+                }
+                .build(),
+            );
+        }
+        cancellation
+    }
+
+    fn fetch_models(&mut self) -> Result<Vec<mfn_llm::ModelInfo>, String> {
+        if self.provider_ports.is_none() || self.list_models_node.is_none() {
+            return Err("workflow does not expose model selection parameters".into());
+        }
+        let Some(endpoint) = self.resolved_endpoint() else {
             return Err("provider base_url is not configured".into());
         };
-        let cancellation = mf_runtime::StreamCancellation::default();
-        {
-            let mut slot = self.model_query_cancel.lock().unwrap();
-            *slot = Some(cancellation.clone());
-            if self.closed.load(Ordering::Acquire) {
-                cancellation.cancel(
-                    mf_runtime::StreamExecutionSnafu {
-                        message: "chat controller closed",
-                    }
-                    .build(),
-                );
-            }
-        }
+        let base_url = endpoint.base_url.clone();
+        let cancellation = self.begin_model_query_cancellation();
+        let node = self
+            .list_models_node
+            .as_ref()
+            .expect("list_models_node checked");
         let executed = model_list_context(endpoint, cancellation).and_then(|mut context| {
             let task = node.execution.as_task_node().expect("llm.list_models task");
             task.execute(mf_runtime::Inputs::new(), &mut context)
@@ -527,7 +642,39 @@ impl Controller {
         let outputs =
             <mfn_llm::ModelListOutputs as mf_runtime::NodeValue>::from_values(executed.outputs)
                 .map_err(|error| error.to_string())?;
+        self.record_model_windows(&base_url, &outputs.models);
         Ok(outputs.models)
+    }
+
+    fn probe_model_context_window(&mut self, model: &str) -> Option<u64> {
+        if let Some(cached) = self.cached_context_window(model) {
+            return cached;
+        }
+        let endpoint = self.resolved_endpoint()?;
+        let normalized = endpoint.base_url.trim_end_matches('/').to_owned();
+        let node = self.model_info_node.as_ref()?;
+        let cancellation = self.begin_model_query_cancellation();
+        let executed =
+            model_info_context(model, endpoint, cancellation.clone()).and_then(|mut context| {
+                let task = node.execution.as_task_node().expect("llm.model_info task");
+                task.execute(mf_runtime::Inputs::new(), &mut context)
+            });
+        *self.model_query_cancel.lock().unwrap() = None;
+        if cancellation.failure().is_some() || self.closed.load(Ordering::Acquire) {
+            return None;
+        }
+        let discovered = executed
+            .ok()
+            .and_then(|result| {
+                <mfn_llm::ModelInfoOutputs as mf_runtime::NodeValue>::from_values(result.outputs)
+                    .ok()
+            })
+            .and_then(|outputs| positive_context_window(outputs.context_window));
+        if !normalized.is_empty() {
+            self.model_context_windows
+                .insert((normalized, model.to_owned()), discovered);
+        }
+        discovered
     }
 
     fn discover_default_model(&mut self) {
@@ -554,13 +701,19 @@ impl Controller {
             .map(|error| error.to_string());
             self.emit(ChatEvent::ModelSelected {
                 model: Some(first.id.clone()),
+                context_window: positive_context_window(first.context_window),
                 automatic: true,
                 warning,
             });
             return;
         }
+        let fallback = self.resolved_display_model();
+        let context_window = fallback
+            .as_deref()
+            .and_then(|model| self.cached_context_window(model).flatten());
         self.emit(ChatEvent::ModelSelected {
-            model: self.resolved_display_model(),
+            model: fallback,
+            context_window,
             automatic: true,
             warning: None,
         });
@@ -582,6 +735,15 @@ impl Controller {
     fn run(mut self) -> Result<(), ChatRunError> {
         if self.needs_default_model && !self.closed.load(Ordering::Acquire) {
             self.discover_default_model();
+        } else if !self.closed.load(Ordering::Acquire)
+            && let Some(model) = self.resolved_display_model()
+            && let Some(window) = self.probe_model_context_window(&model)
+            && !self.closed.load(Ordering::Acquire)
+        {
+            self.emit(ChatEvent::ContextWindow {
+                model,
+                context_window: Some(window),
+            });
         }
         while !self.closed.load(Ordering::Acquire) {
             match self.input.recv_timeout(Duration::from_millis(50)) {
@@ -628,7 +790,12 @@ impl Controller {
                 let after = (end > PAGE_SIZE as i64).then_some(end - PAGE_SIZE as i64 - 1);
                 let mut page = self.database.messages(&session_id, PAGE_SIZE, after)?;
                 page.messages.retain(|record| record.message.sequence < end);
-                self.emit(ChatEvent::Loaded { session, page });
+                let context_tokens = self.database.context_tokens(&session.id)?;
+                self.emit(ChatEvent::Loaded {
+                    session,
+                    page,
+                    context_tokens,
+                });
             }
             ChatCommand::ListModels => {
                 let result = self.fetch_models();
@@ -644,27 +811,43 @@ impl Controller {
                         reason: "model must not be empty"
                     }
                 );
-                let ports = self.provider_ports.as_ref().context(OptionsSnafu {
-                    reason: "workflow does not support model selection",
-                })?;
+                let model_port = self
+                    .provider_ports
+                    .as_ref()
+                    .context(OptionsSnafu {
+                        reason: "workflow does not support model selection",
+                    })?
+                    .model
+                    .clone();
                 self.parameters.0.insert(
-                    ports.model.clone(),
+                    model_port.clone(),
                     mf_runtime::ValueRef::from(model.as_str()),
                 );
                 let warning = preferences::persist_selected_model(
                     &preferences::preferences_path(self.database.path()),
                     &self.launch.options.profile,
                     &self.launch.contract.parameters,
-                    &ports.model,
+                    &model_port,
                     &model,
                 )
                 .err()
                 .map(|error| error.to_string());
+                let cached_window = self.cached_context_window(&model);
                 self.emit(ChatEvent::ModelSelected {
-                    model: Some(model),
+                    model: Some(model.clone()),
+                    context_window: cached_window.flatten(),
                     automatic: false,
                     warning,
                 });
+                if cached_window.is_none()
+                    && let Some(window) = self.probe_model_context_window(&model)
+                    && !self.closed.load(Ordering::Acquire)
+                {
+                    self.emit(ChatEvent::ContextWindow {
+                        model,
+                        context_window: Some(window),
+                    });
+                }
             }
             ChatCommand::Submit { session_id, prompt } => {
                 ensure!(
