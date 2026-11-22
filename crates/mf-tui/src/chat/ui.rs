@@ -502,6 +502,7 @@ pub fn run_chat(path: &Path, options: ChatOptions) -> Result<u8, ChatRunError> {
     })?;
     let mut view = ChatView::new(launch.runner.description())?;
     let controller = ChatController::open(launch)?;
+    view.apply_controller_state(&controller);
     let signal = SignalGuard::register().context(IoSnafu {
         operation: "register interrupt handler",
     })?;
@@ -684,12 +685,14 @@ enum Mode {
     Browse,
     Commands,
     Sessions,
+    Models,
     Inspect,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Action {
     New,
     Switch,
+    SelectModel,
     Retry,
     Save,
     Discard,
@@ -711,14 +714,6 @@ fn compaction_tokens_before(messages: &[mf_chat::ChatMessage]) -> Option<u64> {
         };
         metadata.get("compaction")?.get("tokens_before")?.as_u64()
     })
-}
-
-fn format_token_count(tokens: u64) -> String {
-    if tokens >= 10_000 {
-        format!("{:.1}k", tokens as f64 / 1000.0)
-    } else {
-        tokens.to_string()
-    }
 }
 
 /// Returns `Some(true)` if all compaction calls succeeded, `Some(false)` if any failed,
@@ -834,6 +829,14 @@ struct ChatView {
     selected: usize,
     sessions: Option<SessionPage>,
     sessions_after: Option<String>,
+    supports_model_selection: bool,
+    active_model: Option<String>,
+    active_context_window: Option<u64>,
+    context_tokens: Option<u64>,
+    loading_default_model: bool,
+    models: Option<Vec<mf_chat::ModelInfo>>,
+    models_error: Option<String>,
+    model_filter: String,
     pending: Option<Option<u64>>,
     /// The turn being presented until its authoritative messages reload.
     active: Option<(Invocation, String)>,
@@ -855,6 +858,46 @@ struct ChatView {
     outcome: String,
     animation_started: Instant,
 }
+fn format_token_count(tokens: u64) -> String {
+    if tokens >= 10_000 {
+        format!("{:.1}k", tokens as f64 / 1000.0)
+    } else {
+        tokens.to_string()
+    }
+}
+
+fn format_context_window(tokens: u64) -> String {
+    if tokens < 1_000 {
+        tokens.to_string()
+    } else if tokens < 10_000 {
+        format!("{:.1}k", tokens as f64 / 1_000.0)
+    } else if tokens < 1_000_000 {
+        format!("{}k", (tokens as f64 / 1_000.0).round() as u64)
+    } else if tokens < 10_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else {
+        format!("{}M", (tokens as f64 / 1_000_000.0).round() as u64)
+    }
+}
+
+fn format_context_usage(tokens: Option<u64>, window: u64) -> (String, Color) {
+    let window_label = format_context_window(window);
+    match tokens {
+        Some(used) => {
+            let percent = (used as f64 / window as f64) * 100.0;
+            let color = if percent >= 90.0 {
+                Color::Red
+            } else if percent >= 70.0 {
+                Color::Yellow
+            } else {
+                Color::DarkGray
+            };
+            (format!("{percent:.1}%/{window_label}"), color)
+        }
+        None => (format!("?/{window_label}"), Color::DarkGray),
+    }
+}
+
 fn append_diagnostic(output: &mut String, diagnostic: &str) {
     let mut seen: BTreeSet<String> = output.lines().map(str::to_owned).collect();
     for line in diagnostic
@@ -885,6 +928,14 @@ impl ChatView {
             selected: 0,
             sessions: None,
             sessions_after: None,
+            supports_model_selection: false,
+            active_model: None,
+            active_context_window: None,
+            context_tokens: Some(0),
+            loading_default_model: false,
+            models: None,
+            models_error: None,
+            model_filter: String::new(),
             pending: None,
             active: None,
             running: false,
@@ -904,6 +955,11 @@ impl ChatView {
             outcome: String::new(),
             animation_started: Instant::now(),
         })
+    }
+    fn apply_controller_state(&mut self, controller: &ChatController) {
+        self.supports_model_selection = controller.supports_model_selection();
+        self.active_model = controller.initial_model().map(str::to_owned);
+        self.loading_default_model = controller.loading_default_model();
     }
     fn send(&mut self, controller: &ChatController, command: ChatCommand) -> bool {
         match controller.send(command) {
@@ -935,6 +991,7 @@ impl ChatView {
         let new = session.as_ref().map(|s| s.id.clone()).unwrap_or_default();
         self.editor = self.drafts.remove(&new).unwrap_or_default();
         self.session = session;
+        self.context_tokens = self.session.is_none().then_some(0);
         self.transcript.get_mut().clear_images();
         self.page = None;
         self.active = None;
@@ -962,7 +1019,65 @@ impl ChatView {
                 self.sessions = Some(page);
                 self.selected = 0;
             }
-            ChatEvent::Loaded { session, page } => {
+            ChatEvent::Models(result) => match result {
+                Ok(models) => {
+                    if let Some(current) = self.active_model.as_deref()
+                        && let Some(found) = models.iter().find(|model| model.id == current)
+                    {
+                        self.active_context_window = found
+                            .context_window
+                            .and_then(|value| u64::try_from(value).ok())
+                            .filter(|&value| value > 0);
+                    }
+                    self.models_error = None;
+                    self.models = Some(models);
+                    let filtered = self.filtered_models();
+                    self.selected = self
+                        .active_model
+                        .as_deref()
+                        .and_then(|current| filtered.iter().position(|model| model.id == current))
+                        .unwrap_or(0);
+                }
+                Err(error) => {
+                    self.models = None;
+                    self.models_error = Some(error);
+                    self.selected = 0;
+                }
+            },
+            ChatEvent::ModelSelected {
+                model,
+                context_window,
+                automatic,
+                warning,
+            } => {
+                self.loading_default_model = false;
+                self.active_model = model.clone();
+                self.active_context_window = context_window.filter(|&value| value > 0);
+                if let Some(warning) = warning {
+                    if let Some(model) = &model {
+                        self.notice = format!(
+                            "Model set to {} (preferences not saved: {})",
+                            safe(model).replace('\n', " "),
+                            safe(&warning).replace('\n', " ")
+                        );
+                    }
+                } else if !automatic && let Some(model) = &model {
+                    self.notice = format!("Model set to {}", safe(model).replace('\n', " "));
+                }
+            }
+            ChatEvent::ContextWindow {
+                model,
+                context_window,
+            } => {
+                if self.active_model.as_deref() == Some(model.as_str()) {
+                    self.active_context_window = context_window.filter(|&value| value > 0);
+                }
+            }
+            ChatEvent::Loaded {
+                session,
+                page,
+                context_tokens,
+            } => {
                 if self.session.as_ref().is_some_and(|s| s.id == session.id) {
                     // Keep presenting the in-flight turn until the page that carries it
                     // arrives, so previews and authoritative messages swap in one frame.
@@ -974,6 +1089,7 @@ impl ChatView {
                         });
                     self.session = Some(session);
                     self.page = Some(page);
+                    self.context_tokens = context_tokens;
                     if settled {
                         self.active = None;
                     }
@@ -1070,6 +1186,18 @@ impl ChatView {
                         match resolution.state {
                             CompletionState::Committed(completion) => {
                                 self.preview = LivePreview::default();
+                                if completion.result.status != "failed" {
+                                    if matches!(
+                                        completion.result.update,
+                                        mf_chat::MessageUpdate::ReplaceContext { .. }
+                                    ) {
+                                        self.context_tokens = None;
+                                    } else if let Some(tokens) =
+                                        mf_chat::context_tokens(&completion.result.usages)
+                                    {
+                                        self.context_tokens = Some(tokens);
+                                    }
+                                }
                                 self.notice = committed_notice(&completion.result);
                                 if let Some(error) = &completion.result.error {
                                     details.push(error.clone());
@@ -1190,6 +1318,9 @@ impl ChatView {
         if self.earlier {
             actions.push((Action::Latest, "Latest messages"));
         }
+        if self.supports_model_selection {
+            actions.push((Action::SelectModel, "Select model (Ctrl+L)"));
+        }
         actions.push((
             Action::ToggleExecution,
             if self.show_execution {
@@ -1217,6 +1348,24 @@ impl ChatView {
                 self.selected = 0;
                 if self.send(controller, ChatCommand::ListSessions { after: None }) {
                     self.mode = Mode::Sessions;
+                }
+            }
+            Action::SelectModel if !self.supports_model_selection => {
+                self.notice = "This chatflow does not expose model selection".into();
+            }
+            Action::SelectModel
+                if controller.busy() || self.pending.is_some() || self.running || self.retained =>
+            {
+                self.notice =
+                    "Cancel the current turn or recover its reply before switching model".into();
+            }
+            Action::SelectModel => {
+                self.models = None;
+                self.models_error = None;
+                self.model_filter.clear();
+                self.selected = 0;
+                if self.send(controller, ChatCommand::ListModels) {
+                    self.mode = Mode::Models;
                 }
             }
             Action::Retry => {
@@ -1457,6 +1606,7 @@ impl ChatView {
                 }
                 KeyCode::Char('n') => return self.act(Action::New, controller),
                 KeyCode::Char('s') => return self.act(Action::Switch, controller),
+                KeyCode::Char('l') => return self.act(Action::SelectModel, controller),
                 KeyCode::Char('e') => {
                     self.show_execution = !self.show_execution;
                     return false;
@@ -1507,6 +1657,42 @@ impl ChatView {
                     _ => {}
                 }
             }
+            Mode::Models => {
+                let count = self.model_rows().len();
+                match key.code {
+                    KeyCode::Esc => {
+                        if !self.model_filter.is_empty() {
+                            self.model_filter.clear();
+                            self.selected = 0;
+                        } else {
+                            self.mode = Mode::Input;
+                        }
+                    }
+                    KeyCode::Up => self.selected = self.selected.saturating_sub(1),
+                    KeyCode::Down => {
+                        self.selected = (self.selected + 1).min(count.saturating_sub(1))
+                    }
+                    KeyCode::PageUp => self.selected = self.selected.saturating_sub(10),
+                    KeyCode::PageDown => {
+                        self.selected = (self.selected + 10).min(count.saturating_sub(1))
+                    }
+                    KeyCode::Backspace => {
+                        if self.model_filter.pop().is_some() {
+                            self.selected = 0;
+                        }
+                    }
+                    KeyCode::Char(c)
+                        if !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    {
+                        self.model_filter.push(c);
+                        self.selected = 0;
+                    }
+                    KeyCode::Enter => self.choose_model(controller),
+                    _ => {}
+                }
+            }
             Mode::Input => match key.code {
                 KeyCode::Esc => self.mode = Mode::Browse,
                 KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
@@ -1531,6 +1717,72 @@ impl ChatView {
             },
         }
         false
+    }
+    fn filtered_models(&self) -> Vec<&mf_chat::ModelInfo> {
+        let Some(models) = &self.models else {
+            return Vec::new();
+        };
+        let query = self.model_filter.trim().to_ascii_lowercase();
+        if query.is_empty() {
+            return models.iter().collect();
+        }
+        models
+            .iter()
+            .filter(|model| {
+                model.id.to_ascii_lowercase().contains(&query)
+                    || model
+                        .name
+                        .as_deref()
+                        .is_some_and(|name| name.to_ascii_lowercase().contains(&query))
+            })
+            .collect()
+    }
+    fn model_rows(&self) -> Vec<String> {
+        if let Some(error) = &self.models_error {
+            return vec![format!(
+                "Could not load models: {}",
+                safe(error).replace('\n', " ")
+            )];
+        }
+        let Some(models) = &self.models else {
+            return vec!["Loading models...".into()];
+        };
+        if models.is_empty() {
+            return vec!["No models returned by provider".into()];
+        }
+        let filtered = self.filtered_models();
+        if filtered.is_empty() {
+            return vec!["No matching models".into()];
+        }
+        filtered
+            .into_iter()
+            .map(|model| {
+                let mut label = safe(&model.id).replace('\n', " ");
+                if let Some(window) = model.context_window.and_then(|v| u64::try_from(v).ok()) {
+                    label.push_str(&format!(" ({})", format_token_count(window)));
+                }
+                if self.active_model.as_deref() == Some(model.id.as_str()) {
+                    label.push_str(" [current]");
+                }
+                label
+            })
+            .collect()
+    }
+    fn choose_model(&mut self, controller: &ChatController) {
+        let selected_id = self
+            .filtered_models()
+            .get(self.selected)
+            .map(|model| model.id.clone());
+        let Some(model) = selected_id else {
+            return;
+        };
+        self.mode = Mode::Input;
+        self.model_filter.clear();
+        if self.active_model.as_deref() == Some(model.as_str()) {
+            self.notice = format!("Model unchanged ({})", safe(&model).replace('\n', " "));
+            return;
+        }
+        self.send(controller, ChatCommand::SelectModel { model });
     }
     fn session_rows(&self) -> Vec<String> {
         let Some(page) = &self.sessions else {
@@ -1614,11 +1866,27 @@ impl ChatView {
             .session
             .as_ref()
             .map_or("New chat", |s| s.title.as_str());
-        frame.render_widget(
-            Paragraph::new(format!("mf chat  /  {}", safe(title)))
-                .style(Style::default().fg(Color::DarkGray)),
-            header,
-        );
+        let header_text = if let Some(model) = &self.active_model {
+            format!(
+                "mf chat  /  {}  ·  {}",
+                safe(title),
+                safe(model).replace('\n', " ")
+            )
+        } else if self.loading_default_model {
+            format!("mf chat  /  {}  ·  selecting model...", safe(title))
+        } else {
+            format!("mf chat  /  {}", safe(title))
+        };
+        let mut header_spans = vec![Span::styled(
+            header_text,
+            Style::default().fg(Color::DarkGray),
+        )];
+        if let Some(window) = self.active_context_window.filter(|&window| window > 0) {
+            let (label, color) = format_context_usage(self.context_tokens, window);
+            header_spans.push(Span::styled("  ·  ", Style::default().fg(Color::DarkGray)));
+            header_spans.push(Span::styled(label, Style::default().fg(color)));
+        }
+        frame.render_widget(Paragraph::new(Line::from(header_spans)), header);
         let body = if self.show_execution
             && (self.pending.is_some() || self.active.is_some() || self.observation.is_some())
         {
@@ -1833,7 +2101,7 @@ impl ChatView {
             frame,
             body,
             self.scroll.get(),
-            !matches!(self.mode, Mode::Commands | Mode::Sessions),
+            !matches!(self.mode, Mode::Commands | Mode::Sessions | Mode::Models),
         ));
         drop(transcript);
         let hint = match self.mode {
@@ -1857,6 +2125,8 @@ impl ChatView {
             "Ctrl+C cancel | Ctrl+E flow | Ctrl+P commands"
         } else if self.retained {
             "Ctrl+P recover reply | Ctrl+E flow | Ctrl+Q quit"
+        } else if self.supports_model_selection {
+            "Ctrl+P commands | Ctrl+L model | Ctrl+E flow | Ctrl+S chats | Ctrl+Q quit"
         } else {
             "Ctrl+P commands | Ctrl+E flow | Ctrl+S chats | Ctrl+Q quit"
         };
@@ -1870,17 +2140,34 @@ impl ChatView {
                 .style(Style::default().fg(Color::DarkGray)),
             footer,
         );
-        if matches!(self.mode, Mode::Commands | Mode::Sessions) {
-            let (title, rows) = if self.mode == Mode::Commands {
-                (
-                    "Commands",
+        if matches!(self.mode, Mode::Commands | Mode::Sessions | Mode::Models) {
+            let (title, rows, bottom_hint) = match self.mode {
+                Mode::Commands => (
+                    "Commands".to_string(),
                     self.actions()
                         .iter()
                         .map(|(_, label)| (*label).to_string())
                         .collect::<Vec<_>>(),
-                )
-            } else {
-                ("Switch chat", self.session_rows())
+                    " Up/Down select | Enter open | Esc close ",
+                ),
+                Mode::Sessions => (
+                    "Switch chat".to_string(),
+                    self.session_rows(),
+                    " Up/Down select | Enter open | Esc close ",
+                ),
+                Mode::Models => (
+                    if self.model_filter.is_empty() {
+                        "Select model".to_string()
+                    } else {
+                        format!(
+                            "Select model — {}",
+                            safe(&self.model_filter).replace('\n', " ")
+                        )
+                    },
+                    self.model_rows(),
+                    " Type to filter | Up/Down select | Enter apply | Esc close ",
+                ),
+                _ => unreachable!(),
             };
             let width = area.width.saturating_sub(4).min(64);
             let height = (rows.len() as u16)
@@ -1898,7 +2185,7 @@ impl ChatView {
                     Block::default()
                         .borders(Borders::ALL)
                         .title(title)
-                        .title_bottom(" Up/Down select | Enter open | Esc close "),
+                        .title_bottom(bottom_hint),
                 )
                 .highlight_symbol("› ")
                 .highlight_style(
@@ -2344,6 +2631,7 @@ mod tests {
             ChatEvent::Loaded {
                 session: controller._database.session(&session.id).unwrap(),
                 page,
+                context_tokens: None,
             },
             &controller,
         );
@@ -2512,6 +2800,7 @@ mod tests {
                         ChatEvent::Loaded {
                             session: session.clone(),
                             page,
+                            context_tokens: None,
                         },
                         &controller,
                     );
@@ -2569,6 +2858,7 @@ mod tests {
                 ChatEvent::Loaded {
                     session: controller._database.session(&session.id).unwrap(),
                     page,
+                    context_tokens: None,
                 },
                 &controller,
             );
@@ -2661,7 +2951,14 @@ mod tests {
             ._database
             .messages(&session.id, 50, None)
             .unwrap();
-        view.event(ChatEvent::Loaded { session, page }, &controller);
+        view.event(
+            ChatEvent::Loaded {
+                session,
+                page,
+                context_tokens: None,
+            },
+            &controller,
+        );
         let screen = render(&view, 120, 55);
         assert_grouped_tools(&screen, false, false);
         assert!(screen.contains("[failed"));
@@ -2725,6 +3022,7 @@ mod tests {
             ChatEvent::Loaded {
                 session: session.clone(),
                 page,
+                context_tokens: None,
             },
             &controller,
         );
@@ -2758,6 +3056,7 @@ mod tests {
             ChatEvent::Loaded {
                 session: session.clone(),
                 page,
+                context_tokens: None,
             },
             &controller,
         );
@@ -2769,7 +3068,14 @@ mod tests {
             ._database
             .messages(&session.id, 2, Some(0))
             .unwrap();
-        view.event(ChatEvent::Loaded { session, page }, &controller);
+        view.event(
+            ChatEvent::Loaded {
+                session,
+                page,
+                context_tokens: None,
+            },
+            &controller,
+        );
         let screen = render(&view, 120, 35);
         assert_grouped_tools(&screen, false, true);
         assert_eq!(screen.matches("FTT").count(), 1);
@@ -2849,7 +3155,14 @@ mod tests {
             ._database
             .messages(&session.id, 50, None)
             .unwrap();
-        view.event(ChatEvent::Loaded { session, page }, &controller);
+        view.event(
+            ChatEvent::Loaded {
+                session,
+                page,
+                context_tokens: None,
+            },
+            &controller,
+        );
         let mut preview = LivePreview::default();
         preview.begin(begun.invocation.clone());
         preview
@@ -2943,6 +3256,7 @@ mod tests {
             ChatEvent::Loaded {
                 session: session.clone(),
                 page,
+                context_tokens: None,
             },
             &controller,
         );
@@ -2976,6 +3290,7 @@ mod tests {
                     ChatEvent::Loaded {
                         session: controller._database.session(&session.id).unwrap(),
                         page,
+                        context_tokens: None,
                     },
                     &controller,
                 );
@@ -3091,7 +3406,14 @@ mod tests {
             ._database
             .messages(&session.id, 50, None)
             .unwrap();
-        view.event(ChatEvent::Loaded { session, page }, &controller);
+        view.event(
+            ChatEvent::Loaded {
+                session,
+                page,
+                context_tokens: None,
+            },
+            &controller,
+        );
         assert!(view.reply.is_none());
         let text = render(&view, 100, 30);
         assert_eq!(text.matches("FTT 500ms").count(), 1);
@@ -4057,7 +4379,14 @@ mod tests {
             ._database
             .messages(&session.id, 50, None)
             .unwrap();
-        view.event(ChatEvent::Loaded { session, page }, &controller);
+        view.event(
+            ChatEvent::Loaded {
+                session,
+                page,
+                context_tokens: None,
+            },
+            &controller,
+        );
         assert!(view.active.is_none());
         let loaded = render(&view, 80, 30);
         assert_eq!(row_of(&loaded, "question"), 2);
@@ -4282,7 +4611,14 @@ mod tests {
             ._database
             .messages(&session.id, 50, None)
             .unwrap();
-        view.event(ChatEvent::Loaded { session, page }, &controller);
+        view.event(
+            ChatEvent::Loaded {
+                session,
+                page,
+                context_tokens: None,
+            },
+            &controller,
+        );
         let loaded = render(&view, 100, 30);
         assert!(loaded.contains("[context compacted]"), "{loaded}");
         controller.close().unwrap();
@@ -4407,13 +4743,435 @@ mod tests {
             ._database
             .messages(&session.id, 50, None)
             .unwrap();
-        view.event(ChatEvent::Loaded { session, page }, &controller);
+        view.event(
+            ChatEvent::Loaded {
+                session,
+                page,
+                context_tokens: None,
+            },
+            &controller,
+        );
         let loaded = render(&view, 100, 40);
         assert!(
             loaded.contains("[compaction failed; model context unchanged]"),
             "{loaded}"
         );
         assert!(loaded.contains("[context compacted]"), "{loaded}");
+        controller.close().unwrap();
+    }
+
+    #[test]
+    fn model_selector_popup_filters_selects_and_updates_header() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
+        let controller = ChatController::open(launch).unwrap();
+        view.supports_model_selection = true;
+        view.active_model = Some("model-alpha".into());
+
+        let initial = render(&view, 100, 30);
+        assert!(initial.contains("New chat  ·  model-alpha"), "{initial}");
+        assert!(initial.contains("Ctrl+L model"), "{initial}");
+
+        // Open model selector via Ctrl+L.
+        view.key(
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL),
+            &controller,
+        );
+        assert!(view.mode == Mode::Models);
+        let loading = render(&view, 100, 30);
+        assert!(loading.contains("Select model"), "{loading}");
+        assert!(loading.contains("Loading models..."), "{loading}");
+
+        // Receive provider models and verify badges + current highlight.
+        view.event(
+            ChatEvent::Models(Ok(vec![
+                mf_chat::ModelInfo {
+                    id: "model-alpha".into(),
+                    context_window: Some(128_000),
+                    ..Default::default()
+                },
+                mf_chat::ModelInfo {
+                    id: "model-beta".into(),
+                    name: Some("Beta Fast".into()),
+                    context_window: Some(64_000),
+                    ..Default::default()
+                },
+            ])),
+            &controller,
+        );
+        assert_eq!(view.selected, 0);
+        let listed = render(&view, 100, 30);
+        assert!(
+            listed.contains("model-alpha (128.0k) [current]"),
+            "{listed}"
+        );
+        assert!(listed.contains("model-beta (64.0k)"), "{listed}");
+
+        // Type to filter by name/id, Esc clears filter first.
+        for ch in "beta".chars() {
+            view.key(
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                &controller,
+            );
+        }
+        let filtered = render(&view, 100, 30);
+        assert!(filtered.contains("Select model — beta"), "{filtered}");
+        assert!(filtered.contains("model-beta (64.0k)"), "{filtered}");
+        assert!(!filtered.contains("model-alpha (128.0k)"), "{filtered}");
+
+        view.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &controller);
+        assert!(view.mode == Mode::Models);
+        assert!(view.model_filter.is_empty());
+
+        // Move down to model-beta and apply with Enter.
+        view.key(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &controller,
+        );
+        view.key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &controller,
+        );
+        assert!(view.mode == Mode::Input);
+        view.event(
+            ChatEvent::ModelSelected {
+                model: Some("model-beta".into()),
+                context_window: None,
+                automatic: false,
+                warning: None,
+            },
+            &controller,
+        );
+        let updated = render(&view, 100, 30);
+        assert!(updated.contains("New chat  ·  model-beta"), "{updated}");
+        assert!(updated.contains("Model set to model-beta"), "{updated}");
+
+        // Switching model is blocked while a turn is running.
+        view.running = true;
+        view.key(
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL),
+            &controller,
+        );
+        assert!(view.mode == Mode::Input);
+        assert!(
+            view.notice.contains("before switching model"),
+            "{}",
+            view.notice
+        );
+        controller.close().unwrap();
+    }
+
+    #[test]
+    fn model_selector_handles_errors_empty_lists_navigation_unchanged_and_warnings() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
+        let controller = ChatController::open(launch).unwrap();
+
+        // Unsupported chatflow rejects Ctrl+L with a clear notice.
+        view.supports_model_selection = false;
+        view.key(
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL),
+            &controller,
+        );
+        assert!(view.mode == Mode::Input);
+        assert!(
+            view.notice.contains("does not expose model selection"),
+            "{}",
+            view.notice
+        );
+
+        // Header shows selecting indicator while initial model discovery is in flight.
+        view.supports_model_selection = true;
+        view.loading_default_model = true;
+        let loading_header = render(&view, 100, 30);
+        assert!(
+            loading_header.contains("selecting model..."),
+            "{loading_header}"
+        );
+
+        // Open selector and cover provider error, empty list, filter/backspace/page navigation.
+        view.key(
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL),
+            &controller,
+        );
+        assert!(view.mode == Mode::Models);
+        view.event(ChatEvent::Models(Err("network down".into())), &controller);
+        let errored = render(&view, 100, 30);
+        assert!(
+            errored.contains("Could not load models: network down"),
+            "{errored}"
+        );
+        // Pressing Enter with no models loaded is a safe no-op.
+        view.key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &controller,
+        );
+        assert!(view.mode == Mode::Models);
+
+        view.event(ChatEvent::Models(Ok(Vec::new())), &controller);
+        let empty = render(&view, 100, 30);
+        assert!(empty.contains("No models returned by provider"), "{empty}");
+
+        view.active_model = Some("m1".into());
+        view.event(
+            ChatEvent::Models(Ok(vec![
+                mf_chat::ModelInfo {
+                    id: "m1".into(),
+                    ..Default::default()
+                },
+                mf_chat::ModelInfo {
+                    id: "m2".into(),
+                    ..Default::default()
+                },
+                mf_chat::ModelInfo {
+                    id: "m3".into(),
+                    ..Default::default()
+                },
+            ])),
+            &controller,
+        );
+        view.key(
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+            &controller,
+        );
+        assert_eq!(view.selected, 2);
+        view.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &controller);
+        assert_eq!(view.selected, 1);
+        view.key(
+            KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+            &controller,
+        );
+        assert_eq!(view.selected, 0);
+
+        // Non-matching filter shows empty-match message, Backspace trims filter.
+        view.key(
+            KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE),
+            &controller,
+        );
+        let unmatched = render(&view, 100, 30);
+        assert!(unmatched.contains("No matching models"), "{unmatched}");
+        view.key(
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            &controller,
+        );
+        assert!(view.model_filter.is_empty());
+
+        // Choosing the already-active model reports unchanged without issuing a switch.
+        view.key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &controller,
+        );
+        assert!(view.mode == Mode::Input);
+        assert!(
+            view.notice.contains("Model unchanged (m1)"),
+            "{}",
+            view.notice
+        );
+
+        // Esc in Mode::Models with empty filter closes the popup back to Input.
+        view.key(
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL),
+            &controller,
+        );
+        assert!(view.mode == Mode::Models);
+        view.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &controller);
+        assert!(view.mode == Mode::Input);
+
+        // ModelSelected with persistence warning updates notice.
+        view.event(
+            ChatEvent::ModelSelected {
+                model: Some("m2".into()),
+                context_window: None,
+                automatic: false,
+                warning: Some("disk full".into()),
+            },
+            &controller,
+        );
+        assert!(
+            view.notice.contains("preferences not saved: disk full"),
+            "{}",
+            view.notice
+        );
+        controller.close().unwrap();
+    }
+
+    #[test]
+    fn header_renders_context_usage_percentage_colors_and_compaction_reset() {
+        assert_eq!(format_context_window(512), "512");
+        assert_eq!(format_context_window(4_096), "4.1k");
+        assert_eq!(format_context_window(128_000), "128k");
+        assert_eq!(format_context_window(500_000), "500k");
+        assert_eq!(format_context_window(1_000_000), "1.0M");
+        assert_eq!(format_context_window(12_000_000), "12M");
+
+        assert_eq!(
+            format_context_usage(Some(307_000), 500_000),
+            ("61.4%/500k".into(), Color::DarkGray)
+        );
+        assert_eq!(
+            format_context_usage(Some(375_000), 500_000),
+            ("75.0%/500k".into(), Color::Yellow)
+        );
+        assert_eq!(
+            format_context_usage(Some(460_000), 500_000),
+            ("92.0%/500k".into(), Color::Red)
+        );
+        assert_eq!(
+            format_context_usage(None, 500_000),
+            ("?/500k".into(), Color::DarkGray)
+        );
+
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
+        let controller = ChatController::open(launch).unwrap();
+
+        // Model selected before window discovery starts without a window, then updates on
+        // the matching ContextWindow event while ignoring stale models.
+        view.supports_model_selection = true;
+        view.event(
+            ChatEvent::ModelSelected {
+                model: Some("model-500k".into()),
+                context_window: None,
+                automatic: true,
+                warning: None,
+            },
+            &controller,
+        );
+        assert_eq!(view.active_context_window, None);
+        view.event(
+            ChatEvent::ContextWindow {
+                model: "other-model".into(),
+                context_window: Some(32_000),
+            },
+            &controller,
+        );
+        assert_eq!(view.active_context_window, None);
+        view.event(
+            ChatEvent::ContextWindow {
+                model: "model-500k".into(),
+                context_window: Some(500_000),
+            },
+            &controller,
+        );
+        assert_eq!(view.active_context_window, Some(500_000));
+        let initial = render(&view, 100, 30);
+        assert!(
+            initial.contains("New chat  ·  model-500k  ·  0.0%/500k"),
+            "{initial}"
+        );
+
+        // Committed append turn updates context usage to 61.4%/500k.
+        let invocation = Invocation::new("session-1");
+        view.latest_invocation = Some(invocation.clone());
+        let mut reply = mf_chat::ConversationResult::assistant("done");
+        reply.usages = vec![mf_chat::CallUsage {
+            attribution: None,
+            started_at: None,
+            timing: None,
+            call_id: "c1".into(),
+            node: None,
+            model: "model-500k".into(),
+            usage: Some(BTreeMap::from([("total_tokens".into(), 307_000)])),
+            error: None,
+        }];
+        view.event(
+            ChatEvent::Finished {
+                invocation: invocation.clone(),
+                resolution: Ok(mf_chat::contract::ReconciledCompletion {
+                    state: CompletionState::Committed(mf_chat::Completion {
+                        invocation: invocation.clone(),
+                        result: reply,
+                    }),
+                    diagnostics: Vec::new(),
+                }),
+                status: None,
+                stderr: String::new(),
+                capture_error: None,
+            },
+            &controller,
+        );
+        let used = render(&view, 100, 30);
+        assert!(used.contains("model-500k  ·  61.4%/500k"), "{used}");
+
+        // Switching to a 1M model recomputes percentage immediately against the new window.
+        view.event(
+            ChatEvent::ModelSelected {
+                model: Some("model-1m".into()),
+                context_window: Some(1_000_000),
+                automatic: false,
+                warning: None,
+            },
+            &controller,
+        );
+        let switched = render(&view, 100, 30);
+        assert!(switched.contains("model-1m  ·  30.7%/1.0M"), "{switched}");
+
+        // Committed context replacement (compaction) clears stale usage to ?/1.0M.
+        let replacement = mf_chat::ConversationResult {
+            status: "succeeded".into(),
+            update: mf_chat::MessageUpdate::ReplaceContext {
+                display_messages: vec![mf_chat::ChatMessage::Assistant {
+                    content: "after compact".into(),
+                    tool_calls: None,
+                    metadata: None,
+                }],
+                context_messages: vec![mf_chat::ChatMessage::Assistant {
+                    content: "after compact".into(),
+                    tool_calls: None,
+                    metadata: None,
+                }],
+            },
+            usages: Vec::new(),
+            title: None,
+            error: None,
+        };
+        let inv2 = Invocation::new("session-1");
+        view.latest_invocation = Some(inv2.clone());
+        view.event(
+            ChatEvent::Finished {
+                invocation: inv2.clone(),
+                resolution: Ok(mf_chat::contract::ReconciledCompletion {
+                    state: CompletionState::Committed(mf_chat::Completion {
+                        invocation: inv2,
+                        result: replacement,
+                    }),
+                    diagnostics: Vec::new(),
+                }),
+                status: None,
+                stderr: String::new(),
+                capture_error: None,
+            },
+            &controller,
+        );
+        let compacted = render(&view, 100, 30);
+        assert!(compacted.contains("model-1m  ·  ?/1.0M"), "{compacted}");
+
+        // Loaded session restores persisted context_tokens.
+        let session = controller
+            ._database
+            .create_session("default", None, Some("Loaded chat".into()))
+            .unwrap();
+        let page = controller
+            ._database
+            .messages(&session.id, 50, None)
+            .unwrap();
+        view.switch(Some(session.clone()));
+        view.event(
+            ChatEvent::Loaded {
+                session,
+                page,
+                context_tokens: Some(750_000),
+            },
+            &controller,
+        );
+        let reloaded = render(&view, 100, 30);
+        assert!(
+            reloaded.contains("Loaded chat  ·  model-1m  ·  75.0%/1.0M"),
+            "{reloaded}"
+        );
         controller.close().unwrap();
     }
 }

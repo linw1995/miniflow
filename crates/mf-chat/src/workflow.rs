@@ -32,6 +32,42 @@ pub struct ModelContextWindowCache {
 }
 
 impl ModelContextWindowCache {
+    /// Returns the cached context window lookup state for `(base_url, model)`.
+    ///
+    /// Returns `None` if no lookup has been cached yet, `Some(None)` if the endpoint did not
+    /// advertise a positive window, and `Some(Some(tokens))` if a positive window is known.
+    pub fn get(&self, base_url: &str, model: &str) -> Option<Option<u64>> {
+        let normalized = base_url.trim_end_matches('/');
+        if normalized.is_empty() {
+            return None;
+        }
+        self.entries
+            .lock()
+            .expect("context window cache was not poisoned")
+            .get(&(normalized.to_owned(), model.to_owned()))
+            .copied()
+            .map(|value| {
+                value
+                    .and_then(|tokens| u64::try_from(tokens).ok())
+                    .filter(|&tokens| tokens > 0)
+            })
+    }
+
+    /// Records a single provider-advertised context window lookup outcome for `(base_url, model)`.
+    pub fn record(&self, base_url: &str, model: &str, context_window: Option<u64>) {
+        let normalized = base_url.trim_end_matches('/');
+        if normalized.is_empty() {
+            return;
+        }
+        let stored = context_window
+            .and_then(|tokens| i64::try_from(tokens).ok())
+            .filter(|&tokens| tokens > 0);
+        self.entries
+            .lock()
+            .expect("context window cache was not poisoned")
+            .insert((normalized.to_owned(), model.to_owned()), stored);
+    }
+
     /// Records provider-advertised context windows returned by a `/models` listing.
     pub fn record_models(&self, base_url: &str, models: &[mfn_llm::ModelInfo]) {
         let normalized = base_url.trim_end_matches('/');
@@ -45,7 +81,7 @@ impl ModelContextWindowCache {
         for model in models {
             entries.insert(
                 (normalized.to_owned(), model.id.clone()),
-                model.context_window,
+                model.context_window.filter(|&tokens| tokens > 0),
             );
         }
     }
@@ -76,7 +112,7 @@ impl ModelContextWindowCache {
             return config.resolved_context(cached);
         }
         let discovered = match execute_model_info_node(probe, context) {
-            Ok(window) => window,
+            Ok(window) => window.filter(|&tokens| tokens > 0),
             Err(()) => {
                 if context.cancellation().failure().is_some() {
                     // Never cache a cancellation-interrupted probe as an absent window.
