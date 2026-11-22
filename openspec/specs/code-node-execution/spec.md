@@ -296,3 +296,24 @@ bypass that traversal limit. A depth failure SHALL publish no Code outputs.
 
 - **WHEN** repeated list concatenation grows a collection beyond any former entry, expression, or serialized-size bound
 - **THEN** that invocation publishes the complete list
+
+### Requirement: Provide CEL string, list, and JSON encoding extensions
+
+The CEL Code environment SHALL enable the standard CEL strings extension (`charAt`, `indexOf`, `lastIndexOf`,
+`lowerAscii`, `upperAscii`, `replace`, `split`, `substring`, `trim`, `reverse`, `format`, `join`, and
+`strings.quote`), list methods (`slice`, `flatten`, `distinct`, `sort`, and `sum`), and `json.encode`.
+`slice` SHALL enforce `0 <= start <= end <= size(list)`. `flatten` SHALL require list elements to be lists.
+`distinct` SHALL preserve first-seen order under CEL equality. `sort` SHALL sort homogeneous lists of `int`, `uint`,
+`double`, `string`, or `bool` and MUST reject `NaN`, heterogeneous lists, and unsortable element types. `sum` SHALL
+sum `list<int>` with checked signed 64-bit overflow and return `0` for an empty list. `json.encode` SHALL encode
+JSON-representable CEL values using the same 16-level nesting limit and JSON value validation as output conversion.
+
+#### Scenario: Format strings and collections with CEL extensions
+
+- **WHEN** a CEL expression calls `substring`, `trim`, `join`, `slice`, `flatten`, `distinct`, `sort`, `sum`, or `json.encode` on valid inputs
+- **THEN** type checking infers compatible JSON port types and evaluation returns the expected JSON values
+
+#### Scenario: Reject invalid extension arguments
+
+- **WHEN** `slice` receives out-of-range bounds, `flatten` receives a non-list element, `sort` receives `NaN` or heterogeneous elements, `sum` overflows signed 64-bit range, or `json.encode` receives a non-JSON or over-depth value
+- **THEN** node execution fails with an evaluation error and publishes no outputs

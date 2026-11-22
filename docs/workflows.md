@@ -864,6 +864,14 @@ For example, a readline output connected to input `text` can use:
 }
 ```
 
+In addition to the CEL standard library, the environment enables the standard CEL strings extension (`charAt`,
+`indexOf`, `lastIndexOf`, `lowerAscii`, `upperAscii`, `replace`, `split`, `substring`, `trim`, `reverse`, `format`,
+`join`, and `strings.quote`), list methods (`slice(start, end)`, `flatten()`, `distinct()`, `sort()`, and `sum()`),
+and `json.encode(value)`. `slice` checks `0 <= start <= end <= size(list)`, `flatten` requires list elements to be
+lists, `distinct` preserves first-seen order under CEL equality, `sort` requires a homogeneous list of `int`, `uint`,
+`double` (without `NaN`), `string`, or `bool`, `sum` computes a checked signed 64-bit total over `list<int>` (`0` when
+empty), and `json.encode` serializes JSON-representable values under the same 16-level nesting bound.
+
 Expression length, serialized input and output size, and collection size are unbounded. Type descriptors and values
 are limited to 16 nesting levels, which bounds recursive conversion work. CEL evaluation runs in-process without a
 hard CPU or memory sandbox.

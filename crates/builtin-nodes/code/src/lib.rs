@@ -1,3 +1,4 @@
+mod ext;
 mod value;
 
 use cel_core::{CelType, Env, MapActivation, Program};
@@ -207,6 +208,13 @@ impl NodePortContract for CodeNode {
     }
 }
 
+fn cel_env() -> Env {
+    Env::with_standard_library()
+        .with_extension(cel_core::ext::string_extension())
+        .with_extension(ext::list_extension())
+        .with_extension(ext::json_extension())
+}
+
 fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let config: Config = deserialize_config(config)?;
     if config.language != "cel" {
@@ -215,7 +223,7 @@ fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
             config.language
         )));
     }
-    let mut env = Env::with_standard_library();
+    let mut env = cel_env();
     let mut inputs = BTreeMap::new();
     for (name, descriptor) in &config.inputs {
         if !valid_identifier(name) {
@@ -832,6 +840,274 @@ mod tests {
             .to_string();
             assert!(error.contains("output `result`"), "{expression}: {error}");
         }
+    }
+
+    #[test]
+    fn supports_string_list_and_json_extensions() {
+        let node = factory(json!({
+            "language": "cel",
+            "inputs": {
+                "text": "string",
+                "words": {"list": "string"},
+                "nested": {"list": {"list": "string"}},
+                "numbers": {"list": "int"},
+                "uints": {"list": "uint"},
+                "doubles": {"list": "double"},
+                "flags": {"list": "bool"},
+                "payload": "any"
+            },
+            "code": {
+                "trimmed": "text.trim()",
+                "sub": "text.trim().substring(0, 3)",
+                "joined": "words.distinct().sort().join(', ')",
+                "sliced": "words.slice(1, 3)",
+                "flattened": "nested.flatten()",
+                "total": "numbers.sum()",
+                "empty_sum": "[].sum()",
+                "sorted_ints": "numbers.distinct().sort()",
+                "sorted_uints": "uints.sort()",
+                "sorted_doubles": "doubles.sort()",
+                "sorted_flags": "flags.sort()",
+                "empty_sort": "[].sort()",
+                "empty_distinct": "[].distinct()",
+                "encoded": "json.encode(payload)"
+            }
+        }))
+        .unwrap();
+        let ports: BTreeMap<_, _> = node
+            .metadata
+            .ports
+            .outputs
+            .iter()
+            .map(|port| (port.name.as_ref(), &port.value_type))
+            .collect();
+        assert_eq!(ports["trimmed"], &ValueType::String);
+        assert_eq!(ports["joined"], &ValueType::String);
+        assert_eq!(
+            ports["sliced"],
+            &ValueType::List(Box::new(ValueType::String))
+        );
+        assert_eq!(
+            ports["flattened"],
+            &ValueType::List(Box::new(ValueType::Any))
+        );
+        assert_eq!(ports["total"], &ValueType::Int64);
+        assert_eq!(ports["empty_sum"], &ValueType::Int64);
+        assert_eq!(ports["encoded"], &ValueType::String);
+
+        let result = node
+            .execution
+            .as_task_node()
+            .unwrap()
+            .execute(
+                Inputs::from([
+                    ("text".into(), json!("  αβγδ  ").into()),
+                    ("words".into(), json!(["b", "a", "b", "c"]).into()),
+                    ("nested".into(), json!([["x"], [], ["y", "z"]]).into()),
+                    ("numbers".into(), json!([3, 1, 3, -2]).into()),
+                    ("uints".into(), json!([9, 2, 5]).into()),
+                    ("doubles".into(), json!([2.5, -1.0, 0.5]).into()),
+                    ("flags".into(), json!([true, false, true]).into()),
+                    (
+                        "payload".into(),
+                        json!({"b": [1, true, null], "a": "ok"}).into(),
+                    ),
+                ]),
+                &mut mf_runtime::ExecutionContext::default(),
+            )
+            .unwrap();
+        assert_eq!(result.outputs["trimmed"], json!("αβγδ"));
+        assert_eq!(result.outputs["sub"], json!("αβγ"));
+        assert_eq!(result.outputs["joined"], json!("a, b, c"));
+        assert_eq!(result.outputs["sliced"], json!(["a", "b"]));
+        assert_eq!(result.outputs["flattened"], json!(["x", "y", "z"]));
+        assert_eq!(result.outputs["total"], json!(5));
+        assert_eq!(result.outputs["empty_sum"], json!(0));
+        assert_eq!(result.outputs["sorted_ints"], json!([-2, 1, 3]));
+        assert_eq!(result.outputs["sorted_uints"], json!([2, 5, 9]));
+        assert_eq!(result.outputs["sorted_doubles"], json!([-1.0, 0.5, 2.5]));
+        assert_eq!(result.outputs["sorted_flags"], json!([false, true, true]));
+        assert_eq!(result.outputs["empty_sort"], json!([]));
+        assert_eq!(result.outputs["empty_distinct"], json!([]));
+        assert_eq!(
+            result.outputs["encoded"],
+            json!(r#"{"a":"ok","b":[1,true,null]}"#)
+        );
+    }
+
+    #[test]
+    fn list_and_json_extensions_reject_invalid_runtime_inputs() {
+        let cases = [
+            (
+                json!({"xs": {"list": "int"}}),
+                "xs.slice(-1, 1)",
+                json!({"xs": [1, 2]}),
+                "out of range",
+            ),
+            (
+                json!({"xs": {"list": "int"}}),
+                "xs.slice(2, 1)",
+                json!({"xs": [1, 2]}),
+                "invalid slice range",
+            ),
+            (
+                json!({"xs": {"list": "int"}}),
+                "xs.slice(0, 3)",
+                json!({"xs": [1, 2]}),
+                "out of range",
+            ),
+            (
+                json!({"xs": "array"}),
+                "xs.flatten()",
+                json!({"xs": [[1], "not-a-list"]}),
+                "flatten()",
+            ),
+            (
+                json!({"xs": "array"}),
+                "xs.sort()",
+                json!({"xs": [1, "two"]}),
+                "homogeneous",
+            ),
+            (
+                json!({"u": "uint"}),
+                "[dyn(u), dyn('x')].sort()",
+                json!({"u": 1}),
+                "homogeneous",
+            ),
+            (
+                json!({}),
+                "[dyn(1.0), dyn('x')].sort()",
+                json!({}),
+                "homogeneous",
+            ),
+            (
+                json!({}),
+                "[dyn('a'), dyn(1)].sort()",
+                json!({}),
+                "homogeneous",
+            ),
+            (
+                json!({}),
+                "[dyn(true), dyn(1)].sort()",
+                json!({}),
+                "homogeneous",
+            ),
+            (
+                json!({"xs": "array"}),
+                "xs.sort()",
+                json!({"xs": [{"a": 1}]}),
+                "sort() supports",
+            ),
+            (
+                json!({"xs": {"list": "int"}}),
+                "xs.sum()",
+                json!({"xs": [i64::MAX, 1]}),
+                "overflow",
+            ),
+            (
+                json!({"xs": "array"}),
+                "xs.sum()",
+                json!({"xs": [1, "two"]}),
+                "sum() requires",
+            ),
+            (json!({}), "dyn(1).slice(0, 1)", json!({}), "expected list"),
+            (
+                json!({}),
+                "[1].slice(dyn('a'), 1)",
+                json!({}),
+                "expected int start",
+            ),
+            (
+                json!({}),
+                "[1].slice(0, dyn('b'))",
+                json!({}),
+                "expected int end",
+            ),
+            (json!({}), "dyn(1).flatten()", json!({}), "expected list"),
+            (json!({}), "dyn(1).distinct()", json!({}), "expected list"),
+            (json!({}), "dyn(1).sort()", json!({}), "expected list"),
+            (json!({}), "dyn(1).sum()", json!({}), "expected list"),
+            (
+                json!({}),
+                "json.encode(b'bytes')",
+                json!({}),
+                "unsupported CEL value",
+            ),
+            (
+                json!({}),
+                "json.encode({1: 'a'})",
+                json!({}),
+                "map key must be a string",
+            ),
+        ];
+        for (inputs_schema, expression, runtime_inputs, expected_error) in cases {
+            let node = factory(json!({
+                "language": "cel",
+                "inputs": inputs_schema,
+                "code": {"result": expression}
+            }))
+            .unwrap();
+            let inputs: Inputs = runtime_inputs
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone().into()))
+                .collect();
+            let error = node
+                .execution
+                .as_task_node()
+                .unwrap()
+                .execute(inputs, &mut mf_runtime::ExecutionContext::default())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(expected_error),
+                "{expression}: expected `{expected_error}`, got `{error}`"
+            );
+        }
+
+        // Reject NaN in sort(), non-finite float in json.encode(), and deep values in json.encode().
+        for expression in [
+            "[0.0 / 0.0, 1.0].sort()",
+            "json.encode(1.0 / 0.0)",
+            "json.encode([[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]])",
+        ] {
+            let node = factory(json!({
+                "language": "cel",
+                "inputs": {},
+                "code": {"result": expression}
+            }))
+            .unwrap();
+            assert!(
+                node.execution
+                    .as_task_node()
+                    .unwrap()
+                    .execute(Inputs::new(), &mut mf_runtime::ExecutionContext::default())
+                    .is_err(),
+                "{expression} should fail"
+            );
+        }
+
+        // Dynamic distinct preserves first-seen order for heterogeneous/object lists.
+        let node = factory(json!({
+            "language": "cel",
+            "inputs": {"items": "array"},
+            "code": {"result": "items.distinct()"}
+        }))
+        .unwrap();
+        let result = node
+            .execution
+            .as_task_node()
+            .unwrap()
+            .execute(
+                Inputs::from([(
+                    "items".into(),
+                    json!([{"a": 1}, {"b": 2}, {"a": 1}, 1]).into(),
+                )]),
+                &mut mf_runtime::ExecutionContext::default(),
+            )
+            .unwrap();
+        assert_eq!(result.outputs["result"], json!([{"a": 1}, {"b": 2}, 1]));
     }
 
     #[test]
