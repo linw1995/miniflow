@@ -35,7 +35,7 @@ use nix::{
 use process_wrap::std::{ChildWrapper, CommandWrap, ProcessGroup};
 use ratatui::{
     Frame, Terminal, TerminalOptions, Viewport,
-    backend::CrosstermBackend,
+    backend::{Backend, CrosstermBackend},
     layout::{Constraint, Layout, Position, Rect},
     style::{Color, Style},
     widgets::{Block, Borders, Clear, Paragraph},
@@ -267,10 +267,7 @@ impl PreviewSession {
     }
 
     /// Draw the current frame. Nothing is observed, so elapsed time stays zero.
-    fn draw(
-        &mut self,
-        terminal: &mut Terminal<CrosstermBackend<Box<dyn Write>>>,
-    ) -> Result<(), RunError> {
+    fn draw<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> Result<(), B::Error> {
         self.view.draw_observation(
             terminal,
             &self.reader,
@@ -282,11 +279,11 @@ impl PreviewSession {
     }
 
     /// Apply one terminal event, returning the exit code when the session closes.
-    fn handle(
+    fn handle<B: Backend>(
         &mut self,
         event: Event,
-        terminal: &mut Terminal<CrosstermBackend<Box<dyn Write>>>,
-    ) -> Result<Option<u8>, RunError> {
+        terminal: &mut Terminal<B>,
+    ) -> Result<Option<u8>, B::Error> {
         match event {
             Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
                 if quit_requested(&self.view, &key) {
@@ -296,9 +293,7 @@ impl PreviewSession {
             }
             Event::Mouse(mouse) => self.view.handle_mouse(mouse),
             Event::Resize(width, height) => {
-                terminal
-                    .resize(Rect::new(0, 0, width, height))
-                    .context(TerminalSnafu)?;
+                terminal.resize(Rect::new(0, 0, width, height))?;
             }
             _ => {}
         }
@@ -327,13 +322,14 @@ pub fn preview_description(description: WorkflowDescription) -> Result<u8, RunEr
     .context(TerminalSnafu)?;
     let result = (|| {
         loop {
-            session.draw(&mut terminal)?;
+            session.draw(&mut terminal).context(TerminalSnafu)?;
             if signal.interrupted.swap(false, Ordering::Relaxed) {
                 return Ok(0);
             }
             if event::poll(Duration::from_millis(100)).context(TerminalSnafu)?
-                && let Some(code) =
-                    session.handle(event::read().context(TerminalSnafu)?, &mut terminal)?
+                && let Some(code) = session
+                    .handle(event::read().context(TerminalSnafu)?, &mut terminal)
+                    .context(TerminalSnafu)?
             {
                 return Ok(code);
             }
@@ -2056,8 +2052,8 @@ fn draw_pips(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw(
-    terminal: &mut Terminal<CrosstermBackend<Box<dyn Write>>>,
+fn draw<B: Backend>(
+    terminal: &mut Terminal<B>,
     root_layout: &GraphLayout,
     pip_layout: &GraphLayout,
     description: &WorkflowDescription,
@@ -2068,25 +2064,23 @@ fn draw(
     receiver: &ObservationReader,
     status: Option<ExitStatus>,
     presentation: Presentation,
-) -> Result<(), RunError> {
+) -> Result<(), B::Error> {
     if view_state.traces.visible {
-        terminal
-            .draw(|frame| {
-                let traces = receiver.trace_snapshot();
-                let logs = receiver.log_snapshot();
-                view_state.traces.draw(
-                    frame,
-                    &TraceViewSnapshot {
-                        traces: &traces,
-                        logs: &logs,
-                        data: &receiver.data_snapshot(),
-                        spans: snapshot.traces,
-                        finished: status.is_some(),
-                    },
-                );
-                draw_help(frame, view_state);
-            })
-            .context(TerminalSnafu)?;
+        terminal.draw(|frame| {
+            let traces = receiver.trace_snapshot();
+            let logs = receiver.log_snapshot();
+            view_state.traces.draw(
+                frame,
+                &TraceViewSnapshot {
+                    traces: &traces,
+                    logs: &logs,
+                    data: &receiver.data_snapshot(),
+                    spans: snapshot.traces,
+                    finished: status.is_some(),
+                },
+            );
+            draw_help(frame, view_state);
+        })?;
         return Ok(());
     }
     let layout = root_layout;
@@ -2242,7 +2236,7 @@ fn draw(
             "{observation_line}\nArrows/wheel pan | Tab/click select | m minimap | d details | ? help | {controls}",
         )), footer);
         draw_help(frame, view_state);
-    }).context(TerminalSnafu)?;
+    })?;
     Ok(())
 }
 
@@ -3675,20 +3669,21 @@ impl ObservationView {
             observation.status(),
             Presentation::Live,
         )
+        .context(TerminalSnafu)
     }
     /// Render the presentation from explicit observation inputs.
     ///
     /// Live supervision and static previews differ only in where these values come
     /// from and how the header and footer label the session.
-    pub fn draw_observation(
+    pub fn draw_observation<B: Backend>(
         &mut self,
-        terminal: &mut Terminal<CrosstermBackend<Box<dyn Write>>>,
+        terminal: &mut Terminal<B>,
         reader: &ObservationReader,
         capture: &CaptureView,
         elapsed: Duration,
         status: Option<ExitStatus>,
         presentation: Presentation,
-    ) -> Result<(), RunError> {
+    ) -> Result<(), B::Error> {
         draw(
             terminal,
             &self.root,
@@ -7811,70 +7806,14 @@ mod tests {
         assert!(!chat.contains(" Running: execute "), "{chat}");
     }
 
-    #[derive(Clone, Default)]
-    struct SharedOutput(Arc<Mutex<Vec<u8>>>);
-
-    impl Write for SharedOutput {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    fn render_crossterm_grid(bytes: &[u8], width: usize, height: usize) -> String {
-        let mut grid = vec![vec![' '; width]; height];
-        let mut row = 0usize;
-        let mut col = 0usize;
-        let text = String::from_utf8_lossy(bytes);
-        let mut chars = text.chars().peekable();
-        while let Some(ch) = chars.next() {
-            if ch == '\x1b' && chars.peek() == Some(&'[') {
-                chars.next();
-                let mut params = String::new();
-                let mut final_byte = '\0';
-                for next in chars.by_ref() {
-                    if ('@'..='~').contains(&next) {
-                        final_byte = next;
-                        break;
-                    }
-                    params.push(next);
-                }
-                if final_byte == 'H' || final_byte == 'f' {
-                    let mut parts = params.split(';');
-                    let r = parts
-                        .next()
-                        .and_then(|value| value.parse::<usize>().ok())
-                        .unwrap_or(1);
-                    let c = parts
-                        .next()
-                        .and_then(|value| value.parse::<usize>().ok())
-                        .unwrap_or(1);
-                    row = r.saturating_sub(1);
-                    col = c.saturating_sub(1);
-                } else if final_byte == 'G' {
-                    col = params.parse::<usize>().unwrap_or(1).saturating_sub(1);
-                } else if final_byte == 'C' {
-                    col = col.saturating_add(params.parse::<usize>().unwrap_or(1));
-                }
-                continue;
-            }
-            if ch == '\r' {
-                col = 0;
-            } else if ch == '\n' {
-                row += 1;
-            } else if !ch.is_control() {
-                if row < height && col < width {
-                    grid[row][col] = ch;
-                }
-                col += 1;
-            }
-        }
-        grid.into_iter()
-            .map(|line| line.into_iter().collect::<String>())
+    fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
+        let area = buffer.area;
+        (area.top()..area.bottom())
+            .map(|y| {
+                (area.left()..area.right())
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -7887,14 +7826,7 @@ mod tests {
         status: Option<ExitStatus>,
         presentation: Presentation,
     ) -> String {
-        let output = SharedOutput::default();
-        let mut terminal = Terminal::with_options(
-            CrosstermBackend::new(Box::new(output.clone()) as Box<dyn Write>),
-            TerminalOptions {
-                viewport: Viewport::Fixed(Rect::new(0, 0, 100, 24)),
-            },
-        )
-        .unwrap();
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
         view.draw_observation(
             &mut terminal,
             reader,
@@ -7904,8 +7836,7 @@ mod tests {
             presentation,
         )
         .unwrap();
-        let bytes = output.0.lock().unwrap();
-        render_crossterm_grid(&bytes, 100, 24)
+        buffer_text(terminal.backend().buffer())
     }
 
     #[test]
@@ -7959,9 +7890,9 @@ mod tests {
         assert_ne!(view.state.selected, selected);
     }
 
-    fn preview_session_terminal() -> Terminal<CrosstermBackend<Box<dyn Write>>> {
+    fn preview_session_terminal() -> Terminal<ratatui::backend::TestBackend> {
         Terminal::with_options(
-            CrosstermBackend::new(Box::new(io::sink()) as Box<dyn Write>),
+            ratatui::backend::TestBackend::new(100, 24),
             TerminalOptions {
                 viewport: Viewport::Fixed(Rect::new(0, 0, 100, 24)),
             },
@@ -7997,6 +7928,19 @@ mod tests {
         assert!(session.view.state.details_visible);
         // The resized frame still draws after the viewport change.
         session.draw(&mut terminal).unwrap();
+        assert_eq!(terminal.current_buffer_mut().area, Rect::new(0, 0, 80, 20));
+        // Trace view can still be opened and dismissed without closing the preview.
+        assert_eq!(
+            session
+                .handle(key(KeyCode::Char('v')), &mut terminal)
+                .unwrap(),
+            None
+        );
+        session.draw(&mut terminal).unwrap();
+        assert_eq!(
+            session.handle(key(KeyCode::Esc), &mut terminal).unwrap(),
+            None
+        );
         // Esc dismisses the details overlay before closing the preview session.
         assert_eq!(
             session.handle(key(KeyCode::Esc), &mut terminal).unwrap(),
