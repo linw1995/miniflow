@@ -2561,4 +2561,45 @@ mod tests {
         ));
         assert!(!directory.path().join("other.sqlite").exists());
     }
+
+    #[test]
+    fn context_window_cache_records_discovered_models_and_ignores_blank_base_url() {
+        let cache = ModelContextWindowCache::default();
+        cache.record_models(
+            "/",
+            &[mfn_llm::ModelInfo {
+                id: "ignored".into(),
+                context_window: Some(64_000),
+                ..Default::default()
+            }],
+        );
+        cache.record_models(
+            "https://example.invalid/v1/",
+            &[mfn_llm::ModelInfo {
+                id: "cached-model".into(),
+                context_window: Some(96_000),
+                ..Default::default()
+            }],
+        );
+        let args = WorkflowArguments(
+            [
+                (
+                    mf_runtime::output_id("params", "base_url"),
+                    mf_runtime::ValueRef::from("https://example.invalid/v1"),
+                ),
+                (
+                    mf_runtime::output_id("params", "model"),
+                    mf_runtime::ValueRef::from("cached-model"),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let resolved = cache.resolve(
+            &crate::CompactionConfig::default(),
+            Some(&args),
+            &ExecutionContext::default(),
+        );
+        assert_eq!(resolved.context_window, 96_000);
+    }
 }

@@ -345,3 +345,71 @@ fn query_model_info_enforces_timeout() {
         "{error:?}"
     );
 }
+
+#[test]
+fn model_info_rejects_invalid_config_query_inputs_and_propagates_uncaptured_errors() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let factory = registry.get(MODEL_INFO_KIND).unwrap();
+
+    // Static config validation rejects literal api_key and templated api_key_env.
+    assert!(
+        factory
+            .instantiate(json!({
+                "model": "example-model",
+                "base_url": "https://example.invalid/v1",
+                "api_key": "literal-secret"
+            }))
+            .is_err()
+    );
+    assert!(
+        factory
+            .instantiate(json!({
+                "model": "example-model",
+                "base_url": "https://example.invalid/v1",
+                "api_key_env": {"$ref": "params.env_name"}
+            }))
+            .is_err()
+    );
+
+    // Direct query APIs validate timeout_ms and model before network I/O.
+    let mut zero_timeout = ModelListQuery::new("https://example.invalid/v1");
+    zero_timeout.timeout_ms = 0;
+    assert!(matches!(
+        list_models(&zero_timeout, &ExecutionContext::default()),
+        Err(LlmExecutionError::Configuration { .. })
+    ));
+    let blank_model = ModelInfoQuery::new("   ", "https://example.invalid/v1");
+    assert!(matches!(
+        query_model_info(&blank_model, &ExecutionContext::default()),
+        Err(LlmExecutionError::Configuration { .. })
+    ));
+
+    // Uncaptured provider error fails the node rather than returning status="failed".
+    let mut forbidden = Reply::json(json!({"error": {"message": "forbidden"}}));
+    forbidden.status = 403;
+    let mut bad_payload = Reply::json(json!({"not_data": []}));
+    bad_payload.status = 200;
+    let server = Server::start_models(vec![forbidden, bad_payload]);
+    let prepared = factory
+        .instantiate(json!({
+            "model": "example-model",
+            "base_url": server.base_url,
+            "api_key": {"$ref": "params.api_key"}
+        }))
+        .unwrap();
+    let mut context = context_with_key("node-key");
+    let err = prepared
+        .execution
+        .as_task_node()
+        .unwrap()
+        .execute(Inputs::new(), &mut context)
+        .unwrap_err();
+    assert!(err.to_string().contains("HTTP 403"), "{err}");
+
+    // Missing `data` array in 200 response returns InvalidResponse error.
+    let query = ModelListQuery::new(&server.base_url);
+    assert!(matches!(
+        list_models(&query, &ExecutionContext::default()),
+        Err(LlmExecutionError::InvalidResponse { .. })
+    ));
+}

@@ -536,6 +536,97 @@ mod tests {
             load_store(&path),
             Err(ChatRunError::Preferences { .. })
         ));
+
+        // Oversized files and non-file paths are rejected cleanly.
+        std::fs::write(&path, vec![b' '; MAX_PREFERENCES_BYTES + 1]).unwrap();
+        assert!(matches!(
+            load_store(&path),
+            Err(ChatRunError::Preferences { .. })
+        ));
+        let dir_path = dir.path().join("not-a-file");
+        std::fs::create_dir(&dir_path).unwrap();
+        assert!(matches!(
+            load_store(&dir_path),
+            Err(ChatRunError::Io { .. })
+        ));
+
+        // Serialized stores exceeding the size limit are refused before writing.
+        let mut oversized = ChatPreferencesStore::default();
+        oversized.profiles.insert(
+            "default".into(),
+            ProfilePreferences {
+                parameters: BTreeMap::from([(
+                    "params.model".into(),
+                    Value::String("x".repeat(MAX_PREFERENCES_BYTES + 1)),
+                )]),
+            },
+        );
+        assert!(matches!(
+            save_store(&path, &oversized),
+            Err(ChatRunError::Preferences { .. })
+        ));
+
+        // Unchanged model and non-persistable ports are no-ops.
+        let clean_path = preferences_path(&dir.path().join("clean.sqlite"));
+        persist_profile(
+            &clean_path,
+            "default",
+            ProfilePreferences {
+                parameters: BTreeMap::from([("params.model".into(), json!("model-a"))]),
+            },
+        )
+        .unwrap();
+        persist_selected_model(&clean_path, "default", &schema, "params.model", "model-a").unwrap();
+        persist_selected_model(&clean_path, "default", &schema, "params.api_key", "secret")
+            .unwrap();
+        persist_selected_model(&clean_path, "default", &schema, "params.unknown", "x").unwrap();
+        let clean_loaded = load_store(&clean_path).unwrap();
+        assert_eq!(clean_loaded.profiles["default"].parameters.len(), 1);
+    }
+
+    #[test]
+    fn resolve_helpers_apply_explicit_env_and_default_precedence() {
+        let schema = sample_schema();
+        let ports = sample_ports();
+        let empty = WorkflowArguments::default();
+
+        // Falls back to schema defaults when no explicit value or env var exists.
+        assert_eq!(
+            resolve_display_model(&schema, &ports, &empty, |_| None).as_deref(),
+            Some("your-model")
+        );
+        let default_query =
+            resolve_model_list_query(&schema, &ports, &empty, 5_000, |_| None).unwrap();
+        assert_eq!(default_query.base_url, "https://api.openai.com/v1");
+        assert_eq!(default_query.api_key, None);
+        assert_eq!(default_query.timeout_ms, 5_000);
+
+        // Picks up env-bound api_key and ignores empty base_url.
+        let env_query = resolve_model_list_query(&schema, &ports, &empty, 5_000, |name| {
+            (name == "OPENAI_API_KEY").then(|| OsString::from("env-token"))
+        })
+        .unwrap();
+        assert_eq!(env_query.api_key.as_deref(), Some("env-token"));
+
+        let blank_base = WorkflowArguments(BTreeMap::from([(
+            "params.base_url".into(),
+            ValueRef::from("   "),
+        )]));
+        assert!(resolve_model_list_query(&schema, &ports, &blank_base, 5_000, |_| None).is_none());
+
+        // Saved secret or ill-typed entries are ignored during merge.
+        let saved_with_secret = ProfilePreferences {
+            parameters: BTreeMap::from([
+                ("params.api_key".into(), json!("leaked-in-file")),
+                ("params.temperature".into(), json!("not-a-number")),
+                ("params.base_url".into(), json!("https://api.openai.com/v1")),
+            ]),
+        };
+        let merged =
+            merge_parameters(&schema, Some(&ports), &saved_with_secret, &empty, |_| None).unwrap();
+        assert!(!merged.effective.0.contains_key("params.api_key"));
+        assert!(!merged.effective.0.contains_key("params.temperature"));
+        assert!(merged.needs_default_model);
     }
 
     #[test]

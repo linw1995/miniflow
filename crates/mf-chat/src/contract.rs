@@ -814,5 +814,22 @@ mod output_tests {
             }
         }));
         assert_eq!(ambiguous.provider_parameter_ports(), None);
+
+        let missing_base_url = contract_with_inputs(json!({
+            "params": {"model": {"type": "string", "required": true}}
+        }));
+        assert_eq!(missing_base_url.provider_parameter_ports(), None);
+
+        let ambiguous_api_key = contract_with_inputs(json!({
+            "params": {
+                "model": {"type": "string", "required": true},
+                "base_url": {"type": "string", "required": true},
+                "api_key": {"type": "string", "required": false}
+            },
+            "other": {
+                "api_key": {"type": "string", "required": false}
+            }
+        }));
+        assert_eq!(ambiguous_api_key.provider_parameter_ports(), None);
     }
 }

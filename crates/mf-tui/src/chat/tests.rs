@@ -796,3 +796,270 @@ fn closing_a_live_controller_reaps_a_child_without_rendering() {
     controller.close().unwrap();
     assert!(started.elapsed() < Duration::from_secs(4));
 }
+
+fn model_selectable_manifest() -> mf_runtime::WorkflowManifest {
+    let mut manifest = chat_manifest();
+    manifest.definition = serde_json::from_value(json!({
+        "version":"2026-10-03", "dependencies":{},
+        "nodes":[
+            {"id":"params","kind":"builtin.identity","config":{}},
+            {"id":"start","kind":"builtin.llm","config":{"model":"fixture-model"}}
+        ],
+        "outputs":[
+            {"name":"append","node":"start","port":"append"}
+        ]
+    }))
+    .unwrap();
+    manifest.descriptor.input_schema = serde_json::from_value(json!({
+        "inputs": {
+            "start": {
+                "messages": {
+                    "type": mf_runtime::ValueType::List(Box::new(mf_runtime::ValueType::Object)),
+                    "required": true
+                }
+            },
+            "params": {
+                "model": {
+                    "type": "string",
+                    "required": true,
+                    "binding": {"default": "fallback-model", "secret": false}
+                },
+                "base_url": {
+                    "type": "string",
+                    "required": true,
+                    "binding": {"default": "", "secret": false}
+                },
+                "api_key": {
+                    "type": "string",
+                    "required": false,
+                    "binding": {"default": "", "secret": true}
+                }
+            }
+        },
+        "stdin": {}
+    }))
+    .unwrap();
+    manifest.descriptor.description = mf_runtime::describe_graph(&mf_runtime::CompiledGraph {
+        definition: manifest.definition.clone(),
+        execution_order: vec!["params".into(), "start".into()],
+        relations: Default::default(),
+        children: Default::default(),
+    })
+    .unwrap();
+    manifest
+}
+
+struct MockModelsServer {
+    addr: std::net::SocketAddr,
+    base_url: String,
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl MockModelsServer {
+    fn start(replies: Vec<(u16, String)>) -> Self {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_flag = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
+            for (status, body) in replies {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                if stop_flag.load(Ordering::Acquire) {
+                    break;
+                }
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut request = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => request.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let response = format!(
+                    "HTTP/1.1 {status} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        Self {
+            addr,
+            base_url: format!("http://{addr}/v1"),
+            stop,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for MockModelsServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        let _ = std::net::TcpStream::connect(self.addr);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+#[test]
+fn controller_discovers_first_model_lists_switches_and_reuses_preferences() {
+    let body = json!({
+        "data": [
+            {"id": "first-model", "context_window": 131_072},
+            {"id": "second-model", "context_window": 65_536}
+        ]
+    })
+    .to_string();
+    let server = MockModelsServer::start(vec![(200, body.clone()), (200, body)]);
+    let root = tempfile::tempdir().unwrap();
+    let manifest = model_selectable_manifest();
+    let mut first_launch = launch_runner(root.path(), &manifest, "#!/bin/sh\nexit 0\n");
+    first_launch.parameters.0.insert(
+        "params.base_url".into(),
+        mf_runtime::ValueRef::from(server.base_url.as_str()),
+    );
+    first_launch.parameters.0.insert(
+        "params.api_key".into(),
+        mf_runtime::ValueRef::from("sk-test"),
+    );
+
+    let controller = ChatController::open(first_launch).unwrap();
+    assert!(controller.supports_model_selection());
+    assert!(controller.loading_default_model());
+    assert_eq!(controller.initial_model(), None);
+
+    match next(&controller) {
+        ChatEvent::ModelSelected {
+            model,
+            automatic,
+            warning,
+        } => {
+            assert_eq!(model.as_deref(), Some("first-model"));
+            assert!(automatic);
+            assert!(warning.is_none());
+        }
+        other => panic!("unexpected event: {}", std::any::type_name_of_val(&other)),
+    }
+
+    // List models and switch to second-model.
+    controller.send(ChatCommand::ListModels).unwrap();
+    match next(&controller) {
+        ChatEvent::Models(Ok(models)) => {
+            assert_eq!(models.len(), 2);
+            assert_eq!(models[0].id, "first-model");
+            assert_eq!(models[1].id, "second-model");
+        }
+        _ => panic!("expected models listing"),
+    }
+
+    controller
+        .send(ChatCommand::SelectModel {
+            model: "second-model".into(),
+        })
+        .unwrap();
+    match next(&controller) {
+        ChatEvent::ModelSelected {
+            model,
+            automatic,
+            warning,
+        } => {
+            assert_eq!(model.as_deref(), Some("second-model"));
+            assert!(!automatic);
+            assert!(warning.is_none());
+        }
+        _ => panic!("expected model selection event"),
+    }
+
+    // Reject blank model names cleanly.
+    controller
+        .send(ChatCommand::SelectModel {
+            model: "   ".into(),
+        })
+        .unwrap();
+    assert!(matches!(next(&controller), ChatEvent::Error { .. }));
+    controller.close().unwrap();
+
+    // Reopen without explicit parameters: saved base_url and second-model are reused.
+    let second_launch = launch_runner(root.path(), &manifest, "#!/bin/sh\nexit 0\n");
+    let reopened = ChatController::open(second_launch).unwrap();
+    assert!(reopened.supports_model_selection());
+    assert!(!reopened.loading_default_model());
+    assert_eq!(reopened.initial_model(), Some("second-model"));
+    reopened.close().unwrap();
+}
+
+#[test]
+fn controller_model_selection_handles_missing_ports_missing_base_url_and_provider_error() {
+    // 1. Workflow without provider parameter ports.
+    let root = tempfile::tempdir().unwrap();
+    let plain = ChatController::open(launch(root.path())).unwrap();
+    assert!(!plain.supports_model_selection());
+    plain.send(ChatCommand::ListModels).unwrap();
+    assert!(matches!(next(&plain), ChatEvent::Models(Err(_))));
+    plain
+        .send(ChatCommand::SelectModel {
+            model: "any".into(),
+        })
+        .unwrap();
+    assert!(matches!(next(&plain), ChatEvent::Error { .. }));
+    plain.close().unwrap();
+
+    // 2. Model-selectable workflow with empty base_url falls back to schema default.
+    let empty_root = tempfile::tempdir().unwrap();
+    let manifest = model_selectable_manifest();
+    let empty_launch = launch_runner(empty_root.path(), &manifest, "#!/bin/sh\nexit 0\n");
+    let empty_controller = ChatController::open(empty_launch).unwrap();
+    match next(&empty_controller) {
+        ChatEvent::ModelSelected {
+            model,
+            automatic,
+            warning,
+        } => {
+            assert_eq!(model.as_deref(), Some("fallback-model"));
+            assert!(automatic);
+            assert!(warning.is_none());
+        }
+        _ => panic!("expected automatic fallback model event"),
+    }
+    empty_controller.send(ChatCommand::ListModels).unwrap();
+    match next(&empty_controller) {
+        ChatEvent::Models(Err(message)) => {
+            assert!(message.contains("base_url"), "{message}");
+        }
+        _ => panic!("expected missing base_url error"),
+    }
+    empty_controller.close().unwrap();
+
+    // 3. Provider HTTP failure falls back cleanly and surfaces errors on ListModels.
+    let server = MockModelsServer::start(vec![
+        (500, json!({"error": {"message": "boom"}}).to_string()),
+        (500, json!({"error": {"message": "boom"}}).to_string()),
+    ]);
+    let error_root = tempfile::tempdir().unwrap();
+    let mut err_launch = launch_runner(error_root.path(), &manifest, "#!/bin/sh\nexit 0\n");
+    err_launch.parameters.0.insert(
+        "params.base_url".into(),
+        mf_runtime::ValueRef::from(server.base_url.as_str()),
+    );
+    let err_controller = ChatController::open(err_launch).unwrap();
+    match next(&err_controller) {
+        ChatEvent::ModelSelected {
+            model, automatic, ..
+        } => {
+            assert_eq!(model.as_deref(), Some("fallback-model"));
+            assert!(automatic);
+        }
+        _ => panic!("expected fallback model selection"),
+    }
+    err_controller.send(ChatCommand::ListModels).unwrap();
+    assert!(matches!(next(&err_controller), ChatEvent::Models(Err(_))));
+    err_controller.close().unwrap();
+}

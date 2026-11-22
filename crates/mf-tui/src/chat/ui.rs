@@ -1534,7 +1534,7 @@ impl ChatView {
                 }
                 KeyCode::Char('n') => return self.act(Action::New, controller),
                 KeyCode::Char('s') => return self.act(Action::Switch, controller),
-                KeyCode::Char('l') if self.supports_model_selection => {
+                KeyCode::Char('l') => {
                     return self.act(Action::SelectModel, controller);
                 }
                 KeyCode::Char('e') => {
@@ -4723,6 +4723,140 @@ mod tests {
         assert!(view.mode == Mode::Input);
         assert!(
             view.notice.contains("before switching model"),
+            "{}",
+            view.notice
+        );
+        controller.close().unwrap();
+    }
+
+    #[test]
+    fn model_selector_handles_errors_empty_lists_navigation_unchanged_and_warnings() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
+        let controller = ChatController::open(launch).unwrap();
+
+        // Unsupported chatflow rejects Ctrl+L with a clear notice.
+        view.supports_model_selection = false;
+        view.key(
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL),
+            &controller,
+        );
+        assert!(view.mode == Mode::Input);
+        assert!(
+            view.notice.contains("does not expose model selection"),
+            "{}",
+            view.notice
+        );
+
+        // Header shows selecting indicator while initial model discovery is in flight.
+        view.supports_model_selection = true;
+        view.loading_default_model = true;
+        let loading_header = render(&view, 100, 30);
+        assert!(
+            loading_header.contains("selecting model..."),
+            "{loading_header}"
+        );
+
+        // Open selector and cover provider error, empty list, filter/backspace/page navigation.
+        view.key(
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL),
+            &controller,
+        );
+        assert!(view.mode == Mode::Models);
+        view.event(ChatEvent::Models(Err("network down".into())), &controller);
+        let errored = render(&view, 100, 30);
+        assert!(
+            errored.contains("Could not load models: network down"),
+            "{errored}"
+        );
+        // Pressing Enter with no models loaded is a safe no-op.
+        view.key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &controller,
+        );
+        assert!(view.mode == Mode::Models);
+
+        view.event(ChatEvent::Models(Ok(Vec::new())), &controller);
+        let empty = render(&view, 100, 30);
+        assert!(empty.contains("No models returned by provider"), "{empty}");
+
+        view.active_model = Some("m1".into());
+        view.event(
+            ChatEvent::Models(Ok(vec![
+                mfn_llm::ModelInfo {
+                    id: "m1".into(),
+                    ..Default::default()
+                },
+                mfn_llm::ModelInfo {
+                    id: "m2".into(),
+                    ..Default::default()
+                },
+                mfn_llm::ModelInfo {
+                    id: "m3".into(),
+                    ..Default::default()
+                },
+            ])),
+            &controller,
+        );
+        view.key(
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+            &controller,
+        );
+        assert_eq!(view.selected, 2);
+        view.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &controller);
+        assert_eq!(view.selected, 1);
+        view.key(
+            KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+            &controller,
+        );
+        assert_eq!(view.selected, 0);
+
+        // Non-matching filter shows empty-match message, Backspace trims filter.
+        view.key(
+            KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE),
+            &controller,
+        );
+        let unmatched = render(&view, 100, 30);
+        assert!(unmatched.contains("No matching models"), "{unmatched}");
+        view.key(
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            &controller,
+        );
+        assert!(view.model_filter.is_empty());
+
+        // Choosing the already-active model reports unchanged without issuing a switch.
+        view.key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &controller,
+        );
+        assert!(view.mode == Mode::Input);
+        assert!(
+            view.notice.contains("Model unchanged (m1)"),
+            "{}",
+            view.notice
+        );
+
+        // Esc in Mode::Models with empty filter closes the popup back to Input.
+        view.key(
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL),
+            &controller,
+        );
+        assert!(view.mode == Mode::Models);
+        view.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &controller);
+        assert!(view.mode == Mode::Input);
+
+        // ModelSelected with persistence warning updates notice.
+        view.event(
+            ChatEvent::ModelSelected {
+                model: Some("m2".into()),
+                automatic: false,
+                warning: Some("disk full".into()),
+            },
+            &controller,
+        );
+        assert!(
+            view.notice.contains("preferences not saved: disk full"),
             "{}",
             view.notice
         );
