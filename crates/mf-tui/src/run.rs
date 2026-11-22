@@ -148,7 +148,7 @@ fn open_input_file(path: &Path) -> Result<File, RunError> {
 }
 
 impl RunOptions {
-    pub fn workflow_arguments(
+    pub fn parsed_workflow_arguments(
         &self,
         schema: &mf_runtime::WorkflowInputSchema,
     ) -> Result<WorkflowArguments, RunError> {
@@ -174,6 +174,15 @@ impl RunOptions {
         } else {
             WorkflowArguments::default()
         };
+        schema.validate_values(&arguments)?;
+        Ok(arguments)
+    }
+
+    pub fn workflow_arguments(
+        &self,
+        schema: &mf_runtime::WorkflowInputSchema,
+    ) -> Result<WorkflowArguments, RunError> {
+        let arguments = self.parsed_workflow_arguments(schema)?;
         schema.validate(&arguments)?;
         Ok(arguments)
     }

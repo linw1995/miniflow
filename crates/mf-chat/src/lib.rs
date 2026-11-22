@@ -3,6 +3,7 @@
 mod error;
 pub mod flows;
 mod host;
+mod model_selection;
 mod models;
 mod preview;
 #[macro_use]
@@ -20,13 +21,14 @@ mod usage;
 pub use call_events::{CallEventCollector, CallEventError};
 pub mod workflow;
 
-pub use context::ModelContext;
+pub use context::{ModelContext, context_tokens};
 pub use contract::{
     CallUsage, Completion, ConversationContext, ConversationInputs, ConversationResult,
     MessageUpdate, ModelContextRevision, ResultAlternatives, TitleContext, UncommittedCompletion,
 };
 pub use error::{BackendSnafu, CaptureSnafu, ChatError};
 pub use host::{ChatHost, ChatJob, HostConfig};
+pub use model_selection::{ModelSelection, ModelSelectionCancellation, ModelSelectionUpdate};
 pub use models::{Message, ModelCall, Session, Turn};
 pub use preview::{PreviewConsumer, PreviewDelta, PreviewEvent, PreviewReceiver};
 pub use session::{MessagePage, MessageRecord, SessionPage};
@@ -40,7 +42,8 @@ pub use usage::{
 };
 
 pub use mfn_llm::{
-    ChatMessage, MessageMetadata, TextDelta, ToolCallDelta, UsageAttribution, UsageNode, UsageScope,
+    ChatMessage, MessageMetadata, ModelInfo, TextDelta, ToolCallDelta, UsageAttribution, UsageNode,
+    UsageScope,
 };
 
 pub use workflow::{ConversationBackend, WorkflowProfile};

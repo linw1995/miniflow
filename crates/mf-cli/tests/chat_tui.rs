@@ -1050,3 +1050,272 @@ fn loop_conversations() {
             .any(|message| message["content"] == "final answer")
     );
 }
+
+#[test]
+fn model_selection_defaults_to_first_model_persists_preferences_and_reuses_on_restart() {
+    use mf_chat::contract::CompletionState;
+    use mf_tui::{
+        chat::{ChatCommand, ChatController, ChatEvent, ChatLaunch, ChatOptions},
+        run::RunOptions,
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let server1 = Server::start_with_models(
+        vec![
+            Reply::text("reply-alpha"),
+            Reply::text("Generated title"),
+            Reply::text("reply-beta-1"),
+            Reply::text("reply-beta-2"),
+        ],
+        vec![
+            Reply::models(serde_json::json!([
+                {"id": "model-alpha", "context_window": 131072},
+                {"id": "model-beta", "context_window": 64000}
+            ])),
+            Reply::models(serde_json::json!([
+                {"id": "model-alpha", "context_window": 131072},
+                {"id": "model-beta", "context_window": 64000}
+            ])),
+            Reply::models(serde_json::json!([
+                {"id": "model-alpha", "context_window": 131072},
+                {"id": "model-beta", "context_window": 64000}
+            ])),
+        ],
+    );
+    let server2 = Server::start_with_models(
+        vec![Reply::text("reply-server2")],
+        vec![Reply::models(serde_json::json!([
+            {"id": "server2-first", "context_window": 32768},
+            {"id": "server2-second", "context_window": 16384}
+        ]))],
+    );
+    // Compile chat-flow.json without hardcoding server1's URL as the default, so restart
+    // genuinely proves that saved startup parameters supply both base_url and model.
+    let placeholder_server = Server::start(vec![]);
+    let binary = compiled(root.path(), &placeholder_server, "chat-flow.json");
+    let db_path = root.path().join("chat.sqlite");
+    let prefs_path = root.path().join("chat.sqlite.preferences.json");
+
+    let wait_event = |controller: &ChatController| -> ChatEvent {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            assert!(Instant::now() < deadline, "controller event timed out");
+            if let Some(event) = controller.try_event() {
+                return event;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    };
+    let run_turn = |controller: &ChatController,
+                    session_id: &mut Option<String>,
+                    prompt: &str,
+                    expected: &str| {
+        controller
+            .send(ChatCommand::Submit {
+                session_id: session_id.clone(),
+                prompt: prompt.into(),
+            })
+            .unwrap();
+        loop {
+            match wait_event(controller) {
+                ChatEvent::Submitted { session, .. } => *session_id = Some(session.id),
+                ChatEvent::Observing(_) | ChatEvent::Preview { .. } => {}
+                ChatEvent::Finished { resolution, .. } => {
+                    let CompletionState::Committed(completion) = resolution.unwrap().state else {
+                        panic!("expected committed turn");
+                    };
+                    assert_eq!(completion.result.final_text(), Some(expected));
+                    break;
+                }
+                ChatEvent::Error { source, .. } => panic!("turn failed: {source}"),
+                _ => {}
+            }
+        }
+    };
+
+    // Launch 1: first run supplies base_url (no --params.model); defaults to first model.
+    let launch1 = ChatLaunch::prepare(
+        &binary,
+        ChatOptions {
+            database_path: db_path.clone(),
+            profile: "default".into(),
+            run: RunOptions {
+                arguments: vec![
+                    format!("--params.base_url={}", server1.base_url).into(),
+                    "--params.api_key=synthetic-secret-key".into(),
+                ],
+                ..Default::default()
+            },
+        },
+    )
+    .unwrap();
+    let controller1 = ChatController::open(launch1).unwrap();
+    assert!(controller1.supports_model_selection());
+    assert!(controller1.loading_default_model());
+    match wait_event(&controller1) {
+        ChatEvent::ModelSelected {
+            model,
+            context_window,
+            automatic,
+            warning,
+        } => {
+            assert_eq!(model.as_deref(), Some("model-alpha"));
+            assert_eq!(context_window, Some(131_072));
+            assert!(automatic);
+            assert_eq!(warning, None);
+        }
+        other => panic!(
+            "expected automatic ModelSelected, got {}",
+            std::any::type_name_of_val(&other)
+        ),
+    }
+
+    let mut session_id = None;
+    run_turn(&controller1, &mut session_id, "first prompt", "reply-alpha");
+    assert_eq!(server1.requests()[0].body["model"], "model-alpha");
+
+    // Preferences file persists base_url and auto-selected model, never api_key.
+    let saved_text = fs::read_to_string(&prefs_path).unwrap();
+    assert!(saved_text.contains(&server1.base_url), "{saved_text}");
+    assert!(saved_text.contains("model-alpha"), "{saved_text}");
+    assert!(!saved_text.contains("synthetic-secret-key"), "{saved_text}");
+    assert!(!saved_text.contains("api_key"), "{saved_text}");
+
+    // List and switch model interactively inside the session.
+    controller1.send(ChatCommand::ListModels).unwrap();
+    match wait_event(&controller1) {
+        ChatEvent::Models(Ok(models)) => {
+            let ids: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
+            assert_eq!(ids, vec!["model-alpha", "model-beta"]);
+        }
+        _ => panic!("expected Models list"),
+    }
+    controller1
+        .send(ChatCommand::SelectModel {
+            model: "model-beta".into(),
+        })
+        .unwrap();
+    match wait_event(&controller1) {
+        ChatEvent::ModelSelected {
+            model,
+            context_window,
+            automatic,
+            warning,
+        } => {
+            assert_eq!(model.as_deref(), Some("model-beta"));
+            assert_eq!(context_window, Some(64_000));
+            assert!(!automatic);
+            assert_eq!(warning, None);
+        }
+        _ => panic!("expected manual ModelSelected"),
+    }
+    run_turn(
+        &controller1,
+        &mut session_id,
+        "second prompt",
+        "reply-beta-1",
+    );
+    assert_eq!(server1.requests()[1].body["model"], "model-alpha");
+    assert_eq!(server1.requests()[2].body["model"], "model-beta");
+    controller1.close().unwrap();
+
+    // Launch 2: restart without passing base_url or model; reuses saved startup config.
+    let launch2 = ChatLaunch::prepare(
+        &binary,
+        ChatOptions {
+            database_path: db_path.clone(),
+            profile: "default".into(),
+            run: RunOptions {
+                arguments: vec!["--params.api_key=synthetic-secret-key".into()],
+                ..Default::default()
+            },
+        },
+    )
+    .unwrap();
+    let controller2 = ChatController::open(launch2).unwrap();
+    assert!(!controller2.loading_default_model());
+    assert_eq!(controller2.initial_model(), Some("model-beta"));
+    match wait_event(&controller2) {
+        ChatEvent::ContextWindow {
+            model,
+            context_window,
+        } => {
+            assert_eq!(model, "model-beta");
+            assert_eq!(context_window, Some(64_000));
+        }
+        other => panic!(
+            "expected startup ContextWindow, got {}",
+            std::any::type_name_of_val(&other)
+        ),
+    }
+    assert_eq!(server1.model_requests().len(), 3);
+    controller2
+        .send(ChatCommand::Load {
+            session_id: session_id.clone().unwrap(),
+            before: None,
+        })
+        .unwrap();
+    match wait_event(&controller2) {
+        ChatEvent::Loaded { context_tokens, .. } => {
+            assert!(
+                context_tokens.is_some_and(|tokens| tokens > 0),
+                "expected persisted context tokens on session load, got {context_tokens:?}"
+            );
+        }
+        other => panic!(
+            "expected Loaded event, got {}",
+            std::any::type_name_of_val(&other)
+        ),
+    }
+    run_turn(
+        &controller2,
+        &mut session_id,
+        "third prompt",
+        "reply-beta-2",
+    );
+    assert_eq!(server1.requests()[3].body["model"], "model-beta");
+    assert_eq!(server1.model_requests().len(), 3);
+    controller2.close().unwrap();
+
+    // Launch 3: switching base_url without passing model drops stale saved model and
+    // defaults to the first model of the new endpoint.
+    let launch3 = ChatLaunch::prepare(
+        &binary,
+        ChatOptions {
+            database_path: db_path,
+            profile: "default".into(),
+            run: RunOptions {
+                arguments: vec![
+                    format!("--params.base_url={}", server2.base_url).into(),
+                    "--params.api_key=synthetic-secret-key".into(),
+                ],
+                ..Default::default()
+            },
+        },
+    )
+    .unwrap();
+    let controller3 = ChatController::open(launch3).unwrap();
+    assert!(controller3.loading_default_model());
+    match wait_event(&controller3) {
+        ChatEvent::ModelSelected {
+            model,
+            context_window,
+            automatic,
+            ..
+        } => {
+            assert_eq!(model.as_deref(), Some("server2-first"));
+            assert_eq!(context_window, Some(32_768));
+            assert!(automatic);
+        }
+        _ => panic!("expected server2 automatic ModelSelected"),
+    }
+    run_turn(
+        &controller3,
+        &mut session_id,
+        "fourth prompt",
+        "reply-server2",
+    );
+    assert_eq!(server2.requests()[0].body["model"], "server2-first");
+    controller3.close().unwrap();
+    assert!(placeholder_server.requests().is_empty());
+}
