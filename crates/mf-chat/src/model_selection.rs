@@ -765,17 +765,29 @@ mod tests {
                     "model": {
                         "type": "string",
                         "required": true,
-                        "binding": {"default": "fallback-model", "secret": false}
+                        "binding": {
+                            "default": "fallback-model",
+                            "env": "MF_TEST_UNSET_CHAT_MODEL",
+                            "secret": false
+                        }
                     },
                     "base_url": {
                         "type": "string",
                         "required": true,
-                        "binding": {"default": "", "secret": false}
+                        "binding": {
+                            "default": "",
+                            "env": "MF_TEST_UNSET_CHAT_BASE_URL",
+                            "secret": false
+                        }
                     },
                     "api_key": {
                         "type": "string",
                         "required": false,
-                        "binding": {"default": "", "secret": true}
+                        "binding": {
+                            "default": "",
+                            "env": "MF_TEST_UNSET_CHAT_API_KEY",
+                            "secret": true
+                        }
                     }
                 }
             },
@@ -958,6 +970,10 @@ mod tests {
         std::fs::create_dir(&dir_path).unwrap();
         assert!(matches!(load_store(&dir_path), Err(ChatError::Io { .. })));
 
+        // Opening a path whose parent is a regular file triggers a non-NotFound open error.
+        let not_a_dir = path.join("child");
+        assert!(matches!(load_store(&not_a_dir), Err(ChatError::Io { .. })));
+
         let mut oversized = ChatPreferencesStore::default();
         oversized.profiles.insert(
             "default".into(),
@@ -1016,6 +1032,20 @@ mod tests {
             ValueRef::from("   "),
         )]));
         assert!(resolve_model_list_endpoint(&schema, &ports, &blank_base, |_| None).is_none());
+
+        let no_default_schema: WorkflowInputSchema = serde_json::from_value(json!({
+            "inputs": {
+                "params": {
+                    "model": {"type": "string", "required": true, "binding": {"secret": false}},
+                    "base_url": {"type": "string", "required": true, "binding": {"secret": false}}
+                }
+            },
+            "stdin": {}
+        }))
+        .unwrap();
+        assert!(
+            resolve_model_list_endpoint(&no_default_schema, &ports, &empty, |_| None).is_none()
+        );
 
         let saved_with_secret = ProfilePreferences {
             parameters: BTreeMap::from([
@@ -1132,18 +1162,61 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("chat.sqlite");
         let contract = model_selectable_contract();
-        let mut selection = ModelSelection::prepare(
-            &db_path,
-            "default",
-            &contract,
-            &WorkflowArguments::default(),
-        )
-        .unwrap();
+        let explicit = WorkflowArguments(BTreeMap::from([(
+            "params.base_url".into(),
+            ValueRef::from("http://127.0.0.1:1/v1"),
+        )]));
+        let mut selection =
+            ModelSelection::prepare(&db_path, "default", &contract, &explicit).unwrap();
+        assert_eq!(selection.display_model().as_deref(), Some("fallback-model"));
+
         let cancel = selection.cancellation();
+        let active = cancel.begin_query();
+        cancel.cancel_active();
+        assert!(active.failure().is_some());
+        cancel.finish_query();
+
         cancel.cancel();
         assert!(cancel.is_cancelled());
         let outcome = selection.discover_default_model();
         assert_eq!(outcome.model, None);
         assert_eq!(outcome.warning, None);
+    }
+
+    #[test]
+    fn model_selection_handles_preference_load_and_commit_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("chat.sqlite");
+        let prefs = preferences_path(&db_path);
+        let contract = model_selectable_contract();
+
+        std::fs::write(&prefs, "{not-valid-json").unwrap();
+        assert!(matches!(
+            ModelSelection::prepare(
+                &db_path,
+                "default",
+                &contract,
+                &WorkflowArguments::default()
+            ),
+            Err(ChatError::PreferencesJson { .. })
+        ));
+        std::fs::remove_file(&prefs).unwrap();
+
+        let explicit = WorkflowArguments(BTreeMap::from([(
+            "params.base_url".into(),
+            ValueRef::from("http://127.0.0.1:8080/v1"),
+        )]));
+        let mut selection =
+            ModelSelection::prepare(&db_path, "default", &contract, &explicit).unwrap();
+        std::fs::create_dir(&prefs).unwrap();
+        assert!(matches!(
+            selection.commit_startup_preferences(),
+            Err(ChatError::Io { .. })
+        ));
+
+        // Failed commit retains pending startup preferences so a retry persists them.
+        std::fs::remove_dir(&prefs).unwrap();
+        selection.commit_startup_preferences().unwrap();
+        assert!(prefs.is_file());
     }
 }
