@@ -794,7 +794,8 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 | `mfn-deepseek` | [`builtin.deepseek.search`](#deepseek-web-search-and-fetch) | Endpoint, credential reference, and deadline | Required `query`; optional search controls | `results`: complete structured search results |
 | `mfn-deepseek` | [`builtin.deepseek.fetch`](#deepseek-web-search-and-fetch) | Endpoint, credential reference, and deadline | Required `url` | `title` and Markdown `content` |
 | `mfn-llm` | [`builtin.llm`](#llm-configuration-and-conversation-values) | Model, endpoint, credential reference, generation parameters, deadline, and reply limit | Required `messages`; optional `tools` and `tool_results` | Current assistant `message`; required `text`, `outcome`, and `tool_calls`; optional `usage` and `finish_reason` |
-| `mfn-llm` | [`llm.model_info`](#read-only-model-metadata-lookup) | Model, endpoint, credential reference, deadline, and `capture_errors` | None | Required `status`, `found`, `model`, and `info`; optional `context_window`, `max_output_tokens`, and `error` |
+| `mfn-llm` | [`llm.model_info`](#read-only-model-discovery-and-metadata-lookup) | Model, endpoint, credential reference, deadline, and `capture_errors` | None | Required `status`, `model`, and `info`; optional `context_window`, `max_output_tokens`, and `error` |
+| `mfn-llm` | [`llm.list_models`](#read-only-model-discovery-and-metadata-lookup) | Endpoint, credential reference, deadline, and `capture_errors` | None | Required `status` and `models`; optional `error` |
 
 The built-in Loop is registered as `loop.run`. Its settings belong in the node's ordinary `config`
 object, including the complete Flow definition in `config.body`. See [Structured Loop](#structured-loop) for its body and control kinds.
@@ -1118,24 +1119,35 @@ diagnostics. Optional output metadata is omitted when absent rather than encoded
 `tokio` feature forwards the workflow-managed backend; its native HTTP transport still depends on Tokio with that
 feature disabled.
 
-#### Read-only model metadata lookup
+#### Read-only model discovery and metadata lookup
 
-`mfn-llm` also registers the read-only task node `llm.model_info` and exports `mfn_llm::query_model_info` and
-`mfn_llm::list_models` for querying provider-advertised model metadata from `GET {base_url}/models`.
+`mfn-llm` also registers the read-only task nodes `llm.model_info` and `llm.list_models`, and exports
+`mfn_llm::query_model_info` and `mfn_llm::list_models` for querying provider-advertised models from
+`GET {base_url}/models`.
 
-Configuration uses the same connection and credential contract as `builtin.llm`: required `model`, optional `base_url`
+Configuration uses the same connection and credential contract as `builtin.llm`: optional `base_url`
 (default `https://api.openai.com/v1`), one of `api_key_env` (default `OPENAI_API_KEY`) or a runtime `api_key`
-template, `timeout_ms` (default `60000`), and `capture_errors` (default `false`). Preparation performs no network I/O
-or credential lookup, and execution sends at most one request with redirects and retries disabled.
+template, `timeout_ms` (default `60000`), and `capture_errors` (default `false`). `llm.model_info` additionally
+requires `model`; `llm.list_models` rejects `model`. Preparation performs no network I/O or credential lookup, and
+execution sends at most one request with redirects and retries disabled.
+
+`llm.model_info` outputs:
 
 | Direction | Port | Type | Required |
 | --- | --- | --- | --- |
 | Output | `status` | `string` | Yes; `succeeded`, `not_found`, or `failed` |
-| Output | `found` | `bool` | Yes |
 | Output | `model` | `string` | Yes |
 | Output | `info` | `Object` | Yes; normalized `id` plus optional `name`, `owned_by`, `created_at`, `context_window`, and `max_output_tokens` |
 | Output | `context_window` | `Int64` | When advertised by the provider; skipped otherwise |
 | Output | `max_output_tokens` | `Int64` | When advertised by the provider; skipped otherwise |
+| Output | `error` | `string` | On captured failure |
+
+`llm.list_models` outputs:
+
+| Direction | Port | Type | Required |
+| --- | --- | --- | --- |
+| Output | `status` | `string` | Yes; `succeeded` or `failed` |
+| Output | `models` | `List(Object)` | Yes; normalized `ModelInfo` entries in provider order, deduplicated by `id` (empty on captured failure) |
 | Output | `error` | `string` | On captured failure |
 
 Across OpenAI-compatible dialects, `context_window` is normalized from the first positive integer among

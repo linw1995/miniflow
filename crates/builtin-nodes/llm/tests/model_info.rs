@@ -5,8 +5,8 @@ use mf_runtime::{
     NodeValue, PortSpec, StreamCancellation, ValueType,
 };
 use mfn_llm::{
-    LlmExecutionError, MODEL_INFO_KIND, ModelInfoOutputs, ModelInfoQuery, ModelListQuery,
-    list_models, query_model_info,
+    LIST_MODELS_KIND, LlmExecutionError, MODEL_INFO_KIND, ModelInfoOutputs, ModelInfoQuery,
+    ModelListOutputs, ModelListQuery, list_models, query_model_info,
 };
 use serde_json::json;
 use std::{error::Error, time::Duration};
@@ -178,7 +178,6 @@ fn model_info_node_publishes_found_missing_and_captured_failure_outputs() {
     assert!(!result.skipped.contains("max_output_tokens"));
     let outputs = ModelInfoOutputs::from_values(result.outputs).unwrap();
     assert_eq!(outputs.status, "succeeded");
-    assert!(outputs.found);
     assert_eq!(outputs.model, "vllm-model");
     assert_eq!(outputs.context_window, Some(32_768));
     assert_eq!(outputs.max_output_tokens, Some(4_096));
@@ -198,7 +197,6 @@ fn model_info_node_publishes_found_missing_and_captured_failure_outputs() {
     assert!(!result.skipped.contains("info"));
     let outputs = ModelInfoOutputs::from_values(result.outputs).unwrap();
     assert_eq!(outputs.status, "not_found");
-    assert!(!outputs.found);
     assert_eq!(outputs.info.id, "vllm-model");
     assert_eq!(outputs.info.context_window, None);
 
@@ -224,7 +222,6 @@ fn model_info_node_publishes_found_missing_and_captured_failure_outputs() {
     assert!(!result.skipped.contains("error"));
     let outputs = ModelInfoOutputs::from_values(result.outputs).unwrap();
     assert_eq!(outputs.status, "failed");
-    assert!(!outputs.found);
     assert_eq!(outputs.info.context_window, None);
     let error = outputs.error.unwrap();
     assert!(error.contains("HTTP 403"), "{error}");
@@ -412,4 +409,119 @@ fn model_info_rejects_invalid_config_query_inputs_and_propagates_uncaptured_erro
         list_models(&query, &ExecutionContext::default()),
         Err(LlmExecutionError::InvalidResponse { .. })
     ));
+}
+
+#[test]
+fn list_models_node_publishes_models_and_handles_failures() {
+    let mut forbidden = Reply::json(json!({"error": {"message": "hidden-list-detail"}}));
+    forbidden.status = 403;
+    let mut server_error = Reply::json(json!({"error": {"message": "hidden-500-detail"}}));
+    server_error.status = 500;
+    let server = Server::start_models(vec![
+        Reply::models(json!([
+            {"id": "first-model", "context_window": 131072},
+            {"id": "first-model", "context_window": 1024},
+            {"id": "second-model", "owned_by": "provider"}
+        ])),
+        forbidden,
+        server_error,
+    ]);
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let factory = registry.get(LIST_MODELS_KIND).unwrap();
+
+    // Successful listing omits error port and preserves provider order + deduplication.
+    let prepared = factory
+        .instantiate(json!({
+            "base_url": server.base_url,
+            "api_key": {"$ref": "params.api_key"}
+        }))
+        .unwrap();
+    let mut context = context_with_key("list-node-key");
+    let result = prepared
+        .execution
+        .as_task_node()
+        .unwrap()
+        .execute(Inputs::new(), &mut context)
+        .unwrap();
+    assert!(result.skipped.contains("error"));
+    let outputs = ModelListOutputs::from_values(result.outputs).unwrap();
+    assert_eq!(outputs.status, "succeeded");
+    assert_eq!(outputs.models.len(), 2);
+    assert_eq!(outputs.models[0].id, "first-model");
+    assert_eq!(outputs.models[0].context_window, Some(131_072));
+    assert_eq!(outputs.models[1].id, "second-model");
+    assert_eq!(outputs.error, None);
+
+    // Uncaptured error fails execution.
+    let mut context = context_with_key("list-node-key");
+    let err = prepared
+        .execution
+        .as_task_node()
+        .unwrap()
+        .execute(Inputs::new(), &mut context)
+        .unwrap_err();
+    assert!(err.to_string().contains("HTTP 403"), "{err}");
+
+    // Captured failure publishes empty models list and redacted error message.
+    let captured = factory
+        .instantiate(json!({
+            "base_url": server.base_url,
+            "api_key": {"$ref": "params.api_key"},
+            "capture_errors": true
+        }))
+        .unwrap();
+    let mut context = context_with_key("list-node-key");
+    let result = captured
+        .execution
+        .as_task_node()
+        .unwrap()
+        .execute(Inputs::new(), &mut context)
+        .unwrap();
+    assert!(!result.skipped.contains("error"));
+    let outputs = ModelListOutputs::from_values(result.outputs).unwrap();
+    assert_eq!(outputs.status, "failed");
+    assert!(outputs.models.is_empty());
+    let error = outputs.error.unwrap();
+    assert!(error.contains("HTTP 500"), "{error}");
+    assert!(!error.contains("hidden-500-detail"), "{error}");
+
+    // Missing credentials fail fast even with capture_errors.
+    let missing_key = factory
+        .instantiate(json!({
+            "base_url": server.base_url,
+            "api_key_env": "MINIFLOW_LLM_LIST_MODELS_MISSING_KEY",
+            "capture_errors": true
+        }))
+        .unwrap();
+    let mut context = ExecutionContext::default();
+    let err = missing_key
+        .execution
+        .as_task_node()
+        .unwrap()
+        .execute(Inputs::new(), &mut context)
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("MINIFLOW_LLM_LIST_MODELS_MISSING_KEY"),
+        "{err}"
+    );
+
+    // Cancellation propagates rather than returning status="failed".
+    let mut context = context_with_key("");
+    let cancellation = StreamCancellation::default();
+    cancellation.cancel(
+        mf_runtime::StreamExecutionSnafu {
+            message: "cancelled list models test",
+        }
+        .build(),
+    );
+    context.set_cancellation(cancellation);
+    let err = captured
+        .execution
+        .as_task_node()
+        .unwrap()
+        .execute(Inputs::new(), &mut context)
+        .unwrap_err();
+    assert!(err.to_string().contains("cancelled"), "{err}");
+    assert_eq!(server.model_requests().len(), 3);
 }

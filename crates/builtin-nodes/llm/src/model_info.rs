@@ -27,6 +27,7 @@ use std::{
 };
 
 pub const MODEL_INFO_KIND: &str = "llm.model_info";
+pub const LIST_MODELS_KIND: &str = "llm.list_models";
 
 const DEFAULT_TIMEOUT_MS: u64 = 60_000;
 const MAX_MODELS_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
@@ -93,11 +94,20 @@ pub struct ModelInfoInputs {}
 #[derive(Clone, Debug, PartialEq, Eq, NodeValue)]
 pub struct ModelInfoOutputs {
     pub status: String,
-    pub found: bool,
     pub model: String,
     pub info: ModelInfo,
     pub context_window: Option<i64>,
     pub max_output_tokens: Option<i64>,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, NodeValue)]
+pub struct ModelListInputs {}
+
+#[derive(Clone, Debug, PartialEq, Eq, NodeValue)]
+pub struct ModelListOutputs {
+    pub status: String,
+    pub models: Vec<ModelInfo>,
     pub error: Option<String>,
 }
 
@@ -111,20 +121,51 @@ struct ModelInfoConfig {
     capture_errors: bool,
 }
 
-struct PreparedModelInfoConfig {
+#[derive(mf_runtime::NodeInputs)]
+struct ModelListConfig {
+    base_url: String,
+    api_key_env: String,
+    api_key: Option<Shared<String>>,
+    timeout_ms: u64,
+    capture_errors: bool,
+}
+
+trait DiscoveryConfig: mf_runtime::NodeInputs {
+    fn base_url_mut(&mut self) -> &mut String;
+}
+
+impl DiscoveryConfig for ModelInfoConfig {
+    fn base_url_mut(&mut self) -> &mut String {
+        &mut self.base_url
+    }
+}
+
+impl DiscoveryConfig for ModelListConfig {
+    fn base_url_mut(&mut self) -> &mut String {
+        &mut self.base_url
+    }
+}
+
+struct PreparedDiscoveryConfig {
     fields: BTreeMap<String, ConfigTemplate>,
 }
 
-impl PreparedModelInfoConfig {
-    fn parse(value: Value) -> Result<Self, NodeBuildError> {
+impl PreparedDiscoveryConfig {
+    fn parse<C: DiscoveryConfig>(
+        value: Value,
+        require_model: bool,
+        field_requirement: &'static str,
+    ) -> Result<Self, NodeBuildError> {
         let mut fields: BTreeMap<String, Value> = deserialize_config(value)?;
-        ensure!(
-            fields.contains_key("model"),
-            InvalidConfigSnafu {
-                field: "model",
-                requirement: "a model identifier or template",
-            }
-        );
+        if require_model {
+            ensure!(
+                fields.contains_key("model"),
+                InvalidConfigSnafu {
+                    field: "model",
+                    requirement: "a model identifier or template",
+                }
+            );
+        }
         ensure!(
             !(fields.contains_key("api_key") && fields.contains_key("api_key_env")),
             InvalidConfigSnafu {
@@ -140,7 +181,7 @@ impl PreparedModelInfoConfig {
         ] {
             fields.entry(name.into()).or_insert(value);
         }
-        let ports = <ModelInfoConfig as mf_runtime::NodeInputs>::ports();
+        let ports = C::ports();
         let mut templates = BTreeMap::new();
         for (field, value) in fields {
             let port =
@@ -149,7 +190,7 @@ impl PreparedModelInfoConfig {
                     .find(|port| port.name == field)
                     .context(InvalidConfigSnafu {
                         field: &field,
-                        requirement: "a supported LLM model info configuration field",
+                        requirement: field_requirement,
                     })?;
             let template = ConfigTemplate::parse(value).context(TemplateSnafu { field: &field })?;
             if field == "api_key" {
@@ -181,6 +222,22 @@ impl PreparedModelInfoConfig {
         Ok(Self { fields: templates })
     }
 
+    fn parse_model_info(value: Value) -> Result<Self, NodeBuildError> {
+        Self::parse::<ModelInfoConfig>(
+            value,
+            true,
+            "a supported LLM model info configuration field",
+        )
+    }
+
+    fn parse_list_models(value: Value) -> Result<Self, NodeBuildError> {
+        Self::parse::<ModelListConfig>(
+            value,
+            false,
+            "a supported LLM list models configuration field",
+        )
+    }
+
     fn references(&self) -> Vec<ContextReference> {
         self.fields
             .iter()
@@ -188,7 +245,7 @@ impl PreparedModelInfoConfig {
             .collect()
     }
 
-    fn resolve(&self, context: &ExecutionContext) -> Result<ModelInfoConfig, LlmConfigError> {
+    fn resolve<C: DiscoveryConfig>(&self, context: &ExecutionContext) -> Result<C, LlmConfigError> {
         let mut fields = Inputs::new();
         for (field, template) in &self.fields {
             let value = template.resolve(context).context(TemplateSnafu { field })?;
@@ -199,19 +256,23 @@ impl PreparedModelInfoConfig {
             };
             fields.insert(field.clone(), value);
         }
-        let mut config = <ModelInfoConfig as mf_runtime::NodeInputs>::from_inputs(fields.clone())
-            .context(DecodeSnafu)?;
+        let mut config = C::from_inputs(fields.clone()).context(DecodeSnafu)?;
         for (field, value) in &fields {
             validate_field(field, value)?;
         }
-        config.base_url = validate_base_url("base_url", &config.base_url)?;
+        *config.base_url_mut() = validate_base_url("base_url", config.base_url_mut())?;
         Ok(config)
     }
 }
 
 /// Validates static literals and templates for `llm.model_info` without external I/O.
 pub fn validate_model_info_config(value: Value) -> Result<(), NodeBuildError> {
-    PreparedModelInfoConfig::parse(value).map(|_| ())
+    PreparedDiscoveryConfig::parse_model_info(value).map(|_| ())
+}
+
+/// Validates static literals and templates for `llm.list_models` without external I/O.
+pub fn validate_list_models_config(value: Value) -> Result<(), NodeBuildError> {
+    PreparedDiscoveryConfig::parse_list_models(value).map(|_| ())
 }
 
 fn shared_client() -> Result<ReqwestClient, LlmExecutionError> {
@@ -441,26 +502,27 @@ fn nonnegative_i64(value: &Value) -> Option<i64> {
         .or_else(|| value.as_u64().and_then(|number| i64::try_from(number).ok()))
 }
 
+fn node_http_client(
+    slot: &OnceLock<Result<ReqwestClient, Arc<reqwest::Error>>>,
+) -> Result<ReqwestClient, LlmExecutionError> {
+    slot.get_or_init(|| build_http_client().map_err(Arc::new))
+        .as_ref()
+        .cloned()
+        .map_err(Arc::clone)
+        .context(ClientInitializationSnafu)
+}
+
 struct ModelInfoNode {
-    config: PreparedModelInfoConfig,
+    config: PreparedDiscoveryConfig,
     client: OnceLock<Result<ReqwestClient, Arc<reqwest::Error>>>,
 }
 
 impl ModelInfoNode {
-    fn client(&self) -> Result<ReqwestClient, LlmExecutionError> {
-        self.client
-            .get_or_init(|| build_http_client().map_err(Arc::new))
-            .as_ref()
-            .cloned()
-            .map_err(Arc::clone)
-            .context(ClientInitializationSnafu)
-    }
-
     fn execute_lookup(
         &self,
         context: &ExecutionContext,
     ) -> Result<ModelInfoOutputs, LlmExecutionError> {
-        let config = self.config.resolve(context)?;
+        let config: ModelInfoConfig = self.config.resolve(context)?;
         let key = resolve_api_key(config.api_key.as_ref(), &config.api_key_env)?;
         let query = ModelInfoQuery {
             model: config.model.clone(),
@@ -468,11 +530,10 @@ impl ModelInfoNode {
             api_key: (!key.is_empty()).then_some(key),
             timeout_ms: config.timeout_ms,
         };
-        let client = self.client()?;
+        let client = node_http_client(&self.client)?;
         match query_model_info_with_client(&client, &query, context) {
             Ok(Some(info)) => Ok(ModelInfoOutputs {
                 status: "succeeded".into(),
-                found: true,
                 model: info.id.clone(),
                 context_window: info.context_window,
                 max_output_tokens: info.max_output_tokens,
@@ -481,7 +542,6 @@ impl ModelInfoNode {
             }),
             Ok(None) => Ok(ModelInfoOutputs {
                 status: "not_found".into(),
-                found: false,
                 model: config.model.clone(),
                 info: ModelInfo {
                     id: config.model,
@@ -495,7 +555,6 @@ impl ModelInfoNode {
                 context.check_future_limits(None)?;
                 Ok(ModelInfoOutputs {
                     status: "failed".into(),
-                    found: false,
                     model: config.model.clone(),
                     info: ModelInfo {
                         id: config.model,
@@ -538,15 +597,92 @@ impl TypedTaskNode for ModelInfoNode {
     }
 }
 
+struct ListModelsNode {
+    config: PreparedDiscoveryConfig,
+    client: OnceLock<Result<ReqwestClient, Arc<reqwest::Error>>>,
+}
+
+impl ListModelsNode {
+    fn execute_list(
+        &self,
+        context: &ExecutionContext,
+    ) -> Result<ModelListOutputs, LlmExecutionError> {
+        let config: ModelListConfig = self.config.resolve(context)?;
+        let key = resolve_api_key(config.api_key.as_ref(), &config.api_key_env)?;
+        let query = ModelListQuery {
+            base_url: config.base_url,
+            api_key: (!key.is_empty()).then_some(key),
+            timeout_ms: config.timeout_ms,
+        };
+        let client = node_http_client(&self.client)?;
+        match list_models_with_client(&client, &query, context) {
+            Ok(models) => Ok(ModelListOutputs {
+                status: "succeeded".into(),
+                models,
+                error: None,
+            }),
+            Err(error) if config.capture_errors => {
+                context.check_future_limits(None)?;
+                Ok(ModelListOutputs {
+                    status: "failed".into(),
+                    models: Vec::new(),
+                    error: Some(error.to_string()),
+                })
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl TypedTaskNode for ListModelsNode {
+    type Input = ModelListInputs;
+    type Output = ModelListOutputs;
+
+    fn execute(
+        &self,
+        _: Self::Input,
+        context: &mut ExecutionContext,
+    ) -> Result<TypedNodeResult<Self::Output>, NodeExecutionError> {
+        let outputs = self.execute_list(context)?;
+        let skipped = outputs
+            .error
+            .is_none()
+            .then(|| "error".to_owned())
+            .into_iter()
+            .collect();
+        Ok(TypedNodeResult {
+            outputs,
+            skipped,
+            loop_summary: None,
+        })
+    }
+}
+
 /// Prepares the read-only `llm.model_info` task node without acquiring network resources.
 pub fn prepare_model_info(value: Value) -> Result<PreparedNode, NodeBuildError> {
-    let config = PreparedModelInfoConfig::parse(value)?;
+    let config = PreparedDiscoveryConfig::parse_model_info(value)?;
     let metadata = NodeMetadata {
         context_references: config.references(),
         ..Default::default()
     };
     PreparedNode::typed_task(
         ModelInfoNode {
+            config,
+            client: OnceLock::new(),
+        },
+        metadata,
+    )
+}
+
+/// Prepares the read-only `llm.list_models` task node without acquiring network resources.
+pub fn prepare_list_models(value: Value) -> Result<PreparedNode, NodeBuildError> {
+    let config = PreparedDiscoveryConfig::parse_list_models(value)?;
+    let metadata = NodeMetadata {
+        context_references: config.references(),
+        ..Default::default()
+    };
+    PreparedNode::typed_task(
+        ListModelsNode {
             config,
             client: OnceLock::new(),
         },
@@ -561,6 +697,13 @@ inventory::submit! {
     }
 }
 
+inventory::submit! {
+    NodeRegistration {
+        kind: LIST_MODELS_KIND,
+        factory: NodeFactory::Plain(prepare_list_models),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,10 +712,11 @@ mod tests {
 
     #[test]
     fn model_info_config_validates_defaults_and_rejects_invalid_fields() {
-        let config = PreparedModelInfoConfig::parse(json!({"model": "example-model"}))
-            .unwrap()
-            .resolve(&ExecutionContext::default())
-            .unwrap();
+        let config: ModelInfoConfig =
+            PreparedDiscoveryConfig::parse_model_info(json!({"model": "example-model"}))
+                .unwrap()
+                .resolve(&ExecutionContext::default())
+                .unwrap();
         assert_eq!(config.model, "example-model");
         assert_eq!(config.base_url, "https://api.openai.com/v1");
         assert_eq!(config.api_key_env, "OPENAI_API_KEY");
@@ -591,6 +735,33 @@ mod tests {
         ] {
             assert!(
                 validate_model_info_config(invalid.clone()).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn list_models_config_validates_defaults_and_rejects_invalid_fields() {
+        let config: ModelListConfig = PreparedDiscoveryConfig::parse_list_models(json!({}))
+            .unwrap()
+            .resolve(&ExecutionContext::default())
+            .unwrap();
+        assert_eq!(config.base_url, "https://api.openai.com/v1");
+        assert_eq!(config.api_key_env, "OPENAI_API_KEY");
+        assert_eq!(config.timeout_ms, DEFAULT_TIMEOUT_MS);
+        assert!(!config.capture_errors);
+
+        for invalid in [
+            json!({"model": "example"}),
+            json!({"api_key": "literal-secret"}),
+            json!({"api_key": {"$ref": "params.k"}, "api_key_env": "KEY"}),
+            json!({"base_url": "file:///tmp/models"}),
+            json!({"base_url": "https://user:pass@host/v1"}),
+            json!({"timeout_ms": 0}),
+            json!({"temperature": 0.5}),
+        ] {
+            assert!(
+                validate_list_models_config(invalid.clone()).is_err(),
                 "{invalid}"
             );
         }
@@ -724,6 +895,22 @@ mod tests {
             .unwrap();
         assert_eq!(prepared.metadata.ports.inputs, ModelInfoInputs::ports());
         assert_eq!(prepared.metadata.ports.outputs, ModelInfoOutputs::ports());
+        assert!(prepared.execution.as_task_node().is_some());
+    }
+
+    #[test]
+    fn prepared_list_models_reflects_ports_without_initializing_client() {
+        let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
+        let prepared = registry
+            .get(LIST_MODELS_KIND)
+            .unwrap()
+            .instantiate(json!({
+                "base_url": "http://127.0.0.1:9/v1",
+                "api_key_env": "MINIFLOW_LLM_UNAVAILABLE_CREDENTIAL"
+            }))
+            .unwrap();
+        assert_eq!(prepared.metadata.ports.inputs, ModelListInputs::ports());
+        assert_eq!(prepared.metadata.ports.outputs, ModelListOutputs::ports());
         assert!(prepared.execution.as_task_node().is_some());
     }
 }
