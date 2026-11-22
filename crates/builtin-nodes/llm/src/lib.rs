@@ -322,7 +322,7 @@ impl PreparedConfig {
     }
 }
 
-pub(crate) fn validate_base_url(field: &str, value: &str) -> Result<String, LlmConfigError> {
+fn validate_base_url(field: &str, value: &str) -> Result<String, LlmConfigError> {
     let base = url::Url::parse(value).context(BaseUrlSnafu)?;
     ensure!(
         matches!(base.scheme(), "http" | "https") && base.host_str().is_some(),
@@ -344,7 +344,7 @@ pub(crate) fn validate_base_url(field: &str, value: &str) -> Result<String, LlmC
     Ok(base.as_str().trim_end_matches('/').to_owned())
 }
 
-pub(crate) fn validate_field(field: &str, value: &ValueRef) -> Result<(), LlmConfigError> {
+fn validate_field(field: &str, value: &ValueRef) -> Result<(), LlmConfigError> {
     let requirement = match field {
         "attribution" if value.contains_secret() => Some("public accounting labels"),
         "attribution"
@@ -384,7 +384,7 @@ pub(crate) fn validate_field(field: &str, value: &ValueRef) -> Result<(), LlmCon
     Ok(())
 }
 
-pub(crate) fn build_http_client() -> Result<ReqwestClient, reqwest::Error> {
+fn build_http_client() -> Result<ReqwestClient, reqwest::Error> {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
@@ -394,7 +394,7 @@ pub(crate) fn build_http_client() -> Result<ReqwestClient, reqwest::Error> {
         .map(ReqwestClient::from)
 }
 
-pub(crate) fn resolve_api_key(
+fn resolve_api_key(
     api_key: Option<&Shared<String>>,
     api_key_env: &str,
 ) -> Result<String, LlmExecutionError> {

@@ -19,7 +19,7 @@ use rig_core::{
 };
 use rig_reqwest::ReqwestClient;
 use serde_json::Value;
-use snafu::{IntoError, OptionExt, ResultExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 use std::{
     collections::BTreeMap,
     sync::{Arc, OnceLock},
@@ -300,15 +300,13 @@ fn query_model_info_with_client(
         .find(|info| info.id == query.model))
 }
 
-fn transport_provider_error(error: rig_core::http_client::Error) -> LlmExecutionError {
-    let source = ProviderError::from_transport_error(error);
+fn provider_context(source: &mut ProviderError) -> ProviderSnafu<&'static str, Option<u16>> {
     ProviderSnafu {
         kind: source.kind().code(),
         status: source
             .provider_response_status()
             .map(|status| status.as_u16()),
     }
-    .into_error(source)
 }
 
 async fn fetch_models_list(
@@ -322,15 +320,21 @@ async fn fetch_models_list(
     }
     let request = builder
         .body(Bytes::new())
-        .map_err(|error| transport_provider_error(rig_core::http_client::Error::Protocol(error)))?;
+        .map_err(|error| {
+            ProviderError::from_transport_error(rig_core::http_client::Error::Protocol(error))
+        })
+        .with_context(provider_context)?;
     let response = client
         .send_streaming(request)
         .await
-        .map_err(transport_provider_error)?;
+        .map_err(ProviderError::from_transport_error)
+        .with_context(provider_context)?;
     let mut stream = response.into_body();
     let mut bytes = Vec::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(transport_provider_error)?;
+        let chunk = chunk
+            .map_err(ProviderError::from_transport_error)
+            .with_context(provider_context)?;
         ensure!(
             bytes.len().saturating_add(chunk.len()) <= MAX_MODELS_RESPONSE_BYTES,
             InvalidResponseSnafu {
