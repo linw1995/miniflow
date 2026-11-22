@@ -144,6 +144,13 @@ pub enum ChatError {
     Decode {
         source: mf_runtime::InputDecodeError,
     },
+    #[snafu(display("invalid chat preferences at {path:?}: {reason}"))]
+    Preferences { path: PathBuf, reason: String },
+    #[snafu(display("could not parse chat preferences at {path:?}: {source}"))]
+    PreferencesJson {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
     #[snafu(display("could not {operation} at {path:?}: {source}"))]
     Io {
         operation: &'static str,
