@@ -575,8 +575,9 @@ entries and 128 KiB of UTF-8 data, including correlation metadata, with an expli
 while continuing to drain and validate. Each tool call retains at most 8 KiB of recent argument text
 within that shared budget. Older argument deltas are omitted from the provisional view, not from
 tool dispatch or persistence. The notice counts both fully and partially omitted deltas.
-A complete result replaces provisional segments with its display delta. Prefixes without a valid
-result stay visibly unfinished. Older invocation events cannot alter the active turn.
+The final result supplies the authoritative display transcript. If execution fails with no display
+replacement for a partial reply, the terminal keeps the preview visibly unfinished. It is not added
+to the database or model context. Older invocation events cannot alter the active turn.
 
 ## Executable conversation backend
 
@@ -594,9 +595,11 @@ Result capture is bounded by `MAX_RECOVERY_BYTES` (16 MiB).
 
 The [single-call](../examples/chat-flow.json), [title](../examples/chat-title-flow.json),
 [loop](../examples/chat-loop-flow.json), [calculator](../examples/chat-calculator-flow.json), and
-[context-replacement](../examples/chat-context-flow.json) examples compile directly. The loop
-forwards `chat.delta` through `config.stream_outputs.answer` while accumulating all generated
-assistants and usages. Private loop context is distinct from its exported additions.
+[context-replacement](../examples/chat-context-flow.json) examples compile directly. The single-call
+example exports only its terminal result; use a Flow that exports `answer`, such as the title
+example, for live text previews. The loop forwards `chat.delta` through
+`config.stream_outputs.answer` while accumulating all generated assistants and usages. Private loop
+context is distinct from its exported additions.
 
 ## Persistence and recovery
 

@@ -890,6 +890,108 @@ fn application_exit(
     }
 }
 
+#[test]
+fn terminal_shows_live_text_and_keeps_it_after_a_captured_stream_failure() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    let mut reply = Reply::stream_text("visible live prefix");
+    let prefix = reply.body.split_once("\n\n").unwrap().0;
+    let prefix = format!("{prefix}\n\n");
+    let truncated = "data: {";
+    reply.body = format!("{prefix}{truncated}");
+    reply.fragments = Some(vec![prefix.into_bytes(), truncated.as_bytes().to_vec()]);
+    let release = Arc::new(AtomicBool::new(false));
+    reply.release_after_prefix = Some(release.clone());
+    let server = Server::start(vec![reply]);
+    let root = tempfile::tempdir().unwrap();
+    let binary = compiled(root.path(), &server, "chat-title-flow.json");
+    let database = root.path().join("chat.sqlite");
+    let pty = openpty(
+        Some(&Winsize {
+            ws_row: 28,
+            ws_col: 120,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        }),
+        None,
+    )
+    .unwrap();
+    let flags = FdFlag::from_bits_truncate(fcntl(&pty.master, FcntlArg::F_GETFD).unwrap());
+    fcntl(&pty.master, FcntlArg::F_SETFD(flags | FdFlag::FD_CLOEXEC)).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mf"))
+        .args(["run", "--chat", "--chat-db"])
+        .arg(&database)
+        .arg(binary)
+        .args(["--params.model", "fixture-model"])
+        .stdin(Stdio::from(pty.slave.try_clone().unwrap()))
+        .stderr(Stdio::from(pty.slave))
+        .stdout(Stdio::null())
+        .env_clear()
+        .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|value| ("LLVM_PROFILE_FILE", value)))
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .spawn()
+        .unwrap();
+    let mut master = fs::File::from(pty.master);
+    fcntl(&master, FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).unwrap();
+    let mut screen = Screen::new(120, 28);
+    let mut stage = 0;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let mut bytes = [0; 8192];
+        if let Ok(n) = master.read(&mut bytes)
+            && n > 0
+        {
+            screen.feed(&bytes[..n]);
+            let text = screen.text();
+            match stage {
+                0 if text.contains("What would you like") => {
+                    master.write_all(b"Stream failure probe\x1b\r").unwrap();
+                    stage += 1;
+                }
+                1 if text.contains("visible live prefix") => {
+                    release.store(true, Ordering::Release);
+                    stage += 1;
+                }
+                2 if text.contains("[failed; model context unchanged]")
+                    && text.contains("visible live prefix")
+                    && text.contains("Response unfinished") =>
+                {
+                    master.write_all(b"\x11").unwrap();
+                    stage += 1;
+                }
+                _ => {}
+            }
+        }
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(
+                status.success() && stage == 3,
+                "{status} at stage {stage}: {}",
+                screen.text()
+            );
+            break;
+        }
+        if Instant::now() > deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("chat stalled at stage {stage}: {}", screen.text());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let database = ChatDatabase::open(database).unwrap();
+    let session = database
+        .list_sessions(false, 50, None)
+        .unwrap()
+        .sessions
+        .remove(0);
+    let page = database.messages(&session.id, 50, None).unwrap();
+    assert_eq!(page.messages.len(), 1);
+    assert_eq!(page.messages[0].turn_state, "failed");
+    assert_eq!(database.model_context(&session.id).unwrap().revision, 0);
+}
+
 fn loop_conversations() {
     use mf_chat::contract::CompletionState;
     use mf_tui::chat::{ChatCommand, ChatController, ChatEvent, ChatLaunch, ChatOptions};

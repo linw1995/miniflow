@@ -1044,6 +1044,12 @@ The terminal SHALL reconcile live text against the final result. Successful pers
 - **WHEN** a user cancels an active turn after visible increments
 - **THEN** the terminal marks that text incomplete and preserves existing cancellation and retry behavior
 
+#### Scenario: Settle a captured failure without replacement messages
+
+- **WHEN** a Flow streams an answer prefix and then reports a failed result with no display messages
+- **THEN** the terminal keeps the prefix visible as unfinished even after loading the saved turn
+- **AND** only the authoritative result is persisted, without adding the preview to history or model context
+
 #### Scenario: Retain a reply after storage failure
 
 - **WHEN** a valid final result exists but its storage transaction fails

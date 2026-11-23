@@ -661,9 +661,8 @@ impl CompactionGenerationContext {
     fn from_inputs(
         request: &ConversationInputs,
         parameters: Option<&WorkflowArguments>,
-        config: &crate::CompactionContext,
     ) -> Result<Option<Self>, ChatError> {
-        let Some(parameters) = parameters else {
+        let (Some(parameters), Some(context)) = (parameters, request.context.as_ref()) else {
             return Ok(None);
         };
         let parameter = |name| {
@@ -676,26 +675,9 @@ impl CompactionGenerationContext {
                     reason: "requires resolved model, base_url, and api_key inputs",
                 })
         };
-        let context = match request.context.as_ref() {
-            Some(context) => {
-                let mut context = context.clone();
-                context.compaction = config.clone();
-                context
-            }
-            None => crate::contract::ConversationContext {
-                title: crate::contract::TitleContext {
-                    source: "provisional".into(),
-                    revision: 0,
-                    attempted: false,
-                    enabled: false,
-                },
-                model_context: crate::contract::ModelContextRevision { revision: 0 },
-                compaction: config.clone(),
-            },
-        };
         Ok(Some(Self {
             messages: request.messages.clone(),
-            context,
+            context: context.clone(),
             model: parameter("model")?,
             base_url: parameter("base_url")?,
             api_key: parameter("api_key")?,
@@ -717,24 +699,19 @@ impl InvocationPolicy {
         &self,
         request: &mut ConversationInputs,
         context: &ExecutionContext,
-    ) -> Result<crate::CompactionContext, ChatError> {
-        let compaction = if request.context.is_some() || self.compaction_parameters.is_some() {
-            self.context_windows.resolve(
+    ) -> Result<(), ChatError> {
+        if let Some(admitted) = &mut request.context {
+            admitted.title.enabled = self.automatic_titles;
+            admitted.compaction = self.context_windows.resolve(
                 &self.automatic_compaction,
                 self.probe_parameters.as_ref(),
                 context,
-            )
-        } else {
-            self.automatic_compaction.resolved_context(None)
-        };
+            );
+        }
         context
             .check_future_limits(None)
             .map_err(mf_runtime::NodeExecutionError::from)?;
-        if let Some(context) = &mut request.context {
-            context.title.enabled = self.automatic_titles;
-            context.compaction = compaction.clone();
-        }
-        Ok(compaction)
+        Ok(())
     }
 
     fn builds_auxiliary_result(&self) -> bool {
@@ -816,7 +793,7 @@ impl InvocationCall {
         sink: &mut dyn EmissionSink,
     ) -> Result<mf_runtime::FlowOutputs, ChatError> {
         let mut started: TurnStarted = host_arguments(context)?;
-        let compaction = self.policy.resolve_context(&mut started.request, context)?;
+        self.policy.resolve_context(&mut started.request, context)?;
         let title_context = TitleGenerationContext::from_inputs(
             &started.request,
             self.policy.title_parameters.as_ref(),
@@ -824,7 +801,6 @@ impl InvocationCall {
         let compaction_context = CompactionGenerationContext::from_inputs(
             &started.request,
             self.policy.compaction_parameters.as_ref(),
-            &compaction,
         )?;
         let mut consume = |delta| emit_preview(&started.invocation, delta, sink);
         let response = match &self.target {
@@ -1679,12 +1655,8 @@ mod tests {
             mf_runtime::ValueRef::from("compact-credential").into_secret(),
         );
         let title = TitleGenerationContext::from_inputs(&request, Some(&parameters)).unwrap();
-        let compact = CompactionGenerationContext::from_inputs(
-            &request,
-            Some(&compact_parameters),
-            &crate::CompactionContext::default(),
-        )
-        .unwrap();
+        let compact =
+            CompactionGenerationContext::from_inputs(&request, Some(&compact_parameters)).unwrap();
         let outputs = InvocationOutputs::from_completion(completed_turn(), title, compact)
             .into_values()
             .unwrap();
