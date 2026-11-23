@@ -1265,3 +1265,26 @@ fn observation_sources_capture_the_active_trace_identity() {
     assert_eq!(captured.trace_flags, 1);
     assert!(record.time_unix_nano > 0);
 }
+
+#[test]
+fn nested_event_collectors_forward_to_outer_collectors() {
+    use mf_telemetry::events;
+    use std::sync::{Arc, Mutex};
+    let outer = Arc::new(Mutex::new(Vec::new()));
+    let inner = Arc::new(Mutex::new(Vec::new()));
+    let outer_sink = outer.clone();
+    let _outer_guard =
+        events::collect(move |event| outer_sink.lock().unwrap().push(event.name.clone()));
+    {
+        let inner_sink = inner.clone();
+        let _inner_guard =
+            events::collect(move |event| inner_sink.lock().unwrap().push(event.name.clone()));
+        events::record("fixture.nested", json!({"call_id": "nested"})).unwrap();
+    }
+    events::record("fixture.outer", json!({"call_id": "outer"})).unwrap();
+    assert_eq!(*inner.lock().unwrap(), vec!["fixture.nested"]);
+    assert_eq!(
+        *outer.lock().unwrap(),
+        vec!["fixture.nested", "fixture.outer"]
+    );
+}

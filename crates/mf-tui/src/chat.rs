@@ -164,6 +164,10 @@ pub enum ChatEvent {
         invocation: Invocation,
         preview: LivePreview,
     },
+    Compacting {
+        invocation: Invocation,
+        active: bool,
+    },
     Finished {
         invocation: Invocation,
         resolution: Result<ReconciledCompletion, mf_chat::ChatError>,
@@ -184,6 +188,8 @@ pub struct ChatController {
     deferred: Mutex<Option<ChatEvent>>,
     preview: Arc<Mutex<LivePreview>>,
     preview_revision: AtomicU64,
+    compacting: Arc<Mutex<(Option<Invocation>, bool)>>,
+    presented_compacting: AtomicBool,
     presented_invocation: Mutex<Option<Invocation>>,
     supports_model_selection: bool,
     initial_model: Option<String>,
@@ -218,6 +224,7 @@ impl ChatController {
         let busy = Arc::new(AtomicBool::new(false));
         let cancel = Arc::new(AtomicBool::new(false));
         let preview = Arc::new(Mutex::new(LivePreview::default()));
+        let compacting = Arc::new(Mutex::new((None, false)));
         let controller = Controller {
             launch: Arc::new(launch),
             model_selection,
@@ -229,6 +236,7 @@ impl ChatController {
             cancel: Arc::clone(&cancel),
             retained: None,
             preview: preview.clone(),
+            compacting: compacting.clone(),
         };
         let worker = thread::Builder::new()
             .name("mf-chat-controller".into())
@@ -243,6 +251,8 @@ impl ChatController {
             deferred: Mutex::new(None),
             preview,
             preview_revision: AtomicU64::new(0),
+            compacting,
+            presented_compacting: AtomicBool::new(false),
             presented_invocation: Mutex::new(None),
             supports_model_selection,
             initial_model,
@@ -304,6 +314,7 @@ impl ChatController {
             .or_else(|| self.events.try_recv().ok());
         if let Some(ChatEvent::Submitted { invocation, .. }) = &event {
             *self.presented_invocation.lock().unwrap() = Some(invocation.clone());
+            self.presented_compacting.store(false, Ordering::Release);
         }
         if matches!(event, Some(ChatEvent::Finished { .. }))
             && let Some(preview) = self.updated_preview()
@@ -313,8 +324,26 @@ impl ChatController {
         }
         if matches!(event, Some(ChatEvent::Finished { .. })) {
             *self.presented_invocation.lock().unwrap() = None;
+            self.presented_compacting.store(false, Ordering::Release);
         }
-        event.or_else(|| self.updated_preview())
+        event
+            .or_else(|| self.updated_preview())
+            .or_else(|| self.updated_compacting())
+    }
+
+    fn updated_compacting(&self) -> Option<ChatEvent> {
+        let expected = self.presented_invocation.lock().unwrap().clone();
+        let (invocation, active) = {
+            let state = self.compacting.lock().unwrap();
+            (state.0.clone(), state.1)
+        };
+        if expected.is_none() || invocation != expected {
+            return None;
+        }
+        if self.presented_compacting.swap(active, Ordering::AcqRel) == active {
+            return None;
+        }
+        invocation.map(|invocation| ChatEvent::Compacting { invocation, active })
     }
 
     fn updated_preview(&self) -> Option<ChatEvent> {
@@ -379,6 +408,7 @@ struct Controller {
     cancel: Arc<AtomicBool>,
     retained: Option<Retained>,
     preview: Arc<Mutex<LivePreview>>,
+    compacting: Arc<Mutex<(Option<Invocation>, bool)>>,
 }
 
 impl Controller {
@@ -619,6 +649,20 @@ impl Controller {
                 preview.lock().unwrap().apply(event)
             })
         });
+        *self.compacting.lock().unwrap() = (Some(invocation.clone()), false);
+        let host_calls = Mutex::new(mf_chat::CallEventCollector::default());
+        let compacting = Arc::clone(&self.compacting);
+        let compact_invocation = invocation.clone();
+        let _compaction_events = mf_telemetry::events::collect(move |event| {
+            let mut calls = host_calls.lock().unwrap();
+            if calls.observe(event).is_ok() {
+                let active = calls.has_active_purpose("compaction");
+                let mut state = compacting.lock().unwrap();
+                if state.0.as_ref() == Some(&compact_invocation) {
+                    state.1 = active;
+                }
+            }
+        });
         let resolution = mf_chat::workflow::run_conversation_with_context_windows(
             &self.database,
             request,
@@ -629,6 +673,7 @@ impl Controller {
             preview_consumer,
             self.model_selection.context_windows(),
         );
+        *self.compacting.lock().unwrap() = (None, false);
         let outcome = captured
             .lock()
             .expect("capture state was not poisoned")
