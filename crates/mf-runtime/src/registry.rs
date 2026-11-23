@@ -149,6 +149,35 @@ impl NodeRegistry {
         self.flows.get(name)
     }
 
+    /// Adds a node kind to this registry without submitting it to the linked inventory.
+    pub fn register(
+        &mut self,
+        registration: &'static NodeRegistration,
+    ) -> Result<(), NodeRegistryError> {
+        snafu::ensure!(
+            !matches!(
+                registration.kind,
+                crate::EXIT_LOOP_KIND
+                    | crate::LOOP_SOURCE_ID
+                    | crate::ASSIGN_KIND
+                    | crate::ROOT_SOURCE_ID
+            ),
+            ReservedKindSnafu {
+                kind: registration.kind
+            }
+        );
+        let std::collections::btree_map::Entry::Vacant(entry) =
+            self.registrations.entry(registration.kind)
+        else {
+            return DuplicateKindSnafu {
+                kind: registration.kind,
+            }
+            .fail();
+        };
+        entry.insert(registration);
+        Ok(())
+    }
+
     pub fn from_inventory() -> Result<Self, NodeRegistryError> {
         Self::from_registrations(inventory::iter::<NodeRegistration>)
     }
@@ -213,27 +242,7 @@ impl NodeRegistry {
         let mut registry = Self::default();
 
         for registration in registrations {
-            snafu::ensure!(
-                !matches!(
-                    registration.kind,
-                    crate::EXIT_LOOP_KIND
-                        | crate::LOOP_SOURCE_ID
-                        | crate::ASSIGN_KIND
-                        | crate::ROOT_SOURCE_ID
-                ),
-                ReservedKindSnafu {
-                    kind: registration.kind
-                }
-            );
-            snafu::ensure!(
-                registry
-                    .registrations
-                    .insert(registration.kind, registration)
-                    .is_none(),
-                DuplicateKindSnafu {
-                    kind: registration.kind
-                }
-            );
+            registry.register(registration)?;
         }
 
         Ok(registry)
@@ -561,6 +570,23 @@ mod tests {
 
         assert!(
             matches!(error, NodeRegistryError::DuplicateKind { ref kind } if kind == "test.duplicate")
+        );
+    }
+
+    #[test]
+    fn local_registration_is_isolated_and_keeps_the_original_on_duplicate() {
+        let mut registry = NodeRegistry::from_inventory().unwrap();
+        registry.register(&FIRST).unwrap();
+        assert!(matches!(
+            registry.register(&SECOND),
+            Err(NodeRegistryError::DuplicateKind { kind }) if kind == FIRST.kind
+        ));
+        assert!(std::ptr::eq(registry.get(FIRST.kind).unwrap(), &FIRST));
+        assert!(
+            NodeRegistry::from_inventory()
+                .unwrap()
+                .get(FIRST.kind)
+                .is_none()
         );
     }
 

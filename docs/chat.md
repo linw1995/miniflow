@@ -64,10 +64,6 @@ sessions from those instructions and successful legacy exchanges exactly once. A
 edit or remove system instructions; later requests do not reinsert `session.system`. Archiving keeps
 all records but prevents new turns until restoration.
 
-Registered kinds include `mf_chat.session.create`, `.list`, `.load`, `.rename`, `.archive`, `.restore`,
-`mf_chat.messages.list`, and `mf_chat.context.load`. The former `history()` API and
-`mf_chat.history.load` are removed. All node inputs name an explicit database path.
-
 ## Shared conversation contract
 
 ### Inputs
@@ -235,11 +231,12 @@ admitted context revision, and advertised alternatives when contract-backed. It 
 sequence and loads the complete admitted context before releasing its short transaction. Only one
 turn runs per session; other sessions can progress while a provider is pending.
 
-`mf_chat.turn.complete` validates against that immutable admission, appends every display message
-with checked sequence allocation, and saves the complete canonical result, usages, and terminal
-state together. Successful settlement also publishes the derived context revision and applies an
-eligible title in that transaction. Failed results save their valid display prefix and facts but
-publish neither context nor title.
+`ChatDatabase::complete_turn` and `mf_chat.conversation.finish` share the same settlement logic. It
+validates against that immutable admission, appends every display message with checked sequence
+allocation, and saves the complete canonical result, usages, and terminal state together. Successful
+settlement also publishes the derived context revision and applies an eligible title in that
+transaction. Failed results save their valid display prefix and facts but publish neither context
+nor title.
 
 Context publication compares-and-swaps the admitted revision. A stale successful update fails
 without partial messages, facts, or title writes; save-only retry cannot silently rebase it. Title
@@ -251,11 +248,11 @@ Replay compares the complete canonical result, including variant, both replaceme
 title, metadata, and usages. Identical replay returns the stored completion before attempting CAS.
 It never republishes an old context after later turns. Different data for the same identity conflicts.
 
-`mf_chat.turn.fail` and `mf_chat.call.fail` finalize work without a terminal result and cannot
-overwrite committed data. Operational error summaries are bounded; canonical result errors remain
-complete. `mf_chat.turn.load` and `mf_chat.call.load` expose individual records for inspection.
-Opening a database under its ownership lock marks abandoned running work interrupted, without
-automatically resending requests or rebuilding context from previews.
+`ChatDatabase::fail_turn` and `ChatDatabase::fail_call` finalize work without a terminal result and
+cannot overwrite committed data. Operational error summaries are bounded; canonical result errors
+remain complete. `ChatDatabase::turn` and `ChatDatabase::call` expose individual records for
+inspection. Opening a database under its ownership lock marks abandoned running work interrupted,
+without automatically resending requests or rebuilding context from previews.
 
 ## Embedded conversation host
 
@@ -277,7 +274,12 @@ Finite and compatible TaskStream graphs are composed through `workflow.call`; pr
 native values and completion reads the produced alternative after call success. An inactive optional
 port must not skip settlement. Graphs requiring a native Event/Stream coordinator use the host-bound
 `mf_chat.workflow.invoke` adapter. Both paths share cancellation, result validation, and storage.
-The host drains declared streams even without a preview subscriber.
+The host drains declared streams even without a preview subscriber. In
+[`conversation.json`](../crates/mf-chat/workflows/conversation.json), CEL gates decide whether to
+call the title and compaction Flows. They read only eligibility facts; credentials and transcripts
+travel over separate native ports. Only the `mf_chat.*` kinds in this definition are globally
+registered. Adapters that the host adds during composition are registered only for that composed
+Flow.
 
 The user Flow owns business generation, tools, explicit usage composition, and captured-failure
 policy, and may also own compaction thresholds and summary requests by declaring `replace_context`.
@@ -474,8 +476,8 @@ arguments or metadata. No placeholder or alternative message schema is introduce
 
 ## Usage statistics
 
-Use `ChatDatabase::usage`, `ChatHost::usage`, or `mf_chat.usage.query`. Queries read committed facts
-in one SQLite snapshot and never execute a model or change billing records:
+Use `ChatDatabase::usage` or `ChatHost::usage`. Queries read committed facts in one SQLite snapshot
+and never execute a model or change billing records:
 
 ```rust
 let statistics = host.usage(mf_chat::UsageQuery {

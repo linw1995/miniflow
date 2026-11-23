@@ -54,39 +54,19 @@ fn advance_context(database: &ChatDatabase, id: &str) {
 }
 
 #[test]
-fn context_query_node_and_message_accessors_preserve_all_roles_and_annotations() {
-    use mf_runtime::NodeValue;
+fn context_query_and_message_accessors_preserve_all_roles_and_annotations() {
     let (_root, database, id) = database();
     let begun = database
         .begin_turn(&id, "Question", identity(), None)
         .unwrap();
+    let mut expected = begun.request.messages;
+    expected.extend(exchange("query"));
     database
         .complete_turn(begun.invocation, result("query"))
         .unwrap();
-    let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
-    let node = registry
-        .get("mf_chat.context.load")
-        .unwrap()
-        .instantiate(json!({}))
-        .unwrap();
-    let input = mf_chat::nodes::ModelContextInputs {
-        database_path: database.path().to_str().unwrap().into(),
-        session_id: id.clone(),
-    };
-    let outputs = node
-        .execution
-        .as_task_node()
-        .unwrap()
-        .execute(
-            input.into_values().unwrap(),
-            &mut mf_runtime::ExecutionContext::default(),
-        )
-        .unwrap()
-        .outputs;
-    let loaded = mf_chat::nodes::ModelContextOutputs::from_values(outputs)
-        .unwrap()
-        .context;
-    assert_eq!(loaded, database.model_context(&id).unwrap());
+    let loaded = database.model_context(&id).unwrap();
+    assert_eq!(loaded.revision, 1);
+    assert_eq!(loaded.messages, expected);
     let encoded = serde_json::to_value(&loaded).unwrap();
     assert_eq!(
         serde_json::from_value::<mf_chat::ModelContext>(encoded).unwrap(),

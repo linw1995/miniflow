@@ -230,14 +230,6 @@ fn load(input: ModelContextInputs) -> Result<ModelContextOutputs, ChatError> {
     })
 }
 
-register_operation!(
-    "mf_chat.context.load",
-    LoadModelContext,
-    ModelContextInputs,
-    ModelContextOutputs,
-    load
-);
-
 /// Returns the context token count reported by the last valid non-auxiliary model call.
 pub fn context_tokens(usages: &[CallUsage]) -> Option<u64> {
     usages.iter().rev().find_map(call_context_tokens)

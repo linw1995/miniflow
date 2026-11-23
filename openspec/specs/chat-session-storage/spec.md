@@ -26,9 +26,13 @@ The chat host SHALL initialize SQLite storage and apply bundled pending migratio
 - **WHEN** opening the database or applying a pending migration fails
 - **THEN** initialization returns a contextual error with its source and no requests are accepted
 
-### Requirement: Expose application storage operations as nodes
+### Requirement: Share storage handlers with the conversation Flow
 
-The `mf-chat` package SHALL expose typed `mf_chat.*` nodes for initialization, session management, turn transitions including optional title persistence, and usage queries. Direct database APIs and node adapters SHALL call the same storage handlers. Host storage operations MUST NOT construct or execute wrapper workflows. Preparing or inspecting these nodes MUST NOT open storage, apply migrations, or execute queries.
+The database APIs and the conversation Flow's admission and settlement nodes SHALL call the same
+storage handlers. Initialization, session management, history and context reads, recovery, and usage
+queries SHALL use direct database APIs rather than node adapters. Host storage operations MUST NOT
+construct or execute wrapper workflows. Preparing or inspecting the conversation nodes MUST NOT open
+storage, apply migrations, or execute queries.
 
 #### Scenario: Prepare without a database
 

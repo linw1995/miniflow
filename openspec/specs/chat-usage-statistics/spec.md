@@ -88,7 +88,9 @@ The statistics query SHALL support all sessions or one session, optional profile
 
 ### Requirement: Query deterministic statistics directly
 
-The host SHALL query statistics directly through the shared storage handler. The application query node SHALL adapt that same handler for workflows without creating a nested flow. It SHALL aggregate persisted facts without issuing model requests or updating billing facts. Results SHALL remain reproducible for unchanged stored data and identical filters.
+The host SHALL query statistics directly through the database API. Queries SHALL aggregate persisted
+facts without executing a workflow, issuing model requests, or updating billing facts. Results SHALL
+remain reproducible for unchanged stored data and identical filters.
 
 #### Scenario: Query without provider credentials
 

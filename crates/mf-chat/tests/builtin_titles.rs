@@ -356,7 +356,7 @@ fn embedded_application_declares_and_prepares_the_builtin_title_call() {
     let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
     let plan = mf_chat::flows::conversation::plan(&registry).unwrap();
     for (id, kind) in [
-        ("prepare_title", "mf_chat.title.prepare"),
+        ("prepare_title", "builtin.code"),
         ("finish", "mf_chat.conversation.finish"),
     ] {
         assert!(

@@ -10,8 +10,9 @@ use crate::{
 };
 use mf_compiler::{CompiledWorkflow, FlowBuilder, WorkflowDefinition};
 use mf_runtime::{
-    ExecutionContext, FlowNode, NodeMetadata, NodeRegistry, NodeValue, PreparedNode,
-    StreamCancellation, TypedNodeResult, TypedStreamNode, WorkflowArguments,
+    ExecutionContext, FlowNode, NodeFactory, NodeMetadata, NodeRegistration, NodeRegistry,
+    NodeValue, PreparedNode, StreamCancellation, TypedNodeResult, TypedStreamNode,
+    WorkflowArguments,
 };
 use mf_telemetry::{identity::RunId, observation::Observer};
 use snafu::{IntoError, OptionExt, ResultExt, ensure};
@@ -612,25 +613,6 @@ pub struct SettlementOutputs {
     pub settlement: Settlement,
 }
 
-fn settle(input: CompleteTurnInputs) -> Result<SettlementOutputs, ChatError> {
-    let settlement = settle_result(input)?;
-    Ok(SettlementOutputs { settlement })
-}
-
-fn settle_result(input: CompleteTurnInputs) -> Result<Settlement, ChatError> {
-    Ok(Settlement {
-        completion: crate::turn::complete(input)?.completion,
-    })
-}
-
-register_operation!(
-    "mf_chat.turn.settle",
-    Settle,
-    CompleteTurnInputs,
-    SettlementOutputs,
-    settle
-);
-
 #[derive(Clone, Debug, NodeValue)]
 struct TitleGenerationContext {
     prompt: String,
@@ -897,165 +879,15 @@ impl TypedStreamNode for InvokeWorkflow {
 }
 
 #[derive(NodeValue)]
-struct PrepareTitleInputs {
-    completed: ConversationCompleted,
+struct CompletedTurn {
+    database_path: String,
+    invocation: Invocation,
+    result: ConversationResult,
 }
-
-#[derive(Debug, Default, NodeValue)]
-struct PreparedTitle {
-    enabled: bool,
-    prompt: Option<String>,
-    text: Option<String>,
-    status: Option<String>,
-    context: Option<crate::contract::ConversationContext>,
-    model: Option<mf_runtime::ValueRef>,
-    base_url: Option<mf_runtime::ValueRef>,
-    api_key: Option<mf_runtime::ValueRef>,
-}
-
-struct PrepareTitle;
-
-impl mf_runtime::TypedTaskNode for PrepareTitle {
-    type Input = PrepareTitleInputs;
-    type Output = PreparedTitle;
-
-    fn execute(
-        &self,
-        input: Self::Input,
-        _: &mut ExecutionContext,
-    ) -> Result<TypedNodeResult<Self::Output>, mf_runtime::NodeExecutionError> {
-        let completed = input.completed;
-        let enabled = completed.title_context.is_some()
-            && completed.result.status == "succeeded"
-            && completed.result.title.is_none()
-            && !completed.result.usages.iter().any(|usage| {
-                usage
-                    .attribution
-                    .as_ref()
-                    .and_then(|attribution| attribution.purpose.as_deref())
-                    == Some("title")
-            });
-        if !enabled {
-            return Ok(TypedNodeResult {
-                outputs: PreparedTitle::default(),
-                skipped: [
-                    "prompt", "text", "status", "context", "model", "base_url", "api_key",
-                ]
-                .map(String::from)
-                .into(),
-                loop_summary: None,
-            });
-        }
-        let title = completed
-            .title_context
-            .expect("enabled title has generation context");
-        Ok(PreparedTitle {
-            enabled: true,
-            prompt: Some(title.prompt),
-            text: Some(
-                completed
-                    .result
-                    .final_text()
-                    .expect("validated success has an answer")
-                    .to_owned(),
-            ),
-            status: Some(completed.result.status),
-            context: Some(title.context),
-            model: Some(title.model),
-            base_url: Some(title.base_url),
-            api_key: Some(title.api_key),
-        }
-        .into())
-    }
-}
-
-register_task!("mf_chat.title.prepare", PrepareTitle);
-
-#[derive(NodeValue)]
-struct CompactionGateInputs {
-    completed: ConversationCompleted,
-}
-
-#[derive(Debug, Default, NodeValue)]
-struct CompactionGateOutputs {
-    enabled: bool,
-    messages: Option<Vec<mfn_llm::ChatMessage>>,
-    append_messages: Option<Vec<mfn_llm::ChatMessage>>,
-    usages: Option<Vec<crate::CallUsage>>,
-    context: Option<crate::contract::ConversationContext>,
-    model: Option<mf_runtime::ValueRef>,
-    base_url: Option<mf_runtime::ValueRef>,
-    api_key: Option<mf_runtime::ValueRef>,
-}
-
-struct CompactGate;
-
-impl mf_runtime::TypedTaskNode for CompactGate {
-    type Input = CompactionGateInputs;
-    type Output = CompactionGateOutputs;
-
-    fn execute(
-        &self,
-        input: Self::Input,
-        _: &mut ExecutionContext,
-    ) -> Result<TypedNodeResult<Self::Output>, mf_runtime::NodeExecutionError> {
-        let completed = input.completed;
-        let append_messages = match &completed.result.update {
-            crate::MessageUpdate::Append { messages } => Some(messages),
-            crate::MessageUpdate::ReplaceContext { .. } => None,
-        };
-        let enabled = completed.compaction_context.is_some()
-            && completed.result.status == "succeeded"
-            && append_messages.is_some()
-            && !completed.result.usages.iter().any(|usage| {
-                usage
-                    .attribution
-                    .as_ref()
-                    .and_then(|attribution| attribution.purpose.as_deref())
-                    == Some("compaction")
-            });
-        if !enabled {
-            return Ok(TypedNodeResult {
-                outputs: CompactionGateOutputs::default(),
-                skipped: [
-                    "messages",
-                    "append_messages",
-                    "usages",
-                    "context",
-                    "model",
-                    "base_url",
-                    "api_key",
-                ]
-                .map(String::from)
-                .into(),
-                loop_summary: None,
-            });
-        }
-        let compaction = completed
-            .compaction_context
-            .expect("enabled compaction has generation context");
-        let append_messages = append_messages
-            .expect("enabled compaction operates on append results")
-            .clone();
-        Ok(CompactionGateOutputs {
-            enabled: true,
-            messages: Some(compaction.messages),
-            append_messages: Some(append_messages),
-            usages: Some(completed.result.usages),
-            context: Some(compaction.context),
-            model: Some(compaction.model),
-            base_url: Some(compaction.base_url),
-            api_key: Some(compaction.api_key),
-        }
-        .into())
-    }
-}
-
-register_task!("mf_chat.compact.gate", CompactGate);
 
 #[derive(NodeValue)]
 struct FinishConversationInputs {
-    completed: ConversationCompleted,
+    completed: CompletedTurn,
     title: mf_runtime::Nullable<String>,
     title_usages: Vec<crate::CallUsage>,
     compacted_messages: mf_runtime::Nullable<Vec<mfn_llm::ChatMessage>>,
@@ -1122,16 +954,103 @@ impl mf_runtime::TypedTaskNode for FinishConversation {
                 .lock()
                 .expect("delivery state was not poisoned") = Some(completion.response.clone());
         }
-        Ok(settle(completion)?.into())
+        let completion = crate::turn::complete(completion)?.completion;
+        Ok(SettlementOutputs {
+            settlement: Settlement { completion },
+        }
+        .into())
     }
 }
 
 register_task!("mf_chat.conversation.finish", FinishConversation::default());
 
-#[derive(Debug, NodeValue)]
+#[derive(NodeValue)]
+struct AuxiliaryFacts {
+    status: String,
+    has_title: bool,
+    appends_context: bool,
+    title_configured: bool,
+    compaction_configured: bool,
+    purposes: Vec<String>,
+}
+
+#[derive(Default, NodeValue)]
 struct RoutedEvent {
     preview: Option<PreviewEvent>,
-    completed: Option<ConversationCompleted>,
+    completed: Option<CompletedTurn>,
+    auxiliary: Option<AuxiliaryFacts>,
+    title_prompt: Option<String>,
+    title_text: Option<String>,
+    title_context: Option<crate::ConversationContext>,
+    title_model: Option<mf_runtime::ValueRef>,
+    title_base_url: Option<mf_runtime::ValueRef>,
+    title_api_key: Option<mf_runtime::ValueRef>,
+    compact_messages: Option<Vec<mfn_llm::ChatMessage>>,
+    compact_append_messages: Option<Vec<mfn_llm::ChatMessage>>,
+    compact_usages: Option<Vec<crate::CallUsage>>,
+    compact_context: Option<crate::ConversationContext>,
+    compact_model: Option<mf_runtime::ValueRef>,
+    compact_base_url: Option<mf_runtime::ValueRef>,
+    compact_api_key: Option<mf_runtime::ValueRef>,
+}
+
+impl RoutedEvent {
+    fn output_ports() -> &'static [mf_runtime::PortSpec] {
+        static PORTS: OnceLock<Vec<mf_runtime::PortSpec>> = OnceLock::new();
+        PORTS.get_or_init(Self::ports)
+    }
+
+    fn from_completion(completed: ConversationCompleted) -> Self {
+        let ConversationCompleted {
+            database_path,
+            invocation,
+            result,
+            title_context,
+            compaction_context,
+        } = completed;
+        // CEL gates only need these facts. Keep credentials and transcript values on native edges.
+        let auxiliary = AuxiliaryFacts {
+            status: result.status.clone(),
+            has_title: result.title.is_some(),
+            appends_context: matches!(&result.update, crate::MessageUpdate::Append { .. }),
+            title_configured: title_context.is_some(),
+            compaction_configured: compaction_context.is_some(),
+            purposes: result
+                .usages
+                .iter()
+                .filter_map(|usage| usage.attribution.as_ref()?.purpose.clone())
+                .collect(),
+        };
+        let mut outputs = Self {
+            auxiliary: Some(auxiliary),
+            ..Default::default()
+        };
+        if let Some(title) = title_context {
+            outputs.title_prompt = Some(title.prompt);
+            outputs.title_text = result.final_text().map(str::to_owned);
+            outputs.title_context = Some(title.context);
+            outputs.title_model = Some(title.model);
+            outputs.title_base_url = Some(title.base_url);
+            outputs.title_api_key = Some(title.api_key);
+        }
+        if let Some(compaction) = compaction_context
+            && let crate::MessageUpdate::Append { messages } = &result.update
+        {
+            outputs.compact_messages = Some(compaction.messages);
+            outputs.compact_append_messages = Some(messages.clone());
+            outputs.compact_usages = Some(result.usages.clone());
+            outputs.compact_context = Some(compaction.context);
+            outputs.compact_model = Some(compaction.model);
+            outputs.compact_base_url = Some(compaction.base_url);
+            outputs.compact_api_key = Some(compaction.api_key);
+        }
+        outputs.completed = Some(CompletedTurn {
+            database_path,
+            invocation,
+            result,
+        });
+        outputs
+    }
 }
 
 #[derive(Default)]
@@ -1139,16 +1058,22 @@ struct RouteInvocation {
     completed: Option<ConversationCompleted>,
 }
 
-impl mf_runtime::TypedEventNode for RouteInvocation {
-    type Input = InvocationEmission;
-    type Output = RoutedEvent;
+impl mf_runtime::NodePortContract for RouteInvocation {
+    fn ports(&self) -> mf_runtime::NodePorts {
+        mf_runtime::NodePorts {
+            inputs: InvocationEmission::ports(),
+            outputs: RoutedEvent::output_ports().to_vec(),
+        }
+    }
+}
 
+impl mf_runtime::EventNode for RouteInvocation {
     fn on_event(
         &mut self,
-        event: mf_runtime::NodeEvent<Self::Input>,
+        event: mf_runtime::NodeEvent,
         _: &mf_runtime::EventContext<'_>,
-    ) -> Result<mf_runtime::EventEffects<Self::Output>, mf_runtime::NodeExecutionError> {
-        let (outputs, skipped) = match event {
+    ) -> Result<mf_runtime::EventEffects, mf_runtime::NodeExecutionError> {
+        let outputs = match event {
             mf_runtime::NodeEvent::Input(input) => {
                 ensure!(
                     self.completed.is_none(),
@@ -1157,6 +1082,7 @@ impl mf_runtime::TypedEventNode for RouteInvocation {
                         reason: "cannot follow the final response"
                     }
                 );
+                let input = InvocationEmission::from_values(input).map_err(ChatError::from)?;
                 ensure!(
                     input.event.preview.is_some() != input.event.completed.is_some(),
                     InvalidSnafu {
@@ -1166,43 +1092,32 @@ impl mf_runtime::TypedEventNode for RouteInvocation {
                 );
                 if let Some(preview) = input.event.preview {
                     preview.validate()?;
-                    (
-                        RoutedEvent {
-                            preview: Some(preview),
-                            completed: None,
-                        },
-                        vec!["completed".into()],
-                    )
+                    RoutedEvent {
+                        preview: Some(preview),
+                        ..Default::default()
+                    }
                 } else {
                     self.completed = input.event.completed;
                     return Ok(Default::default());
                 }
             }
             mf_runtime::NodeEvent::UpstreamClosed => {
-                let completed = self.completed.take().context(InvalidSnafu {
+                RoutedEvent::from_completion(self.completed.take().context(InvalidSnafu {
                     field: "conversation event",
                     reason: "ended without a final response",
-                })?;
-                (
-                    RoutedEvent {
-                        preview: None,
-                        completed: Some(completed),
-                    },
-                    vec!["preview".into()],
-                )
+                })?)
             }
             mf_runtime::NodeEvent::Timer => return Ok(Default::default()),
         };
+        let mut result = mf_runtime::encode_typed_result(outputs.into())?;
+        result.skipped = RoutedEvent::output_ports()
+            .iter()
+            .filter(|port| !result.outputs.contains_key(port.name.as_ref()))
+            .map(|port| port.name.to_string())
+            .collect();
         Ok(mf_runtime::EventEffects {
-            emissions: vec![
-                TypedNodeResult {
-                    outputs,
-                    skipped: skipped.into_iter().collect(),
-                    loop_summary: None,
-                }
-                .into(),
-            ],
-            timer: Default::default(),
+            emissions: vec![result.into()],
+            ..Default::default()
         })
     }
 
@@ -1215,7 +1130,7 @@ inventory::submit! {
     mf_runtime::NodeRegistration {
         kind: "mf_chat.conversation.route",
         factory: mf_runtime::NodeFactory::Plain(|_| {
-            PreparedNode::typed_event(RouteInvocation::default(), NodeMetadata::default())
+            PreparedNode::event(RouteInvocation::default(), NodeMetadata::default())
         }),
     }
 }
@@ -1274,20 +1189,6 @@ fn prepare_adapter(config: serde_json::Value) -> Result<PreparedNode, mf_runtime
         ..Default::default()
     };
     PreparedNode::new(adapter, metadata)
-}
-
-inventory::submit! {
-    mf_runtime::NodeRegistration {
-        kind: "mf_chat.workflow.prepare",
-        factory: mf_runtime::NodeFactory::Plain(prepare_adapter),
-    }
-}
-
-inventory::submit! {
-    mf_runtime::NodeRegistration {
-        kind: "mf_chat.workflow.complete",
-        factory: mf_runtime::NodeFactory::Plain(prepare_adapter),
-    }
 }
 
 struct PrepareWorkflow {
@@ -1443,8 +1344,6 @@ impl mf_runtime::TypedTaskNode for WorkflowPreview {
     }
 }
 
-register_task!("mf_chat.workflow.preview", WorkflowPreview::default());
-
 #[derive(NodeValue)]
 struct ToolCallPreviewInputs {
     tool_call_delta: crate::ToolCallDelta,
@@ -1477,7 +1376,17 @@ impl mf_runtime::TypedTaskNode for ToolCallPreview {
     }
 }
 
-register_task!(
+static PREPARE_WORKFLOW_NODE: NodeRegistration = NodeRegistration {
+    kind: "mf_chat.workflow.prepare",
+    factory: NodeFactory::Plain(prepare_adapter),
+};
+static COMPLETE_WORKFLOW_NODE: NodeRegistration = NodeRegistration {
+    kind: "mf_chat.workflow.complete",
+    factory: NodeFactory::Plain(prepare_adapter),
+};
+static WORKFLOW_PREVIEW_NODE: NodeRegistration =
+    task_registration!("mf_chat.workflow.preview", WorkflowPreview::default());
+static TOOL_CALL_PREVIEW_NODE: NodeRegistration = task_registration!(
     "mf_chat.workflow.tool_call_preview",
     ToolCallPreview::default()
 );
@@ -1588,7 +1497,7 @@ fn compose_conversation(
     title_parameters: Option<WorkflowArguments>,
     compaction_parameters: Option<WorkflowArguments>,
     capture: CompletionCapture,
-    registry: &NodeRegistry,
+    registry: &mut NodeRegistry,
 ) -> Result<ConversationPlan, ChatError> {
     let contract = ChatContract::from_manifest(manifest)?;
     let call = if let Some(runner) = registry.flow(RUNNER_FLOW) {
@@ -1663,10 +1572,10 @@ fn compose_conversation(
         }))).collect::<serde_json::Map<_, _>>()
     });
     nodes.push(serde_json::json!({
-        "id":"prepare_workflow", "kind":"mf_chat.workflow.prepare", "config":ports, "inputs":inputs
+        "id":"prepare_workflow", "kind":PREPARE_WORKFLOW_NODE.kind, "config":ports, "inputs":inputs
     }));
     nodes.push(serde_json::json!({
-        "id":"complete_workflow", "kind":"mf_chat.workflow.complete",
+        "id":"complete_workflow", "kind":COMPLETE_WORKFLOW_NODE.kind,
         "config":{
             "inputs":PreparedConversation::ports(), "outputs":InvocationEmission::ports(),
             "references":metadata.context_references.iter().map(|reference| &reference.output).collect::<Vec<_>>()
@@ -1685,7 +1594,7 @@ fn compose_conversation(
     // A subscription preserves the authored streaming request even without a UI consumer.
     if contract.answer_stream {
         nodes.push(serde_json::json!({
-            "id":"preview", "kind":"mf_chat.workflow.preview", "inputs":{
+            "id":"preview", "kind":WORKFLOW_PREVIEW_NODE.kind, "inputs":{
                 "answer":{"from":{"node":"workflow","port":"answer"}}
             }
         }));
@@ -1702,7 +1611,7 @@ fn compose_conversation(
     }
     if contract.tool_call_delta_stream {
         nodes.push(serde_json::json!({
-            "id":"tool_call_preview", "kind":"mf_chat.workflow.tool_call_preview",
+            "id":"tool_call_preview", "kind":TOOL_CALL_PREVIEW_NODE.kind,
             "inputs":{"tool_call_delta":{"from":{"node":"workflow","port":"tool_call_delta"}}}
         }));
         bindings.push((
@@ -1748,6 +1657,15 @@ fn compose_conversation(
             "from_node":"workflow", "to_node":"complete_workflow"
         }));
     let definition = serde_json::from_value(definition).context(JsonSnafu)?;
+    // These adapters belong to the host-composed graph, not the linked node catalog.
+    for registration in [
+        &PREPARE_WORKFLOW_NODE,
+        &COMPLETE_WORKFLOW_NODE,
+        &WORKFLOW_PREVIEW_NODE,
+        &TOOL_CALL_PREVIEW_NODE,
+    ] {
+        registry.register(registration)?;
+    }
     let plan = mf_compiler::compile_resolved_definition(&definition, registry)?;
     let prepare = PreparedNode::new(
         PrepareWorkflow {
@@ -1965,7 +1883,7 @@ pub(super) fn run_observed_conversation(
                 calls: Arc::clone(&calls),
                 delivered: Arc::clone(&delivered),
             },
-            &registry,
+            &mut registry,
         )?
     } else {
         let bound = PreparedNode::typed_stream(
@@ -2191,10 +2109,9 @@ mod tests {
         )
         .unwrap();
         let (plan, parameters) = profile.backend.embedded_workflow().unwrap();
+        let mut registry = NodeRegistry::from_inventory().unwrap();
         let composed = compose_conversation(
-            &plan
-                .manifest(&NodeRegistry::from_inventory().unwrap())
-                .unwrap(),
+            &plan.manifest(&registry).unwrap(),
             parameters,
             false,
             &crate::CompactionConfig::default(),
@@ -2207,7 +2124,7 @@ mod tests {
                 calls: Default::default(),
                 delivered: Default::default(),
             },
-            &NodeRegistry::from_inventory().unwrap(),
+            &mut registry,
         )
         .unwrap();
         assert!(
@@ -2249,13 +2166,33 @@ mod tests {
 
     #[test]
     fn user_workflows_cannot_read_application_context_outputs() {
+        let request = ConversationInputs {
+            messages: vec![mfn_llm::ChatMessage::User {
+                content: "hello".into(),
+                metadata: None,
+            }],
+            context: None,
+        };
+        let invocation = Invocation::new("session");
+        let registry = NodeRegistry::from_inventory().unwrap();
         let source = FlowNode::new(
             "begin",
-            PreparedNode::typed_task(crate::nodes::Initialize, NodeMetadata::default()).unwrap(),
+            registry
+                .get("mf_chat.turn.begin")
+                .unwrap()
+                .instantiate(serde_json::json!({}))
+                .unwrap(),
         );
         let mut context = ExecutionContext::for_message(
             &source,
-            mf_runtime::Outputs::from([("database_path".into(), "private.sqlite".into())]).into(),
+            TurnStarted {
+                database_path: "private.sqlite".into(),
+                invocation: invocation.clone(),
+                request: request.clone(),
+            }
+            .into_values()
+            .unwrap()
+            .into(),
         )
         .unwrap();
         let definition = WorkflowDefinition::from_json(
@@ -2271,19 +2208,7 @@ mod tests {
         let profile = WorkflowProfile::new("custom", definition, Default::default()).unwrap();
         let result = profile
             .backend
-            .invoke(
-                &Invocation::new("session"),
-                ConversationInputs {
-                    messages: vec![mfn_llm::ChatMessage::User {
-                        content: "hello".into(),
-                        metadata: None,
-                    }],
-                    context: None,
-                },
-                &mut context,
-                None,
-                None,
-            )
+            .invoke(&invocation, request, &mut context, None, None)
             .unwrap();
         assert_eq!(result.final_text(), Some("isolated"));
         assert!(context.output("begin.database_path").is_ok());
@@ -2321,9 +2246,13 @@ mod tests {
         }
     }
 
+    fn invocation_input(emission: InvocationEmission) -> mf_runtime::NodeEvent {
+        mf_runtime::NodeEvent::Input(emission.into_values().unwrap())
+    }
+
     #[test]
     fn conversation_route_waits_for_normal_close_before_releasing_settlement() {
-        use mf_runtime::{EventContext, NodeEvent, TypedEventNode};
+        use mf_runtime::{EventContext, EventNode, NodeEvent};
         let context = EventContext {
             now: Default::default(),
             input: None,
@@ -2339,7 +2268,7 @@ mod tests {
         };
         let effects = route
             .on_event(
-                NodeEvent::Input(InvocationEmission {
+                invocation_input(InvocationEmission {
                     event: InvocationEvent {
                         preview: Some(preview.clone()),
                         completed: None,
@@ -2349,14 +2278,18 @@ mod tests {
             )
             .unwrap();
         assert_eq!(effects.emissions.len(), 1);
-        assert_eq!(effects.emissions[0].result.outputs.preview, Some(preview));
+        let result = &effects.emissions[0].result;
         assert_eq!(
-            effects.emissions[0].result.skipped,
-            ["completed".into()].into()
+            PreviewOutput::from_values(result.outputs.clone())
+                .unwrap()
+                .preview,
+            preview
         );
+        assert!(result.skipped.contains("completed"));
+        assert!(result.skipped.contains("auxiliary"));
         assert!(
             route
-                .on_event(NodeEvent::Input(final_event()), &context)
+                .on_event(invocation_input(final_event()), &context)
                 .unwrap()
                 .emissions
                 .is_empty()
@@ -2371,24 +2304,20 @@ mod tests {
         );
         let effects = route.on_event(NodeEvent::UpstreamClosed, &context).unwrap();
         assert_eq!(effects.emissions.len(), 1);
-        assert_eq!(
-            effects.emissions[0]
-                .result
-                .outputs
-                .completed
-                .as_ref()
-                .unwrap()
-                .result
-                .final_text(),
-            Some("canonical")
-        );
-        assert!(effects.emissions[0].result.skipped.contains("preview"));
+        let result = &effects.emissions[0].result;
+        let completed =
+            <CompletedTurn as mf_runtime::InputValue>::decode(result.outputs["completed"].clone())
+                .unwrap();
+        assert_eq!(completed.result.final_text(), Some("canonical"));
+        assert!(result.skipped.contains("preview"));
+        assert!(result.skipped.contains("title_api_key"));
+        assert!(result.skipped.contains("compact_api_key"));
         assert_eq!(route.buffered_items(), Some(0));
     }
 
     #[test]
-    fn title_inputs_cross_the_stream_boundary_only_after_close_and_keep_secrets() {
-        use mf_runtime::{EventContext, NodeEvent, TypedEventNode};
+    fn auxiliary_inputs_cross_the_stream_boundary_only_after_close_and_keep_secrets() {
+        use mf_runtime::{EventContext, EventNode, NodeEvent};
         let context = EventContext {
             now: Default::default(),
             input: None,
@@ -2421,45 +2350,61 @@ mod tests {
             ]
             .into(),
         );
-        event.event.completed.as_mut().unwrap().title_context =
+        let mut compact_parameters = parameters.clone();
+        compact_parameters.0.insert(
+            "params.api_key".into(),
+            mf_runtime::ValueRef::from("compact-credential").into_secret(),
+        );
+        let completed = event.event.completed.as_mut().unwrap();
+        completed.title_context =
             TitleGenerationContext::from_inputs(&request, Some(&parameters)).unwrap();
-        let decoded = InvocationEmission::from_values(event.into_values().unwrap()).unwrap();
+        completed.compaction_context = CompactionGenerationContext::from_inputs(
+            &request,
+            Some(&compact_parameters),
+            &crate::CompactionContext::default(),
+        )
+        .unwrap();
         let mut route = RouteInvocation::default();
         assert!(
             route
-                .on_event(NodeEvent::Input(decoded), &context)
+                .on_event(invocation_input(event), &context)
                 .unwrap()
                 .emissions
                 .is_empty()
         );
         let closed = route.on_event(NodeEvent::UpstreamClosed, &context).unwrap();
-        let completed = closed
-            .emissions
-            .into_iter()
-            .next()
-            .unwrap()
-            .result
-            .outputs
-            .completed
-            .unwrap();
-        let output = PrepareTitle
-            .execute(
-                PrepareTitleInputs { completed },
-                &mut ExecutionContext::default(),
-            )
-            .unwrap()
-            .outputs;
-        assert!(output.enabled);
-        assert_eq!(output.prompt.as_deref(), Some("Prompt"));
-        assert_eq!(output.text.as_deref(), Some("canonical"));
-        let api_key = output.api_key.as_ref().unwrap();
-        assert_eq!(api_key.as_str(), Some("credential"));
-        assert!(api_key.is_secret());
-        assert!(!output.model.as_ref().unwrap().is_secret());
+        let outputs = &closed.emissions[0].result.outputs;
+        assert_eq!(outputs["title_prompt"].as_str(), Some("Prompt"));
+        assert_eq!(outputs["title_text"].as_str(), Some("canonical"));
+        assert!(!outputs["auxiliary"].contains_secret());
+        assert!(!outputs["completed"].contains_secret());
+        for (port, parameters) in [
+            ("title_api_key", &parameters),
+            ("compact_api_key", &compact_parameters),
+        ] {
+            let api_key = &outputs[port];
+            assert!(api_key.is_secret());
+            assert!(api_key.ptr_eq(&parameters.0["params.api_key"]));
+        }
+        assert!(!outputs["title_model"].is_secret());
+        assert!(!outputs["compact_model"].is_secret());
     }
 
     #[test]
-    fn title_preparation_preserves_workflow_owned_title_results() {
+    fn authored_title_gate_preserves_workflow_owned_title_results() {
+        let gate = flows::conversation_definition()
+            .unwrap()
+            .nodes
+            .into_iter()
+            .find(|node| node.id.as_str() == "prepare_title")
+            .unwrap();
+        let registry = NodeRegistry::from_inventory().unwrap();
+        let gate = registry
+            .get(&gate.kind)
+            .unwrap()
+            .instantiate(gate.config)
+            .unwrap();
+        let gate = gate.execution.as_task_node().unwrap();
         for reported_call in [false, true] {
             let mut completed = final_event().event.completed.unwrap();
             completed.title_context = Some(TitleGenerationContext {
@@ -2485,31 +2430,23 @@ mod tests {
             } else {
                 completed.result.title = Some("Workflow title".into());
             }
-            let prepared = PrepareTitle
+            let mut routed = RoutedEvent::from_completion(completed)
+                .into_values()
+                .unwrap();
+            let result = gate
                 .execute(
-                    PrepareTitleInputs { completed },
+                    [("facts".into(), routed.remove("auxiliary").unwrap())].into(),
                     &mut ExecutionContext::default(),
                 )
                 .unwrap();
-            assert!(!prepared.outputs.enabled);
-            assert!(prepared.skipped.contains("prompt"));
-            assert!(prepared.skipped.contains("api_key"));
-            assert_eq!(
-                prepared
-                    .outputs
-                    .into_values()
-                    .unwrap()
-                    .keys()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>(),
-                vec!["enabled"]
-            );
+            assert_eq!(result.outputs["enabled"].as_bool(), Some(false));
+            assert!(!result.outputs["enabled"].is_secret());
         }
     }
 
     #[test]
     fn conversation_route_rejects_missing_final_and_events_after_final() {
-        use mf_runtime::{EventContext, NodeEvent, TypedEventNode};
+        use mf_runtime::{EventContext, EventNode, NodeEvent};
         let context = EventContext {
             now: Default::default(),
             input: None,
@@ -2519,7 +2456,7 @@ mod tests {
         assert!(
             route
                 .on_event(
-                    NodeEvent::Input(InvocationEmission {
+                    invocation_input(InvocationEmission {
                         event: InvocationEvent {
                             preview: None,
                             completed: None,
@@ -2530,11 +2467,11 @@ mod tests {
                 .is_err()
         );
         route
-            .on_event(NodeEvent::Input(final_event()), &context)
+            .on_event(invocation_input(final_event()), &context)
             .unwrap();
         assert!(
             route
-                .on_event(NodeEvent::Input(final_event()), &context)
+                .on_event(invocation_input(final_event()), &context)
                 .is_err()
         );
     }
@@ -2589,16 +2526,15 @@ mod tests {
             .unwrap();
         assert!(error.to_string().contains("must be bound"));
 
-        let registry = NodeRegistry::from_inventory().unwrap();
-        for (kind, inputs, outputs, values) in [
+        for (registration, inputs, outputs, values) in [
             (
-                "mf_chat.workflow.prepare",
+                &PREPARE_WORKFLOW_NODE,
                 TurnStarted::ports(),
                 PreparedConversation::ports(),
                 input.clone().into_values().unwrap(),
             ),
             (
-                "mf_chat.workflow.complete",
+                &COMPLETE_WORKFLOW_NODE,
                 PreparedConversation::ports(),
                 InvocationEmission::ports(),
                 PreparedConversation {
@@ -2609,9 +2545,7 @@ mod tests {
                 .unwrap(),
             ),
         ] {
-            let adapter = registry
-                .get(kind)
-                .unwrap()
+            let adapter = registration
                 .instantiate(serde_json::json!({
                     "inputs": inputs, "outputs": outputs
                 }))

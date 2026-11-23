@@ -49,12 +49,22 @@
     },
     {
       "id": "prepare_title",
-      "kind": "mf_chat.title.prepare",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "facts": "object"
+        },
+        "code": {
+          "enabled": "facts.title_configured && facts.status == 'succeeded' && !facts.has_title && !('title' in facts.purposes)",
+          "status": "string(facts.status)"
+        }
+      },
       "inputs": {
-        "completed": {
+        "facts": {
           "from": {
             "node": "route",
-            "port": "completed"
+            "port": "auxiliary"
           }
         }
       }
@@ -87,14 +97,14 @@
       "inputs": {
         "params.prompt": {
           "from": {
-            "node": "prepare_title",
-            "port": "prompt"
+            "node": "route",
+            "port": "title_prompt"
           }
         },
         "params.text": {
           "from": {
-            "node": "prepare_title",
-            "port": "text"
+            "node": "route",
+            "port": "title_text"
           }
         },
         "params.status": {
@@ -105,26 +115,26 @@
         },
         "params.context": {
           "from": {
-            "node": "prepare_title",
-            "port": "context"
+            "node": "route",
+            "port": "title_context"
           }
         },
         "params.model": {
           "from": {
-            "node": "prepare_title",
-            "port": "model"
+            "node": "route",
+            "port": "title_model"
           }
         },
         "params.base_url": {
           "from": {
-            "node": "prepare_title",
-            "port": "base_url"
+            "node": "route",
+            "port": "title_base_url"
           }
         },
         "params.api_key": {
           "from": {
-            "node": "prepare_title",
-            "port": "api_key"
+            "node": "route",
+            "port": "title_api_key"
           }
         }
       }
@@ -200,12 +210,21 @@
     },
     {
       "id": "compact_gate",
-      "kind": "mf_chat.compact.gate",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "facts": "object"
+        },
+        "code": {
+          "enabled": "facts.compaction_configured && facts.status == 'succeeded' && facts.appends_context && !('compaction' in facts.purposes)"
+        }
+      },
       "inputs": {
-        "completed": {
+        "facts": {
           "from": {
             "node": "route",
-            "port": "completed"
+            "port": "auxiliary"
           }
         }
       }
@@ -238,44 +257,44 @@
       "inputs": {
         "params.messages": {
           "from": {
-            "node": "compact_gate",
-            "port": "messages"
+            "node": "route",
+            "port": "compact_messages"
           }
         },
         "params.append_messages": {
           "from": {
-            "node": "compact_gate",
-            "port": "append_messages"
+            "node": "route",
+            "port": "compact_append_messages"
           }
         },
         "params.usages": {
           "from": {
-            "node": "compact_gate",
-            "port": "usages"
+            "node": "route",
+            "port": "compact_usages"
           }
         },
         "params.context": {
           "from": {
-            "node": "compact_gate",
-            "port": "context"
+            "node": "route",
+            "port": "compact_context"
           }
         },
         "params.model": {
           "from": {
-            "node": "compact_gate",
-            "port": "model"
+            "node": "route",
+            "port": "compact_model"
           }
         },
         "params.base_url": {
           "from": {
-            "node": "compact_gate",
-            "port": "base_url"
+            "node": "route",
+            "port": "compact_base_url"
           }
         },
         "params.api_key": {
           "from": {
-            "node": "compact_gate",
-            "port": "api_key"
+            "node": "route",
+            "port": "compact_api_key"
           }
         }
       }

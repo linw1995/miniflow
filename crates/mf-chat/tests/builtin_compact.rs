@@ -1704,7 +1704,7 @@ fn embedded_conversation_declares_and_prepares_builtin_compact_call() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = mf_chat::flows::conversation::plan(&registry).unwrap();
     for (id, kind) in [
-        ("compact_gate", "mf_chat.compact.gate"),
+        ("compact_gate", "builtin.code"),
         ("finish", "mf_chat.conversation.finish"),
     ] {
         assert!(

@@ -6,7 +6,7 @@ use crate::{
     session, storage,
 };
 use diesel::prelude::*;
-use mf_runtime::NodeValue;
+use mf_runtime::{ExecutionContext, NodeExecutionError, NodeValue, TypedNodeResult, TypedTaskNode};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
 use std::{collections::BTreeMap, path::Path};
@@ -774,57 +774,22 @@ pub fn recover(input: RecoveryInputs) -> Result<RecoveryOutputs, ChatError> {
     })
 }
 
-register_operation!(
-    "mf_chat.turn.begin",
-    BeginTurn,
-    BeginTurnInputs,
-    TurnStarted,
-    begin
-);
-register_operation!(
-    "mf_chat.turn.complete",
-    CompleteTurn,
-    CompleteTurnInputs,
-    CompletionOutputs,
-    complete
-);
-register_operation!("mf_chat.turn.fail", FailTurn, FailTurnInputs, Changed, fail);
-register_operation!(
-    "mf_chat.call.fail",
-    FailCall,
-    FailCallInputs,
-    Changed,
-    fail_call
-);
-register_operation!(
-    "mf_chat.turn.load",
-    LoadTurn,
-    RecordInputs,
-    TurnOutputs,
-    get_turn
-);
-register_operation!(
-    "mf_chat.call.load",
-    LoadCall,
-    RecordInputs,
-    CallOutputs,
-    get_call
-);
-register_operation!(
-    "mf_chat.storage.recover",
-    Recover,
-    RecoveryInputs,
-    RecoveryOutputs,
-    recover
-);
+struct BeginTurn;
 
-register_operation!(
-    "mf_chat.turn.request",
-    LoadTurnRequest,
-    RecordInputs,
-    TurnRequestOutputs,
-    get_request
-);
+impl TypedTaskNode for BeginTurn {
+    type Input = BeginTurnInputs;
+    type Output = TurnStarted;
+
+    fn execute(
+        &self,
+        input: Self::Input,
+        _: &mut ExecutionContext,
+    ) -> Result<TypedNodeResult<Self::Output>, NodeExecutionError> {
+        Ok(begin(input)?.into())
+    }
+}
+
+register_task!("mf_chat.turn.begin", BeginTurn);
 
 impl ChatDatabase {
     pub fn begin_turn(

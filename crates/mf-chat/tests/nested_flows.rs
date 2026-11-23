@@ -2,6 +2,7 @@ use mf_chat as _;
 use mf_compiler::{NodeRegistry, WorkflowDefinition, compile_definition, instantiate_compiled};
 use mf_runtime::WorkflowArguments;
 use serde_json::json;
+use std::collections::BTreeSet;
 
 #[test]
 fn ineligible_builtin_title_returns_no_title_and_empty_usage() {
@@ -160,6 +161,35 @@ fn title_definition_is_owned_and_registered_by_chat() {
 }
 
 #[test]
+fn global_chat_node_kinds_match_the_conversation_definition() {
+    let definition = mf_chat::flows::conversation_definition().unwrap();
+    let expected: BTreeSet<_> = definition
+        .nodes
+        .iter()
+        .map(|node| node.kind.as_str())
+        .filter(|kind| kind.starts_with("mf_chat."))
+        .collect();
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let registered: BTreeSet<_> = registry
+        .iter()
+        .map(|registration| registration.kind)
+        .filter(|kind| kind.starts_with("mf_chat."))
+        .collect();
+    assert_eq!(registered, expected);
+    for node in definition
+        .nodes
+        .iter()
+        .filter(|node| expected.contains(node.kind.as_str()))
+    {
+        registry
+            .get(&node.kind)
+            .unwrap()
+            .instantiate(node.config.clone())
+            .unwrap();
+    }
+}
+
+#[test]
 fn conversation_definition_is_registered_and_describable() {
     let registry = mf_runtime::BuiltinFlowRegistry::from_inventory().unwrap();
     let definition = (registry.get("mf-chat.conversation").unwrap().definition)().unwrap();
@@ -180,7 +210,7 @@ fn conversation_definition_is_registered_and_describable() {
         description
             .nodes
             .iter()
-            .any(|node| node.id == "compact_gate" && node.kind == "mf_chat.compact.gate")
+            .any(|node| node.id == "compact_gate" && node.kind == "builtin.code")
     );
     assert!(
         description
