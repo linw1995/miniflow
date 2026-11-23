@@ -60,6 +60,13 @@ impl BuiltinFlowRegistry {
         self.registrations.get(name).copied()
     }
 
+    /// Iterates registered names in sorted order without running definition factories.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &'static BuiltinFlowRegistration)> + '_ {
+        self.registrations
+            .iter()
+            .map(|(name, registration)| (name.as_str(), *registration))
+    }
+
     fn from_registrations(
         registrations: impl IntoIterator<Item = &'static BuiltinFlowRegistration>,
     ) -> Result<Self, BuiltinFlowRegistryError> {
