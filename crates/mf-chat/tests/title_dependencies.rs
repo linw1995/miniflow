@@ -113,8 +113,8 @@ fn registered_title_dependencies_match_the_chat_cargo_manifest() {
             include_str!("../workflows/compact-run.json"),
         ),
         (
-            "mf-chat.chat-compact-prepare",
-            include_str!("../workflows/compact-prepare.json"),
+            "mf-chat.chat-compact-plan",
+            include_str!("../workflows/compact-plan.json"),
         ),
         (
             "mf-chat.chat-compact-summarize",

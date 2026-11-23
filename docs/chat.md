@@ -393,14 +393,15 @@ different business pipeline when explicit transcript budgets or truncation polic
 `mf-chat` ships the built-in `mf-chat.chat-compact` Flow (`workflows/compact.json`) so chatflows can
 compose structured, threshold-based compaction into `replace_context` without duplicating compaction
 logic. Internally it delegates compaction execution to `mf-chat.chat-compact-run`
-(`workflows/compact-run.json`), which composes `mf-chat.chat-compact-prepare`
-(`workflows/compact-prepare.json`) and the shared `mf-chat.chat-compact-summarize`
+(`workflows/compact-run.json`), which composes `mf-chat.chat-compact-plan`
+(`workflows/compact-plan.json`) and the shared `mf-chat.chat-compact-summarize`
 (`workflows/compact-summarize.json`) Flow:
 
 - **Inputs:** `params.messages` (required), `params.append_messages` (`[]`), `params.usages` (`[]`),
-  `params.enabled` (`true`), `params.force` (`false`), `params.context_window` (`128000`),
-  `params.reserve_tokens` (`16384`), `params.keep_recent_tokens` (`20000`),
-  `params.custom_instructions` (`""`), `params.model`, `params.base_url`, and `params.api_key`.
+  `params.context` (object carrying optional `compaction` policy fields: `enabled` `true`,
+  `context_window` `128000`, `reserve_tokens` `16384`, `keep_recent_tokens` `20000`, and
+  `custom_instructions` `""`), `params.force` (`false`), `params.model`, `params.base_url`, and
+  `params.api_key`.
 - **Outputs:** `status` (`"skipped"`, `"succeeded"`, or `"failed"`), `compacted` (`bool`),
   `messages`, `summary`, `usages` (attributed with `purpose: "compaction"`), `tokens_before`,
   `read_files`, `modified_files`, and `error`.

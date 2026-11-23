@@ -38,34 +38,22 @@
             "default": [],
             "secret": false
           },
-          "enabled": {
-            "type": "bool",
-            "default": true,
+          "context": {
+            "type": "object",
+            "default": {
+              "compaction": {
+                "enabled": true,
+                "context_window": 128000,
+                "reserve_tokens": 16384,
+                "keep_recent_tokens": 20000,
+                "custom_instructions": ""
+              }
+            },
             "secret": false
           },
           "force": {
             "type": "bool",
             "default": false,
-            "secret": false
-          },
-          "context_window": {
-            "type": "int",
-            "default": 128000,
-            "secret": false
-          },
-          "reserve_tokens": {
-            "type": "int",
-            "default": 16384,
-            "secret": false
-          },
-          "keep_recent_tokens": {
-            "type": "int",
-            "default": 20000,
-            "secret": false
-          },
-          "custom_instructions": {
-            "type": "string",
-            "default": "",
             "secret": false
           },
           "model": {
@@ -91,31 +79,22 @@
       "config": {
         "language": "cel",
         "inputs": {
-          "context_window": "int",
-          "reserve_tokens": "int",
-          "keep_recent_tokens": "int"
+          "context": "object"
         },
         "code": {
-          "ok": "context_window >= 0 && reserve_tokens >= 0 && keep_recent_tokens >= 0"
+          "ok": "cel.bind(c, 'compaction' in context && type(context.compaction) == map ? context.compaction : {}, (!('compaction' in context) || type(context.compaction) == map) && (!('enabled' in c) || type(c.enabled) == bool) && (!('context_window' in c) || (type(c.context_window) == int && int(c.context_window) >= 0)) && (!('reserve_tokens' in c) || (type(c.reserve_tokens) == int && int(c.reserve_tokens) >= 0)) && (!('keep_recent_tokens' in c) || (type(c.keep_recent_tokens) == int && int(c.keep_recent_tokens) >= 0)) && (!('custom_instructions' in c) || type(c.custom_instructions) == string))",
+          "enabled": "cel.bind(c, 'compaction' in context && type(context.compaction) == map ? context.compaction : {}, 'enabled' in c && type(c.enabled) == bool ? bool(c.enabled) : true)",
+          "context_window": "cel.bind(c, 'compaction' in context && type(context.compaction) == map ? context.compaction : {}, 'context_window' in c && type(c.context_window) == int ? int(c.context_window) : 128000)",
+          "reserve_tokens": "cel.bind(c, 'compaction' in context && type(context.compaction) == map ? context.compaction : {}, 'reserve_tokens' in c && type(c.reserve_tokens) == int ? int(c.reserve_tokens) : 16384)",
+          "keep_recent_tokens": "cel.bind(c, 'compaction' in context && type(context.compaction) == map ? context.compaction : {}, 'keep_recent_tokens' in c && type(c.keep_recent_tokens) == int ? int(c.keep_recent_tokens) : 20000)",
+          "custom_instructions": "cel.bind(c, 'compaction' in context && type(context.compaction) == map ? context.compaction : {}, 'custom_instructions' in c && type(c.custom_instructions) == string ? string(c.custom_instructions) : '')"
         }
       },
       "inputs": {
-        "context_window": {
+        "context": {
           "from": {
             "node": "params",
-            "port": "context_window"
-          }
-        },
-        "reserve_tokens": {
-          "from": {
-            "node": "params",
-            "port": "reserve_tokens"
-          }
-        },
-        "keep_recent_tokens": {
-          "from": {
-            "node": "params",
-            "port": "keep_recent_tokens"
+            "port": "context"
           }
         }
       }
@@ -231,7 +210,7 @@
       "inputs": {
         "enabled": {
           "from": {
-            "node": "params",
+            "node": "settings_valid",
             "port": "enabled"
           }
         },
@@ -390,13 +369,13 @@
         },
         "context_window": {
           "from": {
-            "node": "params",
+            "node": "settings_valid",
             "port": "context_window"
           }
         },
         "reserve_tokens": {
           "from": {
-            "node": "params",
+            "node": "settings_valid",
             "port": "reserve_tokens"
           }
         }
@@ -501,13 +480,13 @@
         },
         "params.keep_recent_tokens": {
           "from": {
-            "node": "params",
+            "node": "settings_valid",
             "port": "keep_recent_tokens"
           }
         },
         "params.custom_instructions": {
           "from": {
-            "node": "params",
+            "node": "settings_valid",
             "port": "custom_instructions"
           }
         },
