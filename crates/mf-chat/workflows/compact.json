@@ -1,0 +1,866 @@
+{
+  "version": "2026-11-13",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core"
+    },
+    "code": {
+      "package": "mfn-code"
+    }
+  },
+  "flows": {
+    "run": {
+      "builtin": "mf-chat.chat-compact-run"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "messages": {
+            "type": {
+              "list": "object"
+            }
+          },
+          "append_messages": {
+            "type": {
+              "list": "object"
+            },
+            "default": [],
+            "secret": false
+          },
+          "usages": {
+            "type": {
+              "list": "object"
+            },
+            "default": [],
+            "secret": false
+          },
+          "context": {
+            "type": "object",
+            "default": {
+              "compaction": {
+                "enabled": true,
+                "context_window": 128000,
+                "reserve_tokens": 16384,
+                "keep_recent_tokens": 20000,
+                "custom_instructions": ""
+              }
+            },
+            "secret": false
+          },
+          "force": {
+            "type": "bool",
+            "default": false,
+            "secret": false
+          },
+          "model": {
+            "type": "string",
+            "default": "your-model",
+            "secret": false
+          },
+          "base_url": {
+            "type": "string",
+            "default": "https://api.openai.com/v1",
+            "secret": false
+          },
+          "api_key": {
+            "type": "string",
+            "env": "OPENAI_API_KEY"
+          }
+        }
+      }
+    },
+    {
+      "id": "settings_valid",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "context": "object"
+        },
+        "code": {
+          "ok": "cel.bind(c, 'compaction' in context && type(context.compaction) == map ? context.compaction : {}, (!('compaction' in context) || type(context.compaction) == map) && (!('enabled' in c) || type(c.enabled) == bool) && (!('context_window' in c) || (type(c.context_window) == int && int(c.context_window) >= 0)) && (!('reserve_tokens' in c) || (type(c.reserve_tokens) == int && int(c.reserve_tokens) >= 0)) && (!('keep_recent_tokens' in c) || (type(c.keep_recent_tokens) == int && int(c.keep_recent_tokens) >= 0)) && (!('custom_instructions' in c) || type(c.custom_instructions) == string))",
+          "enabled": "cel.bind(c, 'compaction' in context && type(context.compaction) == map ? context.compaction : {}, 'enabled' in c && type(c.enabled) == bool ? bool(c.enabled) : true)",
+          "context_window": "cel.bind(c, 'compaction' in context && type(context.compaction) == map ? context.compaction : {}, 'context_window' in c && type(c.context_window) == int ? int(c.context_window) : 128000)",
+          "reserve_tokens": "cel.bind(c, 'compaction' in context && type(context.compaction) == map ? context.compaction : {}, 'reserve_tokens' in c && type(c.reserve_tokens) == int ? int(c.reserve_tokens) : 16384)",
+          "keep_recent_tokens": "cel.bind(c, 'compaction' in context && type(context.compaction) == map ? context.compaction : {}, 'keep_recent_tokens' in c && type(c.keep_recent_tokens) == int ? int(c.keep_recent_tokens) : 20000)",
+          "custom_instructions": "cel.bind(c, 'compaction' in context && type(context.compaction) == map ? context.compaction : {}, 'custom_instructions' in c && type(c.custom_instructions) == string ? string(c.custom_instructions) : '')"
+        }
+      },
+      "inputs": {
+        "context": {
+          "from": {
+            "node": "params",
+            "port": "context"
+          }
+        }
+      }
+    },
+    {
+      "id": "assert_settings",
+      "kind": "builtin.assert",
+      "config": {
+        "condition": {
+          "source": {
+            "output": "settings_valid.ok",
+            "path": ""
+          },
+          "operator": "eq",
+          "value": true
+        },
+        "message": "compaction settings context_window, reserve_tokens, and keep_recent_tokens must be non-negative"
+      }
+    },
+    {
+      "id": "append_route",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "messages_only",
+            "condition": {
+              "source": {
+                "output": "params.append_messages",
+                "path": "/0"
+              },
+              "operator": "not_exists"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "messages_only",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "from": {
+            "node": "params",
+            "port": "messages"
+          }
+        }
+      }
+    },
+    {
+      "id": "append_messages",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "messages": {
+            "list": "object"
+          },
+          "append_messages": {
+            "list": "object"
+          }
+        },
+        "code": {
+          "messages": "messages + append_messages"
+        }
+      },
+      "inputs": {
+        "messages": {
+          "from": {
+            "node": "params",
+            "port": "messages"
+          }
+        },
+        "append_messages": {
+          "from": {
+            "node": "params",
+            "port": "append_messages"
+          }
+        }
+      }
+    },
+    {
+      "id": "combined_messages",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "messages_only",
+              "port": "value"
+            },
+            {
+              "node": "append_messages",
+              "port": "messages"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "enabled_check",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "enabled": "bool",
+          "force": "bool"
+        },
+        "code": {
+          "active": "force || enabled"
+        }
+      },
+      "inputs": {
+        "enabled": {
+          "from": {
+            "node": "settings_valid",
+            "port": "enabled"
+          }
+        },
+        "force": {
+          "from": {
+            "node": "params",
+            "port": "force"
+          }
+        }
+      }
+    },
+    {
+      "id": "enabled_route",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "yes",
+            "condition": {
+              "source": {
+                "output": "enabled_check.active",
+                "path": ""
+              },
+              "operator": "eq",
+              "value": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "disabled_messages",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "from": {
+            "node": "combined_messages",
+            "port": "value"
+          }
+        }
+      }
+    },
+    {
+      "id": "disabled_result",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {},
+        "code": {
+          "status": "'skipped'",
+          "compacted": "false",
+          "summary": "''",
+          "error": "''",
+          "tokens_before": "0",
+          "read_files": "[].map(x, string(x))",
+          "modified_files": "[].map(x, string(x))"
+        }
+      }
+    },
+    {
+      "id": "disabled_usages",
+      "kind": "builtin.constant",
+      "config": {
+        "value": []
+      }
+    },
+    {
+      "id": "boundaries",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "messages": {
+            "list": "object"
+          }
+        },
+        "code": {
+          "state": "cel.bind(n, size(messages), cel.bind(non_sys, messages.transformList(i, m, m.role != 'system', i), cel.bind(system_end, size(non_sys) > 0 ? non_sys[0] : n, cel.bind(prefix, 'The conversation history before this point was compacted into the following summary:\\n\\n<summary>\\n', cel.bind(suffix, '\\n</summary>', cel.bind(prev_hits, messages.slice(system_end, n).transformList(i, m, ('metadata' in m && type(m.metadata) == map && 'compaction' in m.metadata && type(m.metadata.compaction) == map && 'summary' in m.metadata.compaction && type(m.metadata.compaction.summary) == string && string(m.metadata.compaction.summary).trim() != '') || (m.role == 'user' && string(m.content).startsWith(prefix) && string(m.content).endsWith(suffix) && size(string(m.content)) >= size(prefix) + size(suffix) && string(m.content).substring(size(prefix), size(string(m.content)) - size(suffix)).trim() != ''), system_end + i), cel.bind(previous_index, size(prev_hits) > 0 ? prev_hits[size(prev_hits) - 1] : -1, cel.bind(boundary_start, previous_index >= 0 ? previous_index + 1 : system_end, {'system_end': system_end, 'previous_index': previous_index, 'boundary_start': boundary_start}))))))))"
+        }
+      },
+      "inputs": {
+        "messages": {
+          "from": {
+            "node": "combined_messages",
+            "port": "value"
+          }
+        }
+      }
+    },
+    {
+      "id": "estimate_tokens",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "messages": {
+            "list": "object"
+          },
+          "usages": {
+            "list": "object"
+          },
+          "state": "object"
+        },
+        "code": {
+          "tokens_before": "cel.bind(n, size(messages), cel.bind(boundary_start, int(state.boundary_start), cel.bind(usage_vals, usages.map(u, ('error' in u && u.error != null) || ('attribution' in u && type(u.attribution) == map && 'purpose' in u.attribution && u.attribution.purpose in ['title', 'compaction']) || !('usage' in u && type(u.usage) == map) ? 0 : cel.bind(c, u.usage, 'total_tokens' in c && type(c.total_tokens) == int && int(c.total_tokens) > 0 ? int(c.total_tokens) : ['input_tokens', 'output_tokens', 'cached_input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'].map(k, k in c && type(dyn(c[k])) == int && int(dyn(c[k])) > 0 ? int(dyn(c[k])) : 0).sum())).filter(t, t > 0), cel.bind(assistants, messages.slice(boundary_start, n).transformList(i, m, m.role == 'assistant', boundary_start + i), size(usage_vals) > 0 && size(assistants) > 0 ? usage_vals[size(usage_vals) - 1] + messages.slice(assistants[size(assistants) - 1] + 1, n).map(m, (size(string(m.content)) + (m.role == 'assistant' && 'tool_calls' in m && type(m.tool_calls) == list ? m.tool_calls.map(tc, size(string(tc.name)) + ('arguments' in tc ? size(json.encode(tc.arguments)) : 0)).sum() : 0) + 3) / 4).sum() : messages.map(m, (size(string(m.content)) + (m.role == 'assistant' && 'tool_calls' in m && type(m.tool_calls) == list ? m.tool_calls.map(tc, size(string(tc.name)) + ('arguments' in tc ? size(json.encode(tc.arguments)) : 0)).sum() : 0) + 3) / 4).sum()))))"
+        }
+      },
+      "inputs": {
+        "messages": {
+          "from": {
+            "node": "combined_messages",
+            "port": "value"
+          }
+        },
+        "usages": {
+          "from": {
+            "node": "params",
+            "port": "usages"
+          }
+        },
+        "state": {
+          "from": {
+            "node": "boundaries",
+            "port": "state"
+          }
+        }
+      }
+    },
+    {
+      "id": "threshold_check",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "tokens_before": "int",
+          "force": "bool",
+          "context_window": "int",
+          "reserve_tokens": "int"
+        },
+        "code": {
+          "should_attempt": "force || tokens_before > (context_window - reserve_tokens)"
+        }
+      },
+      "inputs": {
+        "tokens_before": {
+          "from": {
+            "node": "estimate_tokens",
+            "port": "tokens_before"
+          }
+        },
+        "force": {
+          "from": {
+            "node": "params",
+            "port": "force"
+          }
+        },
+        "context_window": {
+          "from": {
+            "node": "settings_valid",
+            "port": "context_window"
+          }
+        },
+        "reserve_tokens": {
+          "from": {
+            "node": "settings_valid",
+            "port": "reserve_tokens"
+          }
+        }
+      }
+    },
+    {
+      "id": "tokens_before",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "disabled_result",
+              "port": "tokens_before"
+            },
+            {
+              "node": "estimate_tokens",
+              "port": "tokens_before"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "threshold_route",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "yes",
+            "condition": {
+              "source": {
+                "output": "threshold_check.should_attempt",
+                "path": ""
+              },
+              "operator": "eq",
+              "value": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "below_messages",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "from": {
+            "node": "combined_messages",
+            "port": "value"
+          }
+        }
+      }
+    },
+    {
+      "id": "below_result",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {},
+        "code": {
+          "status": "'skipped'",
+          "compacted": "false",
+          "summary": "''",
+          "error": "''",
+          "read_files": "[].map(x, string(x))",
+          "modified_files": "[].map(x, string(x))"
+        }
+      }
+    },
+    {
+      "id": "below_usages",
+      "kind": "builtin.constant",
+      "config": {
+        "value": []
+      }
+    },
+    {
+      "id": "run_compaction",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "run"
+      },
+      "inputs": {
+        "params.messages": {
+          "from": {
+            "node": "combined_messages",
+            "port": "value"
+          }
+        },
+        "params.state": {
+          "from": {
+            "node": "boundaries",
+            "port": "state"
+          }
+        },
+        "params.tokens_before": {
+          "from": {
+            "node": "estimate_tokens",
+            "port": "tokens_before"
+          }
+        },
+        "params.keep_recent_tokens": {
+          "from": {
+            "node": "settings_valid",
+            "port": "keep_recent_tokens"
+          }
+        },
+        "params.custom_instructions": {
+          "from": {
+            "node": "settings_valid",
+            "port": "custom_instructions"
+          }
+        },
+        "params.model": {
+          "from": {
+            "node": "params",
+            "port": "model"
+          }
+        },
+        "params.base_url": {
+          "from": {
+            "node": "params",
+            "port": "base_url"
+          }
+        },
+        "params.api_key": {
+          "from": {
+            "node": "params",
+            "port": "api_key"
+          }
+        }
+      }
+    },
+    {
+      "id": "status",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "disabled_result",
+              "port": "status"
+            },
+            {
+              "node": "below_result",
+              "port": "status"
+            },
+            {
+              "node": "run_compaction",
+              "port": "status"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "compacted",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "disabled_result",
+              "port": "compacted"
+            },
+            {
+              "node": "below_result",
+              "port": "compacted"
+            },
+            {
+              "node": "run_compaction",
+              "port": "compacted"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "messages",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "disabled_messages",
+              "port": "value"
+            },
+            {
+              "node": "below_messages",
+              "port": "value"
+            },
+            {
+              "node": "run_compaction",
+              "port": "messages"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "summary",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "disabled_result",
+              "port": "summary"
+            },
+            {
+              "node": "below_result",
+              "port": "summary"
+            },
+            {
+              "node": "run_compaction",
+              "port": "summary"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "usages",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "disabled_usages",
+              "port": "value"
+            },
+            {
+              "node": "below_usages",
+              "port": "value"
+            },
+            {
+              "node": "run_compaction",
+              "port": "usages"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "read_files",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "disabled_result",
+              "port": "read_files"
+            },
+            {
+              "node": "below_result",
+              "port": "read_files"
+            },
+            {
+              "node": "run_compaction",
+              "port": "read_files"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "modified_files",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "disabled_result",
+              "port": "modified_files"
+            },
+            {
+              "node": "below_result",
+              "port": "modified_files"
+            },
+            {
+              "node": "run_compaction",
+              "port": "modified_files"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "error",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "disabled_result",
+              "port": "error"
+            },
+            {
+              "node": "below_result",
+              "port": "error"
+            },
+            {
+              "node": "run_compaction",
+              "port": "error"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "settings_valid",
+      "to_node": "assert_settings"
+    },
+    {
+      "from_node": "assert_settings",
+      "to_node": "append_route"
+    },
+    {
+      "from_node": "append_route",
+      "from_output": "messages_only",
+      "to_node": "messages_only"
+    },
+    {
+      "from_node": "append_route",
+      "from_output": "else",
+      "to_node": "append_messages"
+    },
+    {
+      "from_node": "assert_settings",
+      "to_node": "enabled_route"
+    },
+    {
+      "from_node": "enabled_check",
+      "to_node": "enabled_route"
+    },
+    {
+      "from_node": "enabled_route",
+      "from_output": "else",
+      "to_node": "disabled_messages"
+    },
+    {
+      "from_node": "enabled_route",
+      "from_output": "else",
+      "to_node": "disabled_result"
+    },
+    {
+      "from_node": "enabled_route",
+      "from_output": "else",
+      "to_node": "disabled_usages"
+    },
+    {
+      "from_node": "enabled_route",
+      "from_output": "yes",
+      "to_node": "boundaries"
+    },
+    {
+      "from_node": "threshold_check",
+      "to_node": "threshold_route"
+    },
+    {
+      "from_node": "threshold_route",
+      "from_output": "else",
+      "to_node": "below_messages"
+    },
+    {
+      "from_node": "threshold_route",
+      "from_output": "else",
+      "to_node": "below_result"
+    },
+    {
+      "from_node": "threshold_route",
+      "from_output": "else",
+      "to_node": "below_usages"
+    },
+    {
+      "from_node": "threshold_route",
+      "from_output": "yes",
+      "to_node": "run_compaction"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "status",
+      "node": "status",
+      "port": "value"
+    },
+    {
+      "name": "compacted",
+      "node": "compacted",
+      "port": "value"
+    },
+    {
+      "name": "messages",
+      "node": "messages",
+      "port": "value"
+    },
+    {
+      "name": "summary",
+      "node": "summary",
+      "port": "value"
+    },
+    {
+      "name": "usages",
+      "node": "usages",
+      "port": "value"
+    },
+    {
+      "name": "tokens_before",
+      "node": "tokens_before",
+      "port": "value"
+    },
+    {
+      "name": "read_files",
+      "node": "read_files",
+      "port": "value"
+    },
+    {
+      "name": "modified_files",
+      "node": "modified_files",
+      "port": "value"
+    },
+    {
+      "name": "error",
+      "node": "error",
+      "port": "value"
+    }
+  ],
+  "clusters": [
+    {
+      "label": "Validate and combine inputs",
+      "annotation": "Reject negative token settings and forward messages without copying when append_messages is empty.",
+      "collapsed": true,
+      "nodes": [
+        "params",
+        "settings_valid",
+        "assert_settings",
+        "append_route",
+        "messages_only",
+        "append_messages",
+        "combined_messages"
+      ]
+    },
+    {
+      "label": "Gate and measure context",
+      "annotation": "Short-circuit when disabled, locate prior compaction boundaries, and check token usage against the compaction threshold.",
+      "nodes": [
+        "enabled_check",
+        "enabled_route",
+        "disabled_messages",
+        "disabled_result",
+        "disabled_usages",
+        "boundaries",
+        "estimate_tokens",
+        "threshold_check",
+        "threshold_route",
+        "below_messages",
+        "below_result",
+        "below_usages"
+      ]
+    },
+    {
+      "label": "Run compaction",
+      "annotation": "Delegate planning, summarization, and message assembly to mf-chat.chat-compact-run when compaction is required.",
+      "nodes": [
+        "run_compaction"
+      ]
+    },
+    {
+      "label": "Output contract",
+      "annotation": "Merge fast-path skips and compaction results into the stable chat-compact output ports.",
+      "collapsed": true,
+      "nodes": [
+        "status",
+        "compacted",
+        "messages",
+        "summary",
+        "usages",
+        "tokens_before",
+        "read_files",
+        "modified_files",
+        "error"
+      ]
+    }
+  ]
+}

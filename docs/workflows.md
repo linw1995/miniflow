@@ -146,6 +146,20 @@ The [nested chat example](../examples/chat-nested-title-flow.json) combines the 
 conversation call and streams only the primary answer. The older flat title example remains available
 for inspecting the equivalent composition.
 
+`mf-chat` also owns `workflows/compact.json` and registers `mf-chat.chat-compact` (backed by internal
+helper Flows `mf-chat.chat-compact-run`, `mf-chat.chat-compact-plan`, and
+`mf-chat.chat-compact-summarize`). It takes `params.messages`,
+optional `params.append_messages` (default `[]`), `params.usages` (default `[]`), `params.context`
+(reading optional `context.compaction` policy fields `enabled` `true`, `context_window` `128000`,
+`reserve_tokens` `16384`, `keep_recent_tokens` `20000`, and `custom_instructions` `""`),
+`params.force` (default `false`), `params.model`, `params.base_url`, and `params.api_key`. It returns `status` (`"skipped"`, `"succeeded"`, or `"failed"`), `compacted`,
+`messages`, `summary`, `usages`, `tokens_before`, `read_files`, `modified_files`, and `error`. When disabled and not
+forced, it bypasses transcript scanning and forwards `params.messages` unchanged when `append_messages` is empty.
+When compaction runs, it keeps leading system messages and recent turns up to `keep_recent_tokens` without cutting on
+a tool result, summarizes prior history and any split-turn prefix using structured prompts attributed to `"compaction"`,
+tracks cumulative `read`, `write`, and `edit` file operations across repeated compactions, and preserves the original
+messages and captured usages if summarization fails.
+
 Rust callers loading local references use `mf_compiler::load_workflow(path)?.definition` or
 `resolve_flows(&definition, Some(directory))?.definition` before preparing the graph. Definitions with
 only built-in references can also use the existing planning and compilation entry points directly.

@@ -99,4 +99,39 @@ fn registered_title_dependencies_match_the_chat_cargo_manifest() {
         mf_chat::flows::title_definition().unwrap(),
         mf_runtime::WorkflowDefinition::from_json(&expected.to_string()).unwrap()
     );
+    let mut expected_compact: Value =
+        serde_json::from_str(include_str!("../workflows/compact.json")).unwrap();
+    title::bind_dependencies(&mut expected_compact, &package).unwrap();
+    assert_eq!(
+        mf_chat::flows::compact_definition().unwrap(),
+        mf_runtime::WorkflowDefinition::from_json(&expected_compact.to_string()).unwrap()
+    );
+    let registry = mf_runtime::BuiltinFlowRegistry::from_inventory().unwrap();
+    for (flow_name, source) in [
+        (
+            "mf-chat.chat-compact-run",
+            include_str!("../workflows/compact-run.json"),
+        ),
+        (
+            "mf-chat.chat-compact-plan",
+            include_str!("../workflows/compact-plan.json"),
+        ),
+        (
+            "mf-chat.chat-compact-summarize",
+            include_str!("../workflows/compact-summarize.json"),
+        ),
+    ] {
+        let mut expected_helper: Value = serde_json::from_str(source).unwrap();
+        title::bind_dependencies(&mut expected_helper, &package).unwrap();
+        let registered = (registry
+            .get(flow_name)
+            .unwrap_or_else(|| panic!("missing builtin flow {flow_name}"))
+            .definition)()
+        .unwrap();
+        assert_eq!(
+            registered,
+            mf_runtime::WorkflowDefinition::from_json(&expected_helper.to_string()).unwrap(),
+            "{flow_name}"
+        );
+    }
 }
