@@ -1003,8 +1003,135 @@ fn manifest() -> mf_runtime::WorkflowManifest {
     .unwrap()
 }
 
+#[test]
+fn tui_previews_a_builtin_flow_without_an_executable() {
+    let pty = openpty(
+        Some(&Winsize {
+            ws_row: 30,
+            ws_col: 100,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        }),
+        None,
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mf"))
+        .args(["flows", "mfn-llm.agent"])
+        .stdin(Stdio::from(pty.slave.try_clone().unwrap()))
+        .stderr(Stdio::from(pty.slave.try_clone().unwrap()))
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut master = fs::File::from(pty.master);
+    let reader = thread::spawn(move || {
+        let mut screen = Screen::new(100, 30);
+        let mut bytes = [0; 4096];
+        let mut sent = false;
+        loop {
+            match master.read(&mut bytes) {
+                Ok(0) | Err(_) => break,
+                Ok(len) => {
+                    screen.feed(&bytes[..len]);
+                    let text = screen.text();
+                    if !sent && text.contains("Preview") && text.contains("q close") {
+                        master.write_all(b"q").unwrap();
+                        sent = true;
+                    }
+                }
+            }
+        }
+        screen.text()
+    });
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            drop(pty.slave);
+            panic!(
+                "built-in Flow preview timed out: {}",
+                reader.join().unwrap()
+            );
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    drop(pty.slave);
+    let screen = reader.join().unwrap();
+    assert_eq!(status.code(), Some(0), "{screen}");
+    assert!(screen.contains("Preview"), "{screen}");
+    assert!(screen.contains("Description: static"), "{screen}");
+    assert!(!screen.contains("Delivery:"), "{screen}");
+}
+
 fn description() -> WorkflowDescription {
     manifest().description().unwrap()
+}
+
+#[test]
+fn tui_previews_a_compiled_graph_without_launching_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let runner = directory.path().join("preview-runner");
+    let launched = directory.path().join("launched");
+    write_runner(&runner, format!("#!/bin/sh\n: > {launched:?}\n"));
+    let pty = openpty(
+        Some(&Winsize {
+            ws_row: 30,
+            ws_col: 100,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        }),
+        None,
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mf"))
+        .arg("run")
+        .arg(&runner)
+        .arg("--preview")
+        .stdin(Stdio::from(pty.slave.try_clone().unwrap()))
+        .stderr(Stdio::from(pty.slave.try_clone().unwrap()))
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut master = fs::File::from(pty.master);
+    let reader = thread::spawn(move || {
+        let mut screen = Screen::new(100, 30);
+        let mut bytes = [0; 4096];
+        let mut sent = false;
+        loop {
+            match master.read(&mut bytes) {
+                Ok(0) | Err(_) => break,
+                Ok(len) => {
+                    screen.feed(&bytes[..len]);
+                    let text = screen.text();
+                    if !sent && text.contains("Preview") && text.contains("q close") {
+                        master.write_all(b"q").unwrap();
+                        sent = true;
+                    }
+                }
+            }
+        }
+        screen.text()
+    });
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            drop(pty.slave);
+            panic!("preview timed out: {}", reader.join().unwrap());
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    drop(pty.slave);
+    let screen = reader.join().unwrap();
+    assert_eq!(status.code(), Some(0), "{screen}");
+    assert!(screen.contains("Preview"), "{screen}");
+    assert!(!screen.contains("Ctrl-C interrupt"), "{screen}");
+    assert!(!launched.exists(), "preview launched the workflow");
 }
 
 fn loopback_available() -> bool {

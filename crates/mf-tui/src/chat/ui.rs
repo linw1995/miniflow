@@ -1631,7 +1631,7 @@ impl ChatView {
                         self.mode = Mode::Input;
                     }
                 } else if let Some(run) = &self.observation {
-                    self.inspector.handle_key(key.code, run);
+                    self.inspector.handle_key(key.code, &run.reader);
                 }
             }
             Mode::Commands | Mode::Sessions => {

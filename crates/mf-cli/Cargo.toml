@@ -19,6 +19,8 @@ mf-compiler = { workspace = true, features = ["codegen"] }
 mf-runtime.workspace = true
 mf-tui.workspace = true
 mf-chat.workspace = true
+# Described graphs for built-in Flow previews.
+mf-telemetry.workspace = true
 
 # Command parsing and error reporting.
 clap = { workspace = true, features = ["derive"] }

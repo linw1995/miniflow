@@ -88,6 +88,7 @@ fn combines_help_from_a_nonexecutable_binary_without_running_or_reading_inputs()
         vec!["--help"],
         vec!["-h"],
         vec!["--tui", "--help"],
+        vec!["--preview", "--help"],
         vec!["--chat", "--help"],
         vec!["--chat-db", "missing/chat.sqlite", "--help"],
         vec!["--inputs-file", "missing/inputs.json", "--help"],

@@ -787,8 +787,39 @@ reported separately from the child result. Stderr history eviction is counted an
 change the runner's exit result: the footer distinguishes known sequence gaps, local drops, and an unverified tail when
 the final lifecycle record is absent. Trace/log display drops and diagnostic truncation are separate indicators.
 
-Run the local graph preview from an interactive terminal to see simulated node starts, completions, elapsed time, and an
-inactive branch:
+### Preview a workflow description
+
+Inspect a compiled executable's described graph without running the workflow:
+
+```sh
+mf run ./if-else --preview
+```
+
+`--preview` implies terminal presentation. It reads the embedded manifest only, so no child process, observation
+receiver, startup-argument validation, or resource check participates. `--chat`, `--inputs`, `--inputs-file`, and
+named `--node.port` parameters are rejected instead of being silently ignored, and workflows with an active stdin
+requirement remain previewable.
+
+Linked built-in Flows are previewable without a compiled executable. `mf flows` lists the qualified names registered
+by the packages linked into the CLI, and `mf flows <name>` presents that Flow's described graph:
+
+```sh
+mf flows
+mf flows mfn-llm.agent
+```
+
+Built-in previews resolve the registration's definition, including its declared child Flows, and describe the resulting
+graph in memory. They build no dependency project, run no node factory, and require no lockfile or source directory.
+Names are reported as `package.name`; an unknown name fails with the listing command rather than a partial match.
+
+The preview reuses the ordinary graph presentation: connection views, body folding, clusters, details, bindings, help,
+mouse routing, and every navigation key behave as they do during observation. Because nothing runs, the header
+identifies the preview and its display-node count instead of a workflow outcome, process phase, or elapsed time, the
+footer offers only `q close`, and absent lifecycle records are never shown as completed, skipped, or failed. `q`,
+Enter, Esc when no overlay or body consumes it, or Ctrl-C close the preview without a workflow result.
+
+For simulated lifecycle events, run the graph preview fixture from an interactive terminal to see node starts,
+completions, elapsed time, and an inactive branch:
 
 ```bash
 nix develop --command cargo run -p mf-tui --example graph_preview
