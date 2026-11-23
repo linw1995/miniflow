@@ -180,7 +180,7 @@ fn conversation_definition_is_registered_and_describable() {
         description
             .nodes
             .iter()
-            .any(|node| node.id == "prepare_compact" && node.kind == "mf_chat.compact.prepare")
+            .any(|node| node.id == "compact_gate" && node.kind == "mf_chat.compact.gate")
     );
     assert!(
         description
