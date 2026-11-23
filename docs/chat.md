@@ -417,10 +417,10 @@ three compaction modes—mirroring session title generation:
    `HostConfig::automatic_compaction.enabled = false` to disable host compaction; negative token
    settings fail validation when opening `ChatHost`.
 2. **User chatflow reuse:** A chatflow can call `{"builtin": "mf-chat.chat-compact"}` directly,
-   optionally reading resolved policy defaults (including any API-discovered `context_window`) from
-   `context.compaction`, querying `llm.model_info` directly, or overriding thresholds and models,
-   and export `append` / `replace_context`. Declaring `replace_context` causes the host to yield
-   automatically so compaction never runs twice.
+   passing `params.context` straight through to inherit resolved policy defaults (including any
+   API-discovered `context_window`) from `context.compaction`, querying `llm.model_info` directly,
+   or overriding thresholds and models, and export `append` / `replace_context`. Declaring
+   `replace_context` causes the host to yield automatically so compaction never runs twice.
 3. **Custom compaction:** A chatflow declaring `replace_context` with custom summarization (such as
    [examples/chat-context-flow.json](../examples/chat-context-flow.json)), or a custom
    `ConversationBackend` that returns `MessageUpdate::ReplaceContext`, reports a usage with
@@ -428,14 +428,15 @@ three compaction modes—mirroring session title generation:
    `None`, suppresses host-managed compaction.
 
 Internally `mf-chat.chat-compact` delegates compaction execution to `mf-chat.chat-compact-run`
-(`workflows/compact-run.json`), which composes `mf-chat.chat-compact-prepare`
-(`workflows/compact-prepare.json`) and the shared `mf-chat.chat-compact-summarize`
+(`workflows/compact-run.json`), which composes `mf-chat.chat-compact-plan`
+(`workflows/compact-plan.json`) and the shared `mf-chat.chat-compact-summarize`
 (`workflows/compact-summarize.json`) Flow:
 
 - **Inputs:** `params.messages` (required), `params.append_messages` (`[]`), `params.usages` (`[]`),
-  `params.enabled` (`true`), `params.force` (`false`), `params.context_window` (`128000`),
-  `params.reserve_tokens` (`16384`), `params.keep_recent_tokens` (`20000`),
-  `params.custom_instructions` (`""`), `params.model`, `params.base_url`, and `params.api_key`.
+  `params.context` (object carrying optional `compaction` policy fields: `enabled` `true`,
+  `context_window` `128000`, `reserve_tokens` `16384`, `keep_recent_tokens` `20000`, and
+  `custom_instructions` `""`), `params.force` (`false`), `params.model`, `params.base_url`, and
+  `params.api_key`.
 - **Outputs:** `status` (`"skipped"`, `"succeeded"`, or `"failed"`), `compacted` (`bool`),
   `messages`, `summary`, `usages` (attributed with `purpose: "compaction"`), `tokens_before`,
   `read_files`, `modified_files`, and `error`.

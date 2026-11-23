@@ -91,7 +91,7 @@ fn packaged_inputs_include_workflows_migrations_and_host_fixture() {
         "workflows/title.json",
         "workflows/compact.json",
         "workflows/compact-run.json",
-        "workflows/compact-prepare.json",
+        "workflows/compact-plan.json",
         "workflows/compact-summarize.json",
         "build/title.rs",
         "migrations/00000000000001_chat_storage/up.sql",

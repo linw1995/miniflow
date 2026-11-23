@@ -58,19 +58,30 @@ fn skips_when_disabled_below_threshold_or_nothing_to_summarize() {
     ]);
 
     for (label, extra) in [
-        ("disabled", json!({ "compact.params.enabled": false })),
+        (
+            "disabled",
+            json!({ "compact.params.context": { "compaction": { "enabled": false } } }),
+        ),
         (
             "below_threshold",
             json!({
-                "compact.params.context_window": 10000,
-                "compact.params.reserve_tokens": 1000
+                "compact.params.context": {
+                    "compaction": {
+                        "context_window": 10000,
+                        "reserve_tokens": 1000
+                    }
+                }
             }),
         ),
         (
             "fits_keep_recent",
             json!({
                 "compact.params.force": true,
-                "compact.params.keep_recent_tokens": 20000
+                "compact.params.context": {
+                    "compaction": {
+                        "keep_recent_tokens": 20000
+                    }
+                }
             }),
         ),
     ] {
@@ -137,10 +148,14 @@ fn threshold_compaction_keeps_recent_turn_tracks_files_and_truncates_tool_output
                 "usage": { "input_tokens": 700, "output_tokens": 200, "total_tokens": 900 }
             }
         ],
-        "compact.params.context_window": 1000,
-        "compact.params.reserve_tokens": 200,
-        "compact.params.keep_recent_tokens": 12,
-        "compact.params.custom_instructions": "Preserve file paths.",
+        "compact.params.context": {
+            "compaction": {
+                "context_window": 1000,
+                "reserve_tokens": 200,
+                "keep_recent_tokens": 12,
+                "custom_instructions": "Preserve file paths."
+            }
+        },
         "compact.params.model": "fixture-model",
         "compact.params.base_url": server.base_url,
         "compact.params.api_key": "synthetic-key"
@@ -214,9 +229,13 @@ fn split_turn_summarizes_history_then_turn_prefix_and_merges_usages() {
     ]);
     let outputs = call_compact(json!({
         "compact.params.messages": messages,
-        "compact.params.enabled": false,
+        "compact.params.context": {
+            "compaction": {
+                "enabled": false,
+                "keep_recent_tokens": 50
+            }
+        },
         "compact.params.force": true,
-        "compact.params.keep_recent_tokens": 50,
         "compact.params.model": "fixture-model",
         "compact.params.base_url": server.base_url,
         "compact.params.api_key": "synthetic-key"
@@ -268,7 +287,7 @@ fn split_turn_without_prior_history_only_calls_turn_prefix_model() {
     let outputs = call_compact(json!({
         "compact.params.messages": messages,
         "compact.params.force": true,
-        "compact.params.keep_recent_tokens": 4,
+        "compact.params.context": { "compaction": { "keep_recent_tokens": 4 } },
         "compact.params.model": "fixture-model",
         "compact.params.base_url": server.base_url,
         "compact.params.api_key": "synthetic-key"
@@ -299,7 +318,7 @@ fn repeated_compaction_uses_update_prompt_and_cumulates_file_operations() {
             { "role": "assistant", "content": "Read lib.rs" }
         ],
         "compact.params.force": true,
-        "compact.params.keep_recent_tokens": 0,
+        "compact.params.context": { "compaction": { "keep_recent_tokens": 0 } },
         "compact.params.model": "fixture-model",
         "compact.params.base_url": server.base_url,
         "compact.params.api_key": "synthetic-key"
@@ -318,7 +337,7 @@ fn repeated_compaction_uses_update_prompt_and_cumulates_file_operations() {
     let noop = call_compact(json!({
         "compact.params.messages": serde_json::to_value(&first["messages"]).unwrap(),
         "compact.params.force": true,
-        "compact.params.keep_recent_tokens": 0,
+        "compact.params.context": { "compaction": { "keep_recent_tokens": 0 } },
         "compact.params.model": "fixture-model",
         "compact.params.base_url": server.base_url,
         "compact.params.api_key": "synthetic-key"
@@ -340,7 +359,7 @@ fn repeated_compaction_uses_update_prompt_and_cumulates_file_operations() {
             { "role": "assistant", "content": "Wrote lib.rs" }
         ],
         "compact.params.force": true,
-        "compact.params.keep_recent_tokens": 0,
+        "compact.params.context": { "compaction": { "keep_recent_tokens": 0 } },
         "compact.params.model": "fixture-model",
         "compact.params.base_url": server.base_url,
         "compact.params.api_key": "synthetic-key"
@@ -401,7 +420,7 @@ fn failures_preserve_usages_keep_original_messages_and_short_circuit_split_turns
         let outputs = call_compact(json!({
             "compact.params.messages": conversation,
             "compact.params.force": true,
-            "compact.params.keep_recent_tokens": 40,
+            "compact.params.context": { "compaction": { "keep_recent_tokens": 40 } },
             "compact.params.model": "fixture-model",
             "compact.params.base_url": server.base_url,
             "compact.params.api_key": "synthetic-key"
@@ -446,7 +465,7 @@ fn split_turn_prefix_failure_retains_both_usages_and_original_messages() {
     let outputs = call_compact(json!({
         "compact.params.messages": conversation,
         "compact.params.force": true,
-        "compact.params.keep_recent_tokens": 40,
+        "compact.params.context": { "compaction": { "keep_recent_tokens": 40 } },
         "compact.params.model": "fixture-model",
         "compact.params.base_url": server.base_url,
         "compact.params.api_key": "synthetic-key"
@@ -487,7 +506,7 @@ fn large_transcripts_compact_through_cel_without_size_caps() {
             { "role": "assistant", "content": "Processed log" }
         ],
         "compact.params.force": true,
-        "compact.params.keep_recent_tokens": 0,
+        "compact.params.context": { "compaction": { "keep_recent_tokens": 0 } },
         "compact.params.model": "fixture-model",
         "compact.params.base_url": server.base_url,
         "compact.params.api_key": "synthetic-key"
@@ -545,6 +564,20 @@ fn chat_host_composes_builtin_compact_into_replace_context_across_reopen() {
                 }
             },
             {
+                "id": "compact_context",
+                "kind": "builtin.code",
+                "config": {
+                    "language": "cel",
+                    "inputs": { "enabled": "bool" },
+                    "code": {
+                        "value": "{'compaction': {'enabled': enabled, 'keep_recent_tokens': 8}}"
+                    }
+                },
+                "inputs": {
+                    "enabled": { "from": { "node": "params", "port": "compact" } }
+                }
+            },
+            {
                 "id": "compact",
                 "kind": "workflow.call",
                 "config": { "flow": "compact" },
@@ -552,18 +585,12 @@ fn chat_host_composes_builtin_compact_into_replace_context_across_reopen() {
                     "params.messages": { "from": { "node": "params", "port": "messages" } },
                     "params.append_messages": { "from": { "node": "model", "port": "messages" } },
                     "params.usages": { "from": { "node": "model", "port": "usages" } },
-                    "params.enabled": { "from": { "node": "params", "port": "compact" } },
+                    "params.context": { "from": { "node": "compact_context", "port": "value" } },
                     "params.force": { "from": { "node": "params", "port": "compact" } },
-                    "params.keep_recent_tokens": { "from": { "node": "keep_recent", "port": "value" } },
                     "params.model": { "from": { "node": "params", "port": "model" } },
                     "params.base_url": { "from": { "node": "params", "port": "base_url" } },
                     "params.api_key": { "from": { "node": "params", "port": "api_key" } }
                 }
-            },
-            {
-                "id": "keep_recent",
-                "kind": "builtin.constant",
-                "config": { "value": 8 }
             },
             {
                 "id": "route",
@@ -749,7 +776,13 @@ fn disabled_fast_path_preserves_secret_messages_without_tainting_metadata() {
     let mut args = WorkflowArguments::default();
     args.0
         .insert("compact.params.messages".into(), secret_messages);
-    args.0.insert("compact.params.enabled".into(), false.into());
+    args.0.insert(
+        "compact.params.context".into(),
+        ValueRef::object([(
+            "compaction".into(),
+            ValueRef::object([("enabled".into(), false.into())]),
+        )]),
+    );
     args.0
         .insert("compact.params.api_key".into(), "synthetic-key".into());
 
@@ -777,25 +810,36 @@ fn disabled_fast_path_preserves_secret_messages_without_tainting_metadata() {
 
 #[test]
 fn rejects_negative_compaction_settings() {
-    for setting in [
-        "compact.params.context_window",
-        "compact.params.reserve_tokens",
-        "compact.params.keep_recent_tokens",
-    ] {
-        let mut args = json!({
+    for setting in ["context_window", "reserve_tokens", "keep_recent_tokens"] {
+        let args = json!({
             "compact.params.messages": [
                 { "role": "user", "content": "Hello" },
                 { "role": "assistant", "content": "Hi" }
             ],
-            "compact.params.enabled": false,
+            "compact.params.context": {
+                "compaction": {
+                    "enabled": false,
+                    setting: -1
+                }
+            },
             "compact.params.api_key": "synthetic-key"
         });
-        args[setting] = json!(-1);
         let error = try_call_compact(WorkflowArguments::try_from(args).unwrap())
             .unwrap_err()
             .to_string();
         assert!(error.contains("non-negative"), "{setting}: {error}");
     }
+    let bad_type = json!({
+        "compact.params.messages": [
+            { "role": "user", "content": "Hello" },
+            { "role": "assistant", "content": "Hi" }
+        ],
+        "compact.params.context": {
+            "compaction": "invalid"
+        },
+        "compact.params.api_key": "synthetic-key"
+    });
+    assert!(try_call_compact(WorkflowArguments::try_from(bad_type).unwrap()).is_err());
 }
 
 #[test]
@@ -810,7 +854,7 @@ fn detects_legacy_summary_wrapper_and_preserves_previous_summary_on_split_turn()
             { "role": "assistant", "content": "Kept assistant tail" }
         ],
         "compact.params.force": true,
-        "compact.params.keep_recent_tokens": 4,
+        "compact.params.context": { "compaction": { "keep_recent_tokens": 4 } },
         "compact.params.model": "fixture-model",
         "compact.params.base_url": server.base_url,
         "compact.params.api_key": "synthetic-key"
@@ -864,9 +908,13 @@ fn cut_point_never_starts_kept_messages_on_tool_result_and_usage_filters_auxilia
                 "usage": { "total_tokens": 7777 }
             }
         ],
-        "compact.params.context_window": 700,
-        "compact.params.reserve_tokens": 100,
-        "compact.params.keep_recent_tokens": 50,
+        "compact.params.context": {
+            "compaction": {
+                "context_window": 700,
+                "reserve_tokens": 100,
+                "keep_recent_tokens": 50
+            }
+        },
         "compact.params.model": "fixture-model",
         "compact.params.base_url": server.base_url,
         "compact.params.api_key": "synthetic-key"
@@ -888,7 +936,7 @@ fn compact_and_helper_flows_declare_annotated_clusters_covering_all_nodes() {
     for flow_name in [
         "mf-chat.chat-compact",
         "mf-chat.chat-compact-run",
-        "mf-chat.chat-compact-prepare",
+        "mf-chat.chat-compact-plan",
         "mf-chat.chat-compact-summarize",
     ] {
         let definition = (registry
@@ -1389,21 +1437,14 @@ fn chatflow_reusing_builtin_compact_receives_host_policy_and_suppresses_host_com
                 "config": {
                     "language": "cel",
                     "inputs": {
-                        "text": "string",
-                        "context": "object"
+                        "text": "string"
                     },
                     "code": {
-                        "append_messages": "[{'role': 'assistant', 'content': text}]",
-                        "enabled": "context.compaction.enabled",
-                        "context_window": "context.compaction.context_window",
-                        "reserve_tokens": "context.compaction.reserve_tokens",
-                        "keep_recent_tokens": "context.compaction.keep_recent_tokens",
-                        "custom_instructions": "context.compaction.custom_instructions"
+                        "append_messages": "[{'role': 'assistant', 'content': text}]"
                     }
                 },
                 "inputs": {
-                    "text": { "from": { "node": "chat", "port": "text" } },
-                    "context": { "from": { "node": "params", "port": "context" } }
+                    "text": { "from": { "node": "chat", "port": "text" } }
                 }
             },
             {
@@ -1414,11 +1455,7 @@ fn chatflow_reusing_builtin_compact_receives_host_policy_and_suppresses_host_com
                     "params.messages": { "from": { "node": "params", "port": "messages" } },
                     "params.append_messages": { "from": { "node": "turn", "port": "append_messages" } },
                     "params.usages": { "from": { "node": "chat", "port": "usages" } },
-                    "params.enabled": { "from": { "node": "turn", "port": "enabled" } },
-                    "params.context_window": { "from": { "node": "turn", "port": "context_window" } },
-                    "params.reserve_tokens": { "from": { "node": "turn", "port": "reserve_tokens" } },
-                    "params.keep_recent_tokens": { "from": { "node": "turn", "port": "keep_recent_tokens" } },
-                    "params.custom_instructions": { "from": { "node": "turn", "port": "custom_instructions" } },
+                    "params.context": { "from": { "node": "params", "port": "context" } },
                     "params.model": { "from": { "node": "params", "port": "model" } },
                     "params.base_url": { "from": { "node": "params", "port": "base_url" } },
                     "params.api_key": { "from": { "node": "params", "port": "api_key" } }
@@ -1667,7 +1704,7 @@ fn embedded_conversation_declares_and_prepares_builtin_compact_call() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = mf_chat::flows::conversation::plan(&registry).unwrap();
     for (id, kind) in [
-        ("prepare_compact", "mf_chat.compact.prepare"),
+        ("compact_gate", "mf_chat.compact.gate"),
         ("finish", "mf_chat.conversation.finish"),
     ] {
         assert!(
@@ -1902,21 +1939,14 @@ fn user_workflow_reusing_compact_receives_discovered_context_window_in_context()
                 "config": {
                     "language": "cel",
                     "inputs": {
-                        "text": "string",
-                        "context": "object"
+                        "text": "string"
                     },
                     "code": {
-                        "append_messages": "[{'role': 'assistant', 'content': text}]",
-                        "enabled": "context.compaction.enabled",
-                        "context_window": "context.compaction.context_window",
-                        "reserve_tokens": "context.compaction.reserve_tokens",
-                        "keep_recent_tokens": "context.compaction.keep_recent_tokens",
-                        "custom_instructions": "context.compaction.custom_instructions"
+                        "append_messages": "[{'role': 'assistant', 'content': text}]"
                     }
                 },
                 "inputs": {
-                    "text": { "from": { "node": "chat", "port": "text" } },
-                    "context": { "from": { "node": "params", "port": "context" } }
+                    "text": { "from": { "node": "chat", "port": "text" } }
                 }
             },
             {
@@ -1927,11 +1957,7 @@ fn user_workflow_reusing_compact_receives_discovered_context_window_in_context()
                     "params.messages": { "from": { "node": "params", "port": "messages" } },
                     "params.append_messages": { "from": { "node": "turn", "port": "append_messages" } },
                     "params.usages": { "from": { "node": "chat", "port": "usages" } },
-                    "params.enabled": { "from": { "node": "turn", "port": "enabled" } },
-                    "params.context_window": { "from": { "node": "turn", "port": "context_window" } },
-                    "params.reserve_tokens": { "from": { "node": "turn", "port": "reserve_tokens" } },
-                    "params.keep_recent_tokens": { "from": { "node": "turn", "port": "keep_recent_tokens" } },
-                    "params.custom_instructions": { "from": { "node": "turn", "port": "custom_instructions" } },
+                    "params.context": { "from": { "node": "params", "port": "context" } },
                     "params.model": { "from": { "node": "params", "port": "model" } },
                     "params.base_url": { "from": { "node": "params", "port": "base_url" } },
                     "params.api_key": { "from": { "node": "params", "port": "api_key" } }

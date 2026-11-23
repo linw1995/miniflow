@@ -21,11 +21,11 @@ fn compact_run_definition()
     )))
 }
 
-fn compact_prepare_definition()
+fn compact_plan_definition()
 -> Result<mf_runtime::WorkflowDefinition, mf_runtime::DefinitionParseError> {
     mf_runtime::WorkflowDefinition::from_json(include_str!(concat!(
         env!("OUT_DIR"),
-        "/compact-prepare.json"
+        "/compact-plan.json"
     )))
 }
 
@@ -40,5 +40,5 @@ fn compact_summarize_definition()
 mf_runtime::register_builtin_flow!("chat-title", title_definition);
 mf_runtime::register_builtin_flow!("chat-compact", compact_definition);
 mf_runtime::register_builtin_flow!("chat-compact-run", compact_run_definition);
-mf_runtime::register_builtin_flow!("chat-compact-prepare", compact_prepare_definition);
+mf_runtime::register_builtin_flow!("chat-compact-plan", compact_plan_definition);
 mf_runtime::register_builtin_flow!("chat-compact-summarize", compact_summarize_definition);

@@ -199,8 +199,8 @@
       }
     },
     {
-      "id": "prepare_compact",
-      "kind": "mf_chat.compact.prepare",
+      "id": "compact_gate",
+      "kind": "mf_chat.compact.gate",
       "inputs": {
         "completed": {
           "from": {
@@ -219,7 +219,7 @@
             "id": "yes",
             "condition": {
               "source": {
-                "output": "prepare_compact.enabled",
+                "output": "compact_gate.enabled",
                 "path": ""
               },
               "operator": "eq",
@@ -238,67 +238,43 @@
       "inputs": {
         "params.messages": {
           "from": {
-            "node": "prepare_compact",
+            "node": "compact_gate",
             "port": "messages"
           }
         },
         "params.append_messages": {
           "from": {
-            "node": "prepare_compact",
+            "node": "compact_gate",
             "port": "append_messages"
           }
         },
         "params.usages": {
           "from": {
-            "node": "prepare_compact",
+            "node": "compact_gate",
             "port": "usages"
           }
         },
-        "params.enabled": {
+        "params.context": {
           "from": {
-            "node": "prepare_compact",
-            "port": "enabled"
-          }
-        },
-        "params.context_window": {
-          "from": {
-            "node": "prepare_compact",
-            "port": "context_window"
-          }
-        },
-        "params.reserve_tokens": {
-          "from": {
-            "node": "prepare_compact",
-            "port": "reserve_tokens"
-          }
-        },
-        "params.keep_recent_tokens": {
-          "from": {
-            "node": "prepare_compact",
-            "port": "keep_recent_tokens"
-          }
-        },
-        "params.custom_instructions": {
-          "from": {
-            "node": "prepare_compact",
-            "port": "custom_instructions"
+            "node": "compact_gate",
+            "port": "context"
           }
         },
         "params.model": {
           "from": {
-            "node": "prepare_compact",
+            "node": "compact_gate",
             "port": "model"
           }
         },
         "params.base_url": {
           "from": {
-            "node": "prepare_compact",
+            "node": "compact_gate",
             "port": "base_url"
           }
         },
         "params.api_key": {
           "from": {
-            "node": "prepare_compact",
+            "node": "compact_gate",
             "port": "api_key"
           }
         }
@@ -477,10 +453,10 @@
     },
     {
       "from_node": "resolved_title_usages",
-      "to_node": "prepare_compact"
+      "to_node": "compact_gate"
     },
     {
-      "from_node": "prepare_compact",
+      "from_node": "compact_gate",
       "to_node": "compact_route"
     },
     {
