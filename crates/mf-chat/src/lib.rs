@@ -1,16 +1,15 @@
 //! Persistent chat operations shared by direct APIs and application-owned workflow nodes.
 
+mod call_events;
+mod context;
+pub mod contract;
 mod error;
 pub mod flows;
 mod host;
 mod model_selection;
 mod models;
-mod preview;
-#[macro_use]
 pub mod nodes;
-mod call_events;
-mod context;
-pub mod contract;
+mod preview;
 mod schema;
 mod session;
 mod storage;

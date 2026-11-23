@@ -530,6 +530,48 @@ pub fn prepare_definition_with_layouts(
     prepare_compiled_graph_with_layouts(&plan.graph, registry, body_layouts)
 }
 
+/// Prepares the authored body of a root Call for a host executor that delegates to it.
+/// The plan must already declare its final execution mode so descendants retain their
+/// definition identity when observed inside the outer call.
+pub fn prepare_call_body(
+    plan: &CompiledWorkflow,
+    registry: &NodeRegistry,
+    id: &str,
+) -> Result<PreparedSubgraph, WorkflowCompileError> {
+    let graph = &plan.graph;
+    crate::validate_compiled_graph(registry, graph)?;
+    let node = graph
+        .definition
+        .nodes
+        .iter()
+        .find(|node| node.id.as_str() == id && node.kind == crate::CALL_KIND)
+        .with_context(|| InvalidGraphSnafu {
+            definition_id: DefinitionId::from(id),
+            message: "expected a root Flow call",
+        })?;
+    let child = graph
+        .children
+        .get(&node.id)
+        .and_then(|children| children.get("body"))
+        .with_context(|| InvalidGraphSnafu {
+            definition_id: node.id.clone(),
+            message: "expected an authored Flow call body",
+        })?;
+    let origin_identity = Arc::new(OnceLock::from(graph.workflow_id().context(GraphSnafu)?));
+    prepare_subgraph_body(
+        node,
+        "body",
+        &mut GraphPreparation {
+            registry,
+            root_version: graph.definition.version,
+            body_layouts: None,
+            path: Vec::new(),
+            origin_identity,
+        },
+        child,
+    )
+}
+
 /// Prepare an artifact using its stored child tree, without source resolution.
 pub fn prepare_compiled_graph_with_layouts(
     graph: &mf_runtime::CompiledGraph,

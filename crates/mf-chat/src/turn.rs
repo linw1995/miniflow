@@ -6,7 +6,7 @@ use crate::{
     session, storage,
 };
 use diesel::prelude::*;
-use mf_runtime::{ExecutionContext, NodeExecutionError, NodeValue, TypedNodeResult, TypedTaskNode};
+use mf_runtime::NodeValue;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
 use std::{collections::BTreeMap, path::Path};
@@ -773,23 +773,6 @@ pub fn recover(input: RecoveryInputs) -> Result<RecoveryOutputs, ChatError> {
         })
     })
 }
-
-struct BeginTurn;
-
-impl TypedTaskNode for BeginTurn {
-    type Input = BeginTurnInputs;
-    type Output = TurnStarted;
-
-    fn execute(
-        &self,
-        input: Self::Input,
-        _: &mut ExecutionContext,
-    ) -> Result<TypedNodeResult<Self::Output>, NodeExecutionError> {
-        Ok(begin(input)?.into())
-    }
-}
-
-register_task!("mf_chat.turn.begin", BeginTurn);
 
 impl ChatDatabase {
     pub fn begin_turn(

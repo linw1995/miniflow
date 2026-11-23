@@ -535,14 +535,31 @@ fn replay_after_newer_turns_never_republishes_context_and_changed_variants_confl
 
 #[test]
 fn admission_pins_result_alternatives_without_reopening_a_manifest() {
+    use std::sync::Arc;
+
+    struct Backend;
+
+    impl mf_chat::ConversationBackend for Backend {
+        fn invoke(
+            &self,
+            _: &mf_chat::Invocation,
+            _: mf_chat::ConversationInputs,
+            _: &mut mf_runtime::ExecutionContext,
+            _: Option<&mut dyn FnMut(mf_chat::PreviewDelta) -> Result<(), ChatError>>,
+            _: Option<&mf_telemetry::observation::Observer>,
+        ) -> Result<ConversationResult, ChatError> {
+            Ok(ConversationResult {
+                update: MessageUpdate::ReplaceContext {
+                    context_messages: vec![],
+                    display_messages: exchange("undeclared"),
+                },
+                ..result("undeclared")
+            })
+        }
+    }
+
     let (_root, database, id) = database();
     let invocation = mf_chat::Invocation::new(&id);
-    let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
-    let node = registry
-        .get("mf_chat.turn.begin")
-        .unwrap()
-        .instantiate(json!({}))
-        .unwrap();
     let input = mf_chat::nodes::BeginTurnInputs {
         database_path: database.path().to_str().unwrap().into(),
         session_id: id.clone(),
@@ -553,28 +570,18 @@ fn admission_pins_result_alternatives_without_reopening_a_manifest() {
         retry_of: None,
         result_alternatives: Some(ResultAlternatives::Append),
     };
-    use mf_runtime::NodeValue;
-    node.execution
-        .as_task_node()
-        .unwrap()
-        .execute(
-            input.into_values().unwrap(),
-            &mut mf_runtime::ExecutionContext::default(),
-        )
-        .unwrap();
-    let replacement = ConversationResult {
-        update: MessageUpdate::ReplaceContext {
-            context_messages: vec![],
-            display_messages: exchange("undeclared"),
-        },
-        ..result("undeclared")
-    };
+    let resolution = mf_chat::workflow::run_conversation(
+        &database,
+        input,
+        Arc::new(Backend),
+        Default::default(),
+        false,
+        None,
+    )
+    .unwrap();
     assert!(matches!(
-        database.complete_turn(invocation, replacement),
-        Err(ChatError::Invalid {
-            field: "workflow result",
-            ..
-        })
+        resolution.state,
+        CompletionState::Finished(turn) if turn.result_alternatives == Some(ResultAlternatives::Append)
     ));
     assert_eq!(database.model_context(&id).unwrap().revision, 0);
     assert_eq!(database.messages(&id, 50, None).unwrap().messages.len(), 1);

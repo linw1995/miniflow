@@ -275,6 +275,89 @@ fn embedded_call_without_a_subscription_joins_with_its_terminal_result() {
 }
 
 #[test]
+fn embedded_call_retains_the_result_when_its_preview_is_dropped_before_settlement() {
+    use mf_chat::{
+        ModelIdentity, PreviewConsumer, contract::CompletionState, nodes::BeginTurnInputs,
+    };
+    use mf_telemetry::{
+        event::{Event, Outcome},
+        observation::{self, LocalRecord},
+        stream::StreamPayload,
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let database = mf_chat::ChatDatabase::open(root.path().join("chat.sqlite")).unwrap();
+    let session = database.create_session("embedded", None, None).unwrap();
+    let invocation = Invocation::new(&session.id);
+    let request = BeginTurnInputs {
+        database_path: database.path().to_str().unwrap().into(),
+        session_id: session.id.clone(),
+        turn_id: invocation.turn_id.clone(),
+        call_id: invocation.call_id.clone(),
+        prompt: "hello".into(),
+        model: ModelIdentity {
+            profile: "embedded".into(),
+            model: None,
+        },
+        retry_of: None,
+        result_alternatives: None,
+    };
+    let resolution = std::thread::scope(|scope| {
+        let (consumer, previews) = PreviewConsumer::channel();
+        let (emitted, ready) = std::sync::mpsc::channel();
+        let database = &database;
+        let run = scope.spawn(move || {
+            let _observation = observation::collect(move |record| {
+                if let LocalRecord::Stream(record) = record
+                    && matches!(&record.payload, StreamPayload::Execution(Event::NodeFinished {
+                        node, outcome: Outcome::Succeeded, ..
+                    }) if node.id == "workflow" && node.path.is_empty())
+                {
+                    let _ = emitted.send(());
+                }
+            });
+            mf_chat::workflow::run_conversation_with_preview(
+                database,
+                request,
+                embedded_profile().backend(),
+                Default::default(),
+                false,
+                None,
+                Some(consumer),
+            )
+        });
+        ready.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(database.turn(&invocation.turn_id).unwrap().state, "running");
+        assert!(
+            database
+                .model_context(&session.id)
+                .unwrap()
+                .messages
+                .is_empty()
+        );
+        drop(previews);
+        run.join().unwrap().unwrap()
+    });
+    let CompletionState::Uncommitted(pending) = resolution.state else {
+        panic!("expected the completed reply to remain recoverable");
+    };
+    assert_eq!(
+        pending.completion.result.final_text(),
+        Some("isolated-final")
+    );
+    assert_eq!(
+        database
+            .messages(&session.id, 10, None)
+            .unwrap()
+            .messages
+            .len(),
+        1
+    );
+    let saved = database.save_recovered(pending).unwrap();
+    assert_eq!(saved.result.final_text(), Some("isolated-final"));
+}
+
+#[test]
 fn embedded_call_drains_public_streams_without_an_answer_export() {
     let original = embedded_profile();
     let backend = original.backend();

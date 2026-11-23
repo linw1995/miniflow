@@ -226,12 +226,12 @@ and observations are never substitutes for missing messages or usages.
 
 ## Turn lifecycle
 
-`mf_chat.turn.begin` atomically stores the original user, running turn and application invocation,
+The host-bound `begin` call atomically stores the original user, running turn and application invocation,
 admitted context revision, and advertised alternatives when contract-backed. It reserves one user
 sequence and loads the complete admitted context before releasing its short transaction. Only one
 turn runs per session; other sessions can progress while a provider is pending.
 
-`ChatDatabase::complete_turn` and `mf_chat.conversation.finish` share the same settlement logic. It
+`ChatDatabase::complete_turn` and the host-bound `finish` call share the same settlement logic. It
 validates against that immutable admission, appends every display message with checked sequence
 allocation, and saves the complete canonical result, usages, and terminal state together. Successful
 settlement also publishes the derived context revision and applies an eligible title in that
@@ -270,16 +270,18 @@ flowchart LR
     Compact --> Settle["Settle atomically"]
 ```
 
-Finite and compatible TaskStream graphs are composed through `workflow.call`; preparation binds
-native values and completion reads the produced alternative after call success. An inactive optional
-port must not skip settlement. Graphs requiring a native Event/Stream coordinator use the host-bound
-`mf_chat.workflow.invoke` adapter. Both paths share cancellation, result validation, and storage.
-The host drains declared streams even without a preview subscriber. In
-[`conversation.json`](../crates/mf-chat/workflows/conversation.json), CEL gates decide whether to
-call the title and compaction Flows. They read only eligibility facts; credentials and transcripts
-travel over separate native ports. Only the `mf_chat.*` kinds in this definition are globally
-registered. Adapters that the host adds during composition are registered only for that composed
-Flow.
+The host supplies the executors for the `begin`, `workflow`, and `finish` calls in
+[`conversation.json`](../crates/mf-chat/workflows/conversation.json). Finite and compatible
+TaskStream graphs run as the `workflow` call's child, preserving their nested execution scopes.
+Executable runners, custom backends, and embedded graphs with their own Event/Stream coordinator
+use the same call contract. It binds the request, validates the terminal result, and publishes
+previews and the final response on one stream. `mf_chat.conversation.route` forwards previews and
+releases the completed turn only on successful upstream closure. The host drains declared streams
+with or without a preview subscriber.
+
+CEL gates decide whether to call the title and compaction Flows using eligibility facts. Credentials
+and transcripts travel over separate native ports. Load a chat profile through `ChatHost` or the
+chat CLI to execute the conversation Flow with its host bindings.
 
 The user Flow owns business generation, tools, explicit usage composition, and captured-failure
 policy, and may also own compaction thresholds and summary requests by declaring `replace_context`.
@@ -597,10 +599,11 @@ assistants and usages. Private loop context is distinct from its exported additi
 
 ## Persistence and recovery
 
-`mf_chat.conversation.finish` composes optional title facts and invokes shared settlement. Host abort
-cleanup and save-only retries use those handlers directly, independently of a cancelled execution
-context. Direct callers can begin an `Invocation`, bind its request with `contract.arguments`, then
-pass typed data to `reconcile_result` or bounded JSON to `reconcile_completion`.
+The host-bound `finish` call composes optional title and compaction facts and invokes shared
+settlement. Host abort cleanup and save-only retries use those handlers directly, independently of a
+cancelled execution context. Direct callers can begin an `Invocation`, bind its request with
+`contract.arguments`, then pass typed data to `reconcile_result` or bounded JSON to
+`reconcile_completion`.
 
 Recovery uses the admitted revision, original user, and stored advertised alternatives. It needs no
 current manifest, source files, or workflow execution. `CompletionState::Committed` means a terminal

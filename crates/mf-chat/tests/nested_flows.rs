@@ -176,6 +176,7 @@ fn global_chat_node_kinds_match_the_conversation_definition() {
         .filter(|kind| kind.starts_with("mf_chat."))
         .collect();
     assert_eq!(registered, expected);
+    assert_eq!(registered, BTreeSet::from(["mf_chat.conversation.route"]));
     for node in definition
         .nodes
         .iter()
@@ -200,12 +201,15 @@ fn conversation_definition_is_registered_and_describable() {
     let resolved = mf_compiler::resolve_flows(&definition, None).unwrap();
     let plan = mf_compiler::plan_resolved_workflow(&resolved).unwrap();
     let description = mf_compiler::describe_compiled(&plan).unwrap();
-    assert!(
-        description
-            .nodes
-            .iter()
-            .any(|node| node.id == "begin" && node.kind == "mf_chat.turn.begin")
-    );
+    for id in ["begin", "workflow", "finish"] {
+        assert!(
+            description
+                .nodes
+                .iter()
+                .any(|node| node.id == id && node.kind == mf_runtime::CALL_KIND),
+            "missing host call {id}"
+        );
+    }
     assert!(
         description
             .nodes
@@ -217,12 +221,6 @@ fn conversation_definition_is_registered_and_describable() {
             .nodes
             .iter()
             .any(|node| node.id == "compact" && node.kind == mf_runtime::CALL_KIND)
-    );
-    assert!(
-        description
-            .nodes
-            .iter()
-            .any(|node| node.id == "finish" && node.kind == "mf_chat.conversation.finish")
     );
 }
 

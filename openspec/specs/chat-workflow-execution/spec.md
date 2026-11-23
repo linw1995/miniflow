@@ -44,14 +44,14 @@ identity and MAY report a workflow-selected configuration profile label.
 
 ### Requirement: Execute conversations through the embedded flow
 
-Both embedded and executable backends SHALL execute the application Flow: `mf_chat.turn.begin`
-loads the context, `workflow.call` or the host-bound `mf_chat.workflow.invoke` calls the supplied user
-workflow through the common conversation protocol, and `mf_chat.conversation.finish` saves the final
-result. The package SHALL register globally only the `mf_chat.*` kinds declared in
-`conversation.json`. Adapters added during host composition MUST NOT be globally registered.
-The user workflow SHALL define conversation, optional title generation, and usage collection without
-requiring `mf-chat` nodes or database access. System instructions SHALL remain separate from history.
-Returned completions SHALL identify their session, turn, and call.
+Embedded and executable backends SHALL execute the application Flow. Its `begin`, `workflow`, and
+`finish` stages SHALL use `workflow.call` with per-invocation host bindings for admission, backend
+execution, and settlement. The backend call SHALL validate and forward the conversation protocol
+while retaining nested observation for embedded callable Flows. The package SHALL limit global
+`mf_chat.*` registrations to the kinds declared in `conversation.json`. The user workflow SHALL
+define conversation, optional title generation, and usage collection without requiring `mf-chat`
+nodes or database access. System instructions SHALL remain separate from history. Returned
+completions SHALL identify their session, turn, and call.
 
 #### Scenario: Complete two conversation turns
 
