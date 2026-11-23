@@ -16,9 +16,212 @@ use mf_runtime::{
 use mf_telemetry::{identity::RunId, observation::Observer};
 use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use std::{
-    sync::{Arc, Mutex},
+    collections::BTreeMap,
+    sync::{Arc, Mutex, OnceLock},
     task::{Wake, Waker},
 };
+
+const CONTEXT_WINDOW_PROBE_TIMEOUT_MS: u64 = 5_000;
+
+type ContextWindowCacheMap = BTreeMap<(String, String), Option<i64>>;
+
+/// Host-scoped cache of provider-advertised context windows keyed by `(base_url, model)`.
+#[derive(Clone, Debug, Default)]
+pub struct ModelContextWindowCache {
+    entries: Arc<Mutex<ContextWindowCacheMap>>,
+}
+
+impl ModelContextWindowCache {
+    /// Returns the cached context window lookup state for `(base_url, model)`.
+    ///
+    /// Returns `None` if no lookup has been cached yet, `Some(None)` if the endpoint did not
+    /// advertise a positive window, and `Some(Some(tokens))` if a positive window is known.
+    pub fn get(&self, base_url: &str, model: &str) -> Option<Option<u64>> {
+        let normalized = base_url.trim_end_matches('/');
+        if normalized.is_empty() {
+            return None;
+        }
+        self.entries
+            .lock()
+            .expect("context window cache was not poisoned")
+            .get(&(normalized.to_owned(), model.to_owned()))
+            .copied()
+            .map(|value| {
+                value
+                    .and_then(|tokens| u64::try_from(tokens).ok())
+                    .filter(|&tokens| tokens > 0)
+            })
+    }
+
+    /// Records a single provider-advertised context window lookup outcome for `(base_url, model)`.
+    pub fn record(&self, base_url: &str, model: &str, context_window: Option<u64>) {
+        let normalized = base_url.trim_end_matches('/');
+        if normalized.is_empty() {
+            return;
+        }
+        let stored = context_window
+            .and_then(|tokens| i64::try_from(tokens).ok())
+            .filter(|&tokens| tokens > 0);
+        self.entries
+            .lock()
+            .expect("context window cache was not poisoned")
+            .insert((normalized.to_owned(), model.to_owned()), stored);
+    }
+
+    /// Records provider-advertised context windows returned by a `/models` listing.
+    pub fn record_models(&self, base_url: &str, models: &[mfn_llm::ModelInfo]) {
+        let normalized = base_url.trim_end_matches('/');
+        if normalized.is_empty() {
+            return;
+        }
+        let mut entries = self
+            .entries
+            .lock()
+            .expect("context window cache was not poisoned");
+        for model in models {
+            entries.insert(
+                (normalized.to_owned(), model.id.clone()),
+                model.context_window.filter(|&tokens| tokens > 0),
+            );
+        }
+    }
+
+    fn resolve(
+        &self,
+        config: &crate::CompactionConfig,
+        parameters: Option<&WorkflowArguments>,
+        context: &ExecutionContext,
+    ) -> crate::CompactionContext {
+        if !config.enabled || config.context_window.is_some() {
+            return config.resolved_context(None);
+        }
+        let Some(probe) = model_info_probe_inputs(parameters) else {
+            return config.resolved_context(None);
+        };
+        let key = (
+            probe.base_url.trim_end_matches('/').to_owned(),
+            probe.model.clone(),
+        );
+        if let Some(cached) = self
+            .entries
+            .lock()
+            .expect("context window cache was not poisoned")
+            .get(&key)
+            .copied()
+        {
+            return config.resolved_context(cached);
+        }
+        let discovered = match execute_model_info_node(probe, context) {
+            Ok(window) => window.filter(|&tokens| tokens > 0),
+            Err(()) => {
+                if context.cancellation().failure().is_some() {
+                    // Never cache a cancellation-interrupted probe as an absent window.
+                    return config.resolved_context(None);
+                }
+                None
+            }
+        };
+        self.entries
+            .lock()
+            .expect("context window cache was not poisoned")
+            .insert(key, discovered);
+        config.resolved_context(discovered)
+    }
+}
+
+fn execute_model_info_node(
+    probe: ModelInfoProbeInputs,
+    parent: &ExecutionContext,
+) -> Result<Option<i64>, ()> {
+    let node = prepare_model_info_node().ok_or(())?;
+    let source: FlowNode<()> = FlowNode {
+        definition_id: "params".into(),
+        node: (),
+        metadata: NodeMetadata {
+            ports: mf_runtime::NodePorts {
+                inputs: Vec::new(),
+                outputs: vec![
+                    mf_runtime::PortSpec::new("model", mf_runtime::ValueType::String, true),
+                    mf_runtime::PortSpec::new("base_url", mf_runtime::ValueType::String, true),
+                    mf_runtime::PortSpec::new("api_key", mf_runtime::ValueType::String, true),
+                ],
+            },
+            ..Default::default()
+        },
+        output_keys: OnceLock::new(),
+    };
+    let mut context = ExecutionContext::for_message(
+        &source,
+        mf_runtime::NodeResult {
+            outputs: [
+                ("model".into(), mf_runtime::ValueRef::from(probe.model)),
+                (
+                    "base_url".into(),
+                    mf_runtime::ValueRef::from(probe.base_url),
+                ),
+                (
+                    "api_key".into(),
+                    mf_runtime::ValueRef::from(probe.api_key.unwrap_or_default()).into_secret(),
+                ),
+            ]
+            .into(),
+            ..Default::default()
+        },
+    )
+    .map_err(|_| ())?;
+    context.set_cancellation(parent.cancellation());
+    let task = node.execution.as_task_node().ok_or(())?;
+    let executed = task
+        .execute(mf_runtime::Inputs::new(), &mut context)
+        .map_err(|_| ())?;
+    let outputs =
+        <mfn_llm::ModelInfoOutputs as NodeValue>::from_values(executed.outputs).map_err(|_| ())?;
+    Ok(outputs.context_window)
+}
+
+struct ModelInfoProbeInputs {
+    model: String,
+    base_url: String,
+    api_key: Option<String>,
+}
+
+fn prepare_model_info_node() -> Option<PreparedNode> {
+    let registry = NodeRegistry::from_inventory().ok()?;
+    let factory = registry.get(mfn_llm::MODEL_INFO_KIND)?;
+    factory
+        .instantiate(serde_json::json!({
+            "model": {"$ref": "params.model"},
+            "base_url": {"$ref": "params.base_url"},
+            "api_key": {"$ref": "params.api_key"},
+            "timeout_ms": CONTEXT_WINDOW_PROBE_TIMEOUT_MS,
+        }))
+        .ok()
+}
+
+fn model_info_probe_inputs(parameters: Option<&WorkflowArguments>) -> Option<ModelInfoProbeInputs> {
+    let parameters = parameters?;
+    let model = parameters
+        .0
+        .get(&mf_runtime::output_id("params", "model"))?
+        .as_str()?
+        .to_owned();
+    let base_url = parameters
+        .0
+        .get(&mf_runtime::output_id("params", "base_url"))?
+        .as_str()?
+        .to_owned();
+    let api_key = parameters
+        .0
+        .get(&mf_runtime::output_id("params", "api_key"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    Some(ModelInfoProbeInputs {
+        model,
+        base_url,
+        api_key,
+    })
+}
 
 struct CancelWorkflow(StreamCancellation);
 
@@ -50,6 +253,11 @@ pub trait ConversationBackend: Send + Sync {
     /// Resolved inputs for the optional built-in title Flow, with its `params` namespace.
     fn builtin_title_parameters(&self) -> Option<WorkflowArguments> {
         None
+    }
+
+    /// Resolved inputs for the optional built-in compaction Flow, with its `params` namespace.
+    fn builtin_compaction_parameters(&self) -> Option<WorkflowArguments> {
+        self.builtin_title_parameters()
     }
 
     fn invoke(
@@ -268,6 +476,11 @@ impl ConversationBackend for EmbeddedBackend {
         self.contract.builtin_title_parameters(&self.parameters)
     }
 
+    fn builtin_compaction_parameters(&self) -> Option<WorkflowArguments> {
+        self.contract
+            .builtin_compaction_parameters(&self.parameters)
+    }
+
     fn invoke(
         &self,
         _: &Invocation,
@@ -456,11 +669,67 @@ impl TitleGenerationContext {
 }
 
 #[derive(Clone, Debug, NodeValue)]
+struct CompactionGenerationContext {
+    messages: Vec<mfn_llm::ChatMessage>,
+    context: crate::contract::ConversationContext,
+    model: mf_runtime::ValueRef,
+    base_url: mf_runtime::ValueRef,
+    api_key: mf_runtime::ValueRef,
+}
+
+impl CompactionGenerationContext {
+    fn from_inputs(
+        request: &ConversationInputs,
+        parameters: Option<&WorkflowArguments>,
+        config: &crate::CompactionContext,
+    ) -> Result<Option<Self>, ChatError> {
+        let Some(parameters) = parameters else {
+            return Ok(None);
+        };
+        let parameter = |name| {
+            parameters
+                .0
+                .get(&mf_runtime::output_id("params", name))
+                .cloned()
+                .context(InvalidSnafu {
+                    field: "compaction parameters",
+                    reason: "requires resolved model, base_url, and api_key inputs",
+                })
+        };
+        let context = match request.context.as_ref() {
+            Some(context) => {
+                let mut context = context.clone();
+                context.compaction = config.clone();
+                context
+            }
+            None => crate::contract::ConversationContext {
+                title: crate::contract::TitleContext {
+                    source: "provisional".into(),
+                    revision: 0,
+                    attempted: false,
+                    enabled: false,
+                },
+                model_context: crate::contract::ModelContextRevision { revision: 0 },
+                compaction: config.clone(),
+            },
+        };
+        Ok(Some(Self {
+            messages: request.messages.clone(),
+            context,
+            model: parameter("model")?,
+            base_url: parameter("base_url")?,
+            api_key: parameter("api_key")?,
+        }))
+    }
+}
+
+#[derive(Clone, Debug, NodeValue)]
 struct ConversationCompleted {
     database_path: String,
     invocation: Invocation,
     result: ConversationResult,
     title_context: Option<TitleGenerationContext>,
+    compaction_context: Option<CompactionGenerationContext>,
 }
 
 #[derive(Clone, Debug, NodeValue)]
@@ -509,11 +778,15 @@ inventory::submit! {
 struct InvokeWorkflow {
     backend: Arc<dyn ConversationBackend>,
     automatic_titles: bool,
+    automatic_compaction: crate::CompactionConfig,
+    context_windows: ModelContextWindowCache,
+    probe_parameters: Option<WorkflowArguments>,
     observer: Observer,
     calls: Arc<Mutex<crate::CallEventCollector>>,
     delivered: Arc<Mutex<Option<ConversationResult>>>,
     previews: bool,
     title_parameters: Option<WorkflowArguments>,
+    compaction_parameters: Option<WorkflowArguments>,
 }
 
 impl TypedStreamNode for InvokeWorkflow {
@@ -528,11 +801,28 @@ impl TypedStreamNode for InvokeWorkflow {
             TypedNodeResult<Self::Output>,
         ) -> Result<(), mf_runtime::NodeExecutionError>,
     ) -> Result<(), mf_runtime::NodeExecutionError> {
+        let compaction = if input.request.context.is_some() || self.compaction_parameters.is_some()
+        {
+            self.context_windows.resolve(
+                &self.automatic_compaction,
+                self.probe_parameters.as_ref(),
+                context,
+            )
+        } else {
+            self.automatic_compaction.resolved_context(None)
+        };
+        context.check_future_limits(None)?;
         if let Some(context) = &mut input.request.context {
             context.title.enabled = self.automatic_titles;
+            context.compaction = compaction.clone();
         }
         let title_context =
             TitleGenerationContext::from_inputs(&input.request, self.title_parameters.as_ref())?;
+        let compaction_context = CompactionGenerationContext::from_inputs(
+            &input.request,
+            self.compaction_parameters.as_ref(),
+            &compaction,
+        )?;
         let calls = &self.calls;
         let response = {
             let invocation = input.invocation.clone();
@@ -582,7 +872,7 @@ impl TypedStreamNode for InvokeWorkflow {
         let mut connection = crate::storage::connect(std::path::Path::new(&input.database_path))?;
         let admitted = crate::turn::load_turn(&mut connection, &input.invocation.turn_id)?;
         crate::turn::validate_admitted(&mut connection, &admitted, &response)?;
-        if self.title_parameters.is_none() {
+        if self.title_parameters.is_none() && self.compaction_parameters.is_none() {
             *self
                 .delivered
                 .lock()
@@ -597,6 +887,7 @@ impl TypedStreamNode for InvokeWorkflow {
                         invocation: input.invocation,
                         result: response,
                         title_context,
+                        compaction_context,
                     }),
                 },
             }
@@ -681,10 +972,94 @@ impl mf_runtime::TypedTaskNode for PrepareTitle {
 register_task!("mf_chat.title.prepare", PrepareTitle);
 
 #[derive(NodeValue)]
+struct CompactionGateInputs {
+    completed: ConversationCompleted,
+}
+
+#[derive(Debug, Default, NodeValue)]
+struct CompactionGateOutputs {
+    enabled: bool,
+    messages: Option<Vec<mfn_llm::ChatMessage>>,
+    append_messages: Option<Vec<mfn_llm::ChatMessage>>,
+    usages: Option<Vec<crate::CallUsage>>,
+    context: Option<crate::contract::ConversationContext>,
+    model: Option<mf_runtime::ValueRef>,
+    base_url: Option<mf_runtime::ValueRef>,
+    api_key: Option<mf_runtime::ValueRef>,
+}
+
+struct CompactGate;
+
+impl mf_runtime::TypedTaskNode for CompactGate {
+    type Input = CompactionGateInputs;
+    type Output = CompactionGateOutputs;
+
+    fn execute(
+        &self,
+        input: Self::Input,
+        _: &mut ExecutionContext,
+    ) -> Result<TypedNodeResult<Self::Output>, mf_runtime::NodeExecutionError> {
+        let completed = input.completed;
+        let append_messages = match &completed.result.update {
+            crate::MessageUpdate::Append { messages } => Some(messages),
+            crate::MessageUpdate::ReplaceContext { .. } => None,
+        };
+        let enabled = completed.compaction_context.is_some()
+            && completed.result.status == "succeeded"
+            && append_messages.is_some()
+            && !completed.result.usages.iter().any(|usage| {
+                usage
+                    .attribution
+                    .as_ref()
+                    .and_then(|attribution| attribution.purpose.as_deref())
+                    == Some("compaction")
+            });
+        if !enabled {
+            return Ok(TypedNodeResult {
+                outputs: CompactionGateOutputs::default(),
+                skipped: [
+                    "messages",
+                    "append_messages",
+                    "usages",
+                    "context",
+                    "model",
+                    "base_url",
+                    "api_key",
+                ]
+                .map(String::from)
+                .into(),
+                loop_summary: None,
+            });
+        }
+        let compaction = completed
+            .compaction_context
+            .expect("enabled compaction has generation context");
+        let append_messages = append_messages
+            .expect("enabled compaction operates on append results")
+            .clone();
+        Ok(CompactionGateOutputs {
+            enabled: true,
+            messages: Some(compaction.messages),
+            append_messages: Some(append_messages),
+            usages: Some(completed.result.usages),
+            context: Some(compaction.context),
+            model: Some(compaction.model),
+            base_url: Some(compaction.base_url),
+            api_key: Some(compaction.api_key),
+        }
+        .into())
+    }
+}
+
+register_task!("mf_chat.compact.gate", CompactGate);
+
+#[derive(NodeValue)]
 struct FinishConversationInputs {
     completed: ConversationCompleted,
     title: mf_runtime::Nullable<String>,
     title_usages: Vec<crate::CallUsage>,
+    compacted_messages: mf_runtime::Nullable<Vec<mfn_llm::ChatMessage>>,
+    compaction_usages: Vec<crate::CallUsage>,
 }
 
 impl FinishConversationInputs {
@@ -694,6 +1069,19 @@ impl FinishConversationInputs {
             response.title = Some(title);
         }
         response.usages.extend(self.title_usages);
+        if let mf_runtime::Nullable::Value(context_messages) = self.compacted_messages {
+            let display_messages = match response.update {
+                crate::MessageUpdate::Append { messages } => messages,
+                crate::MessageUpdate::ReplaceContext {
+                    display_messages, ..
+                } => display_messages,
+            };
+            response.update = crate::MessageUpdate::ReplaceContext {
+                context_messages,
+                display_messages,
+            };
+        }
+        response.usages.extend(self.compaction_usages);
         response.validate()?;
         Ok(CompleteTurnInputs {
             database_path: self.completed.database_path,
@@ -840,6 +1228,7 @@ struct PreviewOutput {
 #[derive(Clone, NodeValue)]
 struct PreparedConversation {
     started: TurnStarted,
+    compaction: crate::CompactionContext,
 }
 
 #[derive(serde::Deserialize)]
@@ -906,6 +1295,10 @@ struct PrepareWorkflow {
     contract: ChatContract,
     parameters: WorkflowArguments,
     automatic_titles: bool,
+    automatic_compaction: crate::CompactionConfig,
+    context_windows: ModelContextWindowCache,
+    probe_parameters: Option<WorkflowArguments>,
+    host_compaction_active: bool,
 }
 
 impl mf_runtime::NodePortContract for PrepareWorkflow {
@@ -918,20 +1311,34 @@ impl mf_runtime::TaskNode for PrepareWorkflow {
     fn execute(
         &self,
         inputs: mf_runtime::Inputs,
-        _: &mut ExecutionContext,
+        context: &mut ExecutionContext,
     ) -> Result<mf_runtime::NodeResult, mf_runtime::NodeExecutionError> {
         let mut started = TurnStarted::from_values(inputs).map_err(ChatError::from)?;
+        let compaction = if started.request.context.is_some() || self.host_compaction_active {
+            self.context_windows.resolve(
+                &self.automatic_compaction,
+                self.probe_parameters.as_ref(),
+                context,
+            )
+        } else {
+            self.automatic_compaction.resolved_context(None)
+        };
+        context.check_future_limits(None)?;
         if let Some(context) = &mut started.request.context {
             context.title.enabled = self.automatic_titles;
+            context.compaction = compaction.clone();
         }
         let mut outputs = self
             .contract
             .arguments(started.request.clone(), &self.parameters)?
             .0;
         outputs.extend(
-            PreparedConversation { started }
-                .into_values()
-                .map_err(ChatError::from)?,
+            PreparedConversation {
+                started,
+                compaction,
+            }
+            .into_values()
+            .map_err(ChatError::from)?,
         );
         Ok(mf_runtime::NodeResult {
             outputs,
@@ -943,6 +1350,7 @@ impl mf_runtime::TaskNode for PrepareWorkflow {
 struct CompleteWorkflow {
     outputs: Vec<String>,
     title_parameters: Option<WorkflowArguments>,
+    compaction_parameters: Option<WorkflowArguments>,
     capture: CompletionCapture,
 }
 
@@ -971,21 +1379,28 @@ impl mf_runtime::TypedTaskNode for CompleteWorkflow {
             .lock()
             .expect("call events were not poisoned")
             .apply(&mut response.usages);
-        if self.title_parameters.is_none() {
+        if self.title_parameters.is_none() && self.compaction_parameters.is_none() {
             *self
                 .capture
                 .delivered
                 .lock()
                 .expect("delivery state was not poisoned") = Some(response.clone());
         }
+        let title_context = TitleGenerationContext::from_inputs(
+            &input.started.request,
+            self.title_parameters.as_ref(),
+        )?;
+        let compaction_context = CompactionGenerationContext::from_inputs(
+            &input.started.request,
+            self.compaction_parameters.as_ref(),
+            &input.compaction,
+        )?;
         Ok(InvocationEmission {
             event: InvocationEvent {
                 preview: None,
                 completed: Some(ConversationCompleted {
-                    title_context: TitleGenerationContext::from_inputs(
-                        &input.started.request,
-                        self.title_parameters.as_ref(),
-                    )?,
+                    title_context,
+                    compaction_context,
                     database_path: input.started.database_path,
                     invocation: input.started.invocation,
                     result: response,
@@ -1161,12 +1576,17 @@ fn register_runner(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compose_conversation(
     manifest: &mf_runtime::WorkflowManifest,
     parameters: &WorkflowArguments,
     automatic_titles: bool,
+    automatic_compaction: &crate::CompactionConfig,
+    context_windows: ModelContextWindowCache,
+    probe_parameters: Option<WorkflowArguments>,
     invocation: &Invocation,
     title_parameters: Option<WorkflowArguments>,
+    compaction_parameters: Option<WorkflowArguments>,
     capture: CompletionCapture,
     registry: &NodeRegistry,
 ) -> Result<ConversationPlan, ChatError> {
@@ -1251,7 +1671,10 @@ fn compose_conversation(
             "inputs":PreparedConversation::ports(), "outputs":InvocationEmission::ports(),
             "references":metadata.context_references.iter().map(|reference| &reference.output).collect::<Vec<_>>()
         },
-        "inputs":{"started":{"from":{"node":"prepare_workflow","port":"started"}}}
+        "inputs":{
+            "started":{"from":{"node":"prepare_workflow","port":"started"}},
+            "compaction":{"from":{"node":"prepare_workflow","port":"compaction"}}
+        }
     }));
     let route = nodes
         .iter_mut()
@@ -1332,6 +1755,10 @@ fn compose_conversation(
             contract,
             parameters: parameters.clone(),
             automatic_titles,
+            automatic_compaction: automatic_compaction.clone(),
+            context_windows,
+            probe_parameters,
+            host_compaction_active: compaction_parameters.is_some(),
         },
         NodeMetadata::default(),
     )
@@ -1340,6 +1767,7 @@ fn compose_conversation(
         CompleteWorkflow {
             outputs: result_outputs,
             title_parameters,
+            compaction_parameters,
             capture,
         },
         metadata,
@@ -1381,16 +1809,42 @@ pub fn run_conversation_with_preview(
     observer: Option<&Observer>,
     preview: Option<PreviewConsumer>,
 ) -> Result<ReconciledCompletion, ChatError> {
-    run_observed_conversation(
+    run_conversation_with_context_windows(
         database,
         request,
         backend,
         cancellation,
         automatic_titles,
         observer,
+        preview,
+        ModelContextWindowCache::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_conversation_with_context_windows(
+    database: &ChatDatabase,
+    request: BeginTurnInputs,
+    backend: Arc<dyn ConversationBackend>,
+    cancellation: StreamCancellation,
+    automatic_titles: bool,
+    observer: Option<&Observer>,
+    preview: Option<PreviewConsumer>,
+    context_windows: ModelContextWindowCache,
+) -> Result<ReconciledCompletion, ChatError> {
+    let automatic_compaction = crate::CompactionConfig::default();
+    run_observed_conversation(
+        database,
+        request,
+        backend,
+        cancellation,
+        automatic_titles,
+        &automatic_compaction,
+        observer,
         ConversationPresentation {
             preview,
             tools: None,
+            context_windows,
         },
     )
 }
@@ -1398,18 +1852,26 @@ pub fn run_conversation_with_preview(
 pub(super) struct ConversationPresentation {
     pub preview: Option<PreviewConsumer>,
     pub tools: Option<crate::ToolExecutionMetrics>,
+    pub context_windows: ModelContextWindowCache,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn run_observed_conversation(
     database: &ChatDatabase,
     mut request: BeginTurnInputs,
     backend: Arc<dyn ConversationBackend>,
     cancellation: StreamCancellation,
     automatic_titles: bool,
+    automatic_compaction: &crate::CompactionConfig,
     observer: Option<&Observer>,
     presentation: ConversationPresentation,
 ) -> Result<ReconciledCompletion, ChatError> {
-    let ConversationPresentation { preview, tools } = presentation;
+    automatic_compaction.validate()?;
+    let ConversationPresentation {
+        preview,
+        tools,
+        context_windows,
+    } = presentation;
     ensure!(
         std::path::Path::new(&request.database_path) == database.path(),
         InvalidSnafu {
@@ -1459,16 +1921,46 @@ pub(super) fn run_observed_conversation(
     } else {
         None
     };
-    if let Some((manifest, _)) = &composed {
-        request.result_alternatives = Some(ChatContract::from_manifest(manifest)?.alternatives);
+    let composed_alternatives = composed
+        .as_ref()
+        .map(|(manifest, _)| {
+            Ok::<_, ChatError>(ChatContract::from_manifest(manifest)?.alternatives)
+        })
+        .transpose()?;
+    let probe_parameters = automatic_compaction
+        .enabled
+        .then(|| {
+            backend
+                .builtin_compaction_parameters()
+                .or_else(|| backend.builtin_title_parameters())
+        })
+        .flatten();
+    let compaction_parameters = (automatic_compaction.enabled
+        && composed_alternatives
+            .is_none_or(|alternatives| alternatives == crate::ResultAlternatives::Append))
+    .then(|| backend.builtin_compaction_parameters())
+    .flatten();
+    if let Some(alternatives) = composed_alternatives {
+        request.result_alternatives = Some(if compaction_parameters.is_some() {
+            match alternatives {
+                crate::ResultAlternatives::Append => crate::ResultAlternatives::Both,
+                other => other,
+            }
+        } else {
+            alternatives
+        });
     }
     let ConversationPlan { mut plan, bindings } = if let Some((manifest, parameters)) = composed {
         compose_conversation(
             &manifest,
             parameters,
             automatic_titles,
+            automatic_compaction,
+            context_windows,
+            probe_parameters,
             &invocation,
             title_parameters,
+            compaction_parameters,
             CompletionCapture {
                 calls: Arc::clone(&calls),
                 delivered: Arc::clone(&delivered),
@@ -1480,11 +1972,15 @@ pub(super) fn run_observed_conversation(
             InvokeWorkflow {
                 backend,
                 automatic_titles,
+                automatic_compaction: automatic_compaction.clone(),
+                context_windows,
+                probe_parameters,
                 observer: observer.clone(),
                 calls: Arc::clone(&calls),
                 delivered: Arc::clone(&delivered),
                 previews: preview.is_some(),
                 title_parameters,
+                compaction_parameters,
             },
             NodeMetadata::default(),
         )
@@ -1701,7 +2197,11 @@ mod tests {
                 .unwrap(),
             parameters,
             false,
+            &crate::CompactionConfig::default(),
+            ModelContextWindowCache::default(),
+            None,
             &Invocation::new("session"),
+            None,
             None,
             CompletionCapture {
                 calls: Default::default(),
@@ -1814,6 +2314,7 @@ mod tests {
                     database_path: "chat.sqlite".into(),
                     invocation: Invocation::new("session"),
                     title_context: None,
+                    compaction_context: None,
                     result: ConversationResult::assistant("canonical"),
                 }),
             },
@@ -1900,6 +2401,7 @@ mod tests {
             }],
             context: Some(crate::contract::ConversationContext {
                 model_context: crate::ModelContextRevision { revision: 0 },
+                compaction: crate::CompactionContext::default(),
                 title: crate::contract::TitleContext {
                     source: "provisional".into(),
                     revision: 0,
@@ -1964,6 +2466,7 @@ mod tests {
                 prompt: "Prompt".into(),
                 context: crate::contract::ConversationContext {
                     model_context: crate::ModelContextRevision { revision: 0 },
+                    compaction: crate::CompactionContext::default(),
                     title: crate::contract::TitleContext {
                         source: "provisional".into(),
                         revision: 0,
@@ -2098,9 +2601,12 @@ mod tests {
                 "mf_chat.workflow.complete",
                 PreparedConversation::ports(),
                 InvocationEmission::ports(),
-                PreparedConversation { started: input }
-                    .into_values()
-                    .unwrap(),
+                PreparedConversation {
+                    started: input,
+                    compaction: crate::CompactionContext::default(),
+                }
+                .into_values()
+                .unwrap(),
             ),
         ] {
             let adapter = registry
@@ -2165,5 +2671,46 @@ mod tests {
             })
         ));
         assert!(!directory.path().join("other.sqlite").exists());
+    }
+
+    #[test]
+    fn context_window_cache_records_discovered_models_and_ignores_blank_base_url() {
+        let cache = ModelContextWindowCache::default();
+        cache.record_models(
+            "/",
+            &[mfn_llm::ModelInfo {
+                id: "ignored".into(),
+                context_window: Some(64_000),
+                ..Default::default()
+            }],
+        );
+        cache.record_models(
+            "https://example.invalid/v1/",
+            &[mfn_llm::ModelInfo {
+                id: "cached-model".into(),
+                context_window: Some(96_000),
+                ..Default::default()
+            }],
+        );
+        let args = WorkflowArguments(
+            [
+                (
+                    mf_runtime::output_id("params", "base_url"),
+                    mf_runtime::ValueRef::from("https://example.invalid/v1"),
+                ),
+                (
+                    mf_runtime::output_id("params", "model"),
+                    mf_runtime::ValueRef::from("cached-model"),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let resolved = cache.resolve(
+            &crate::CompactionConfig::default(),
+            Some(&args),
+            &ExecutionContext::default(),
+        );
+        assert_eq!(resolved.context_window, 96_000);
     }
 }

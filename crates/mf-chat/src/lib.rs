@@ -23,8 +23,9 @@ pub mod workflow;
 
 pub use context::{ModelContext, context_tokens};
 pub use contract::{
-    CallUsage, Completion, ConversationContext, ConversationInputs, ConversationResult,
-    MessageUpdate, ModelContextRevision, ResultAlternatives, TitleContext, UncommittedCompletion,
+    CallUsage, CompactionConfig, CompactionContext, Completion, ConversationContext,
+    ConversationInputs, ConversationResult, DEFAULT_COMPACTION_CONTEXT_WINDOW, MessageUpdate,
+    ModelContextRevision, ResultAlternatives, TitleContext, UncommittedCompletion,
 };
 pub use error::{BackendSnafu, CaptureSnafu, ChatError};
 pub use host::{ChatHost, ChatJob, HostConfig};
@@ -46,4 +47,4 @@ pub use mfn_llm::{
     UsageScope,
 };
 
-pub use workflow::{ConversationBackend, WorkflowProfile};
+pub use workflow::{ConversationBackend, ModelContextWindowCache, WorkflowProfile};

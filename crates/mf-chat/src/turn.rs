@@ -311,6 +311,7 @@ pub fn begin(input: BeginTurnInputs) -> Result<TurnStarted, ChatError> {
                     model_context: crate::ModelContextRevision {
                         revision: owner.context_revision,
                     },
+                    compaction: crate::CompactionContext::default(),
                 }),
                 messages: context.messages,
             },

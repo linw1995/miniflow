@@ -619,7 +619,7 @@ impl Controller {
                 preview.lock().unwrap().apply(event)
             })
         });
-        let resolution = mf_chat::workflow::run_conversation_with_preview(
+        let resolution = mf_chat::workflow::run_conversation_with_context_windows(
             &self.database,
             request,
             Arc::new(backend),
@@ -627,6 +627,7 @@ impl Controller {
             true,
             None,
             preview_consumer,
+            self.model_selection.context_windows(),
         );
         let outcome = captured
             .lock()
@@ -740,6 +741,12 @@ impl mf_chat::ConversationBackend for ExternalBackend {
         self.launch
             .contract
             .builtin_title_parameters(&self.parameters)
+    }
+
+    fn builtin_compaction_parameters(&self) -> Option<mf_runtime::WorkflowArguments> {
+        self.launch
+            .contract
+            .builtin_compaction_parameters(&self.parameters)
     }
 
     fn invoke(

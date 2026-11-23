@@ -29,6 +29,7 @@ pub struct HostConfig {
     /// A local observer without export is used when none is supplied.
     pub observer: Option<Observer>,
     pub automatic_titles: bool,
+    pub automatic_compaction: crate::CompactionConfig,
 }
 
 impl HostConfig {
@@ -38,6 +39,7 @@ impl HostConfig {
             max_active: 4,
             observer: None,
             automatic_titles: true,
+            automatic_compaction: crate::CompactionConfig::default(),
         }
     }
 }
@@ -58,6 +60,7 @@ struct Inner {
     database: ChatDatabase,
     config: HostConfig,
     workers: Mutex<Workers>,
+    context_windows: crate::ModelContextWindowCache,
 }
 
 pub struct ChatHost {
@@ -142,6 +145,7 @@ impl ChatHost {
                 reason: "must contain a workflow profile"
             }
         );
+        config.automatic_compaction.validate()?;
         for (key, profile) in &config.profiles {
             ensure!(
                 key == &profile.name,
@@ -156,6 +160,7 @@ impl ChatHost {
                 database: ChatDatabase::open(path)?,
                 config,
                 workers: Mutex::new(Workers::default()),
+                context_windows: crate::ModelContextWindowCache::default(),
             }),
         };
         Ok(host)
@@ -302,6 +307,7 @@ impl ChatHost {
                         ConversationPresentation {
                             preview,
                             tools: Some(worker_metrics.clone()),
+                            context_windows: inner.context_windows.clone(),
                         },
                     )
                 }));
@@ -463,6 +469,7 @@ impl Inner {
             profile.backend(),
             cancellation,
             self.config.automatic_titles,
+            &self.config.automatic_compaction,
             self.config.observer.as_ref(),
             presentation,
         )?;

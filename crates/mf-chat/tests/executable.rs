@@ -159,6 +159,45 @@ fn a_separate_title_output_is_not_an_ownership_hint() {
             .builtin_title_parameters(&parameters(&contract))
             .is_some()
     );
+    assert!(
+        contract
+            .builtin_compaction_parameters(&parameters(&contract))
+            .is_some()
+    );
+}
+
+#[test]
+fn builtin_compaction_yields_when_chatflow_declares_replace_context() {
+    let append_contract = ChatContract::from_manifest(&manifest()).unwrap();
+    assert!(
+        append_contract
+            .builtin_compaction_parameters(&parameters(&append_contract))
+            .is_some()
+    );
+
+    let mut both = manifest();
+    both.definition.outputs[0].optional = true;
+    both.definition.outputs.push(
+        serde_json::from_value(json!({
+            "name":"replace_context", "node":"result", "port":"value", "optional":true
+        }))
+        .unwrap(),
+    );
+    let both_contract = ChatContract::from_manifest(&both).unwrap();
+    assert!(
+        both_contract
+            .builtin_compaction_parameters(&parameters(&both_contract))
+            .is_none()
+    );
+
+    let mut replace_only = manifest();
+    replace_only.definition.outputs[0].name = "replace_context".into();
+    let replace_contract = ChatContract::from_manifest(&replace_only).unwrap();
+    assert!(
+        replace_contract
+            .builtin_compaction_parameters(&parameters(&replace_contract))
+            .is_none()
+    );
 }
 
 #[test]

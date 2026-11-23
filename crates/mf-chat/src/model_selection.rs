@@ -145,7 +145,7 @@ pub struct ModelSelection {
     needs_default_model: bool,
     list_models_node: Option<PreparedNode>,
     model_info_node: Option<PreparedNode>,
-    model_context_windows: BTreeMap<(String, String), Option<u64>>,
+    context_windows: crate::ModelContextWindowCache,
     cancellation: ModelSelectionCancellation,
 }
 
@@ -189,7 +189,7 @@ impl ModelSelection {
             needs_default_model: merged.needs_default_model,
             list_models_node,
             model_info_node,
-            model_context_windows: BTreeMap::new(),
+            context_windows: crate::ModelContextWindowCache::default(),
             cancellation: ModelSelectionCancellation::new(),
         })
     }
@@ -255,8 +255,14 @@ impl ModelSelection {
         self.cancellation.finish_query();
         let executed = executed?;
         let outputs = <ModelListOutputs as NodeValue>::from_values(executed.outputs)?;
-        self.record_model_windows(&base_url, &outputs.models);
+        self.context_windows
+            .record_models(&base_url, &outputs.models);
         Ok(outputs.models)
+    }
+
+    /// Returns a handle to the shared per-endpoint model context window cache.
+    pub fn context_windows(&self) -> crate::ModelContextWindowCache {
+        self.context_windows.clone()
     }
 
     /// Returns the cached context window lookup state for `model` on the current endpoint.
@@ -265,13 +271,7 @@ impl ModelSelection {
     /// advertise a positive window, and `Some(Some(tokens))` if a positive window is known.
     pub fn cached_context_window(&self, model: &str) -> Option<Option<u64>> {
         let endpoint = self.resolved_endpoint()?;
-        let normalized = endpoint.base_url.trim_end_matches('/');
-        if normalized.is_empty() {
-            return None;
-        }
-        self.model_context_windows
-            .get(&(normalized.to_owned(), model.to_owned()))
-            .copied()
+        self.context_windows.get(&endpoint.base_url, model)
     }
 
     /// Resolves the context window for `model`, reusing the per-endpoint cache or querying the
@@ -281,7 +281,7 @@ impl ModelSelection {
             return cached;
         }
         let endpoint = self.resolved_endpoint()?;
-        let normalized = endpoint.base_url.trim_end_matches('/').to_owned();
+        let base_url = endpoint.base_url.clone();
         let node = self.model_info_node.as_ref()?;
         let cancellation = self.cancellation.begin_query();
         let executed =
@@ -300,10 +300,7 @@ impl ModelSelection {
             .ok()
             .and_then(|result| <ModelInfoOutputs as NodeValue>::from_values(result.outputs).ok())
             .and_then(|outputs| positive_context_window(outputs.context_window));
-        if !normalized.is_empty() {
-            self.model_context_windows
-                .insert((normalized, model.to_owned()), discovered);
-        }
+        self.context_windows.record(&base_url, model, discovered);
         discovered
     }
 
@@ -389,19 +386,6 @@ impl ModelSelection {
             context_window,
             warning,
         })
-    }
-
-    fn record_model_windows(&mut self, base_url: &str, models: &[ModelInfo]) {
-        let normalized = base_url.trim_end_matches('/');
-        if normalized.is_empty() {
-            return;
-        }
-        for model in models {
-            self.model_context_windows.insert(
-                (normalized.to_owned(), model.id.clone()),
-                positive_context_window(model.context_window),
-            );
-        }
     }
 
     fn resolved_endpoint(&self) -> Option<ModelListEndpoint> {
@@ -1313,6 +1297,16 @@ mod tests {
         );
         // Subsequent probes reuse the cached value without hitting the server again.
         assert_eq!(reopened.probe_context_window("second-model"), Some(65_536));
+        let shared = reopened.context_windows();
+        assert_eq!(
+            shared.get(&server.base_url, "second-model"),
+            Some(Some(65_536))
+        );
+        assert_eq!(shared.get("/", "second-model"), None);
+        shared.record("/", "ignored", Some(1_024));
+        assert_eq!(shared.get("/", "ignored"), None);
+        shared.record("http://example.test/", "zero-model", Some(0));
+        assert_eq!(shared.get("http://example.test", "zero-model"), Some(None));
     }
 
     #[test]
