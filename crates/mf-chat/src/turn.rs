@@ -774,58 +774,6 @@ pub fn recover(input: RecoveryInputs) -> Result<RecoveryOutputs, ChatError> {
     })
 }
 
-register_operation!(
-    "mf_chat.turn.begin",
-    BeginTurn,
-    BeginTurnInputs,
-    TurnStarted,
-    begin
-);
-register_operation!(
-    "mf_chat.turn.complete",
-    CompleteTurn,
-    CompleteTurnInputs,
-    CompletionOutputs,
-    complete
-);
-register_operation!("mf_chat.turn.fail", FailTurn, FailTurnInputs, Changed, fail);
-register_operation!(
-    "mf_chat.call.fail",
-    FailCall,
-    FailCallInputs,
-    Changed,
-    fail_call
-);
-register_operation!(
-    "mf_chat.turn.load",
-    LoadTurn,
-    RecordInputs,
-    TurnOutputs,
-    get_turn
-);
-register_operation!(
-    "mf_chat.call.load",
-    LoadCall,
-    RecordInputs,
-    CallOutputs,
-    get_call
-);
-register_operation!(
-    "mf_chat.storage.recover",
-    Recover,
-    RecoveryInputs,
-    RecoveryOutputs,
-    recover
-);
-
-register_operation!(
-    "mf_chat.turn.request",
-    LoadTurnRequest,
-    RecordInputs,
-    TurnRequestOutputs,
-    get_request
-);
-
 impl ChatDatabase {
     pub fn begin_turn(
         &self,

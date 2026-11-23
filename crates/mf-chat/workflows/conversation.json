@@ -1,5 +1,6 @@
 {
   "version": "2026-11-13",
+  "execution": {},
   "dependencies": {
     "chat": {
       "package": "mf-chat",
@@ -9,25 +10,37 @@
   "nodes": [
     {
       "id": "begin",
-      "kind": "mf_chat.turn.begin"
+      "kind": "workflow.call",
+      "config": {
+        "flow": "mf-chat.begin",
+        "body": {
+          "nodes": []
+        }
+      }
     },
     {
       "id": "workflow",
-      "kind": "mf_chat.workflow.invoke",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "mf-chat.workflow",
+        "body": {
+          "nodes": []
+        }
+      },
       "inputs": {
-        "database_path": {
+        "params.database_path": {
           "from": {
             "node": "begin",
             "port": "database_path"
           }
         },
-        "invocation": {
+        "params.invocation": {
           "from": {
             "node": "begin",
             "port": "invocation"
           }
         },
-        "request": {
+        "params.request": {
           "from": {
             "node": "begin",
             "port": "request"
@@ -36,25 +49,23 @@
       }
     },
     {
-      "id": "route",
-      "kind": "mf_chat.conversation.route",
+      "id": "prepare_title",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "facts": "object"
+        },
+        "code": {
+          "enabled": "facts.title_configured && facts.status == 'succeeded' && !facts.has_title && !('title' in facts.purposes)",
+          "status": "string(facts.status)"
+        }
+      },
       "inputs": {
-        "event": {
+        "facts": {
           "from": {
             "node": "workflow",
-            "port": "event"
-          }
-        }
-      }
-    },
-    {
-      "id": "prepare_title",
-      "kind": "mf_chat.title.prepare",
-      "inputs": {
-        "completed": {
-          "from": {
-            "node": "route",
-            "port": "completed"
+            "port": "auxiliary"
           }
         }
       }
@@ -87,14 +98,14 @@
       "inputs": {
         "params.prompt": {
           "from": {
-            "node": "prepare_title",
-            "port": "prompt"
+            "node": "workflow",
+            "port": "title_prompt"
           }
         },
         "params.text": {
           "from": {
-            "node": "prepare_title",
-            "port": "text"
+            "node": "workflow",
+            "port": "title_text"
           }
         },
         "params.status": {
@@ -105,26 +116,26 @@
         },
         "params.context": {
           "from": {
-            "node": "prepare_title",
-            "port": "context"
+            "node": "workflow",
+            "port": "title_context"
           }
         },
         "params.model": {
           "from": {
-            "node": "prepare_title",
-            "port": "model"
+            "node": "workflow",
+            "port": "title_model"
           }
         },
         "params.base_url": {
           "from": {
-            "node": "prepare_title",
-            "port": "base_url"
+            "node": "workflow",
+            "port": "title_base_url"
           }
         },
         "params.api_key": {
           "from": {
-            "node": "prepare_title",
-            "port": "api_key"
+            "node": "workflow",
+            "port": "title_api_key"
           }
         }
       }
@@ -200,12 +211,21 @@
     },
     {
       "id": "compact_gate",
-      "kind": "mf_chat.compact.gate",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "facts": "object"
+        },
+        "code": {
+          "enabled": "facts.compaction_configured && facts.status == 'succeeded' && facts.appends_context && !('compaction' in facts.purposes)"
+        }
+      },
       "inputs": {
-        "completed": {
+        "facts": {
           "from": {
-            "node": "route",
-            "port": "completed"
+            "node": "workflow",
+            "port": "auxiliary"
           }
         }
       }
@@ -238,44 +258,44 @@
       "inputs": {
         "params.messages": {
           "from": {
-            "node": "compact_gate",
-            "port": "messages"
+            "node": "workflow",
+            "port": "compact_messages"
           }
         },
         "params.append_messages": {
           "from": {
-            "node": "compact_gate",
-            "port": "append_messages"
+            "node": "workflow",
+            "port": "compact_append_messages"
           }
         },
         "params.usages": {
           "from": {
-            "node": "compact_gate",
-            "port": "usages"
+            "node": "workflow",
+            "port": "compact_usages"
           }
         },
         "params.context": {
           "from": {
-            "node": "compact_gate",
-            "port": "context"
+            "node": "workflow",
+            "port": "compact_context"
           }
         },
         "params.model": {
           "from": {
-            "node": "compact_gate",
-            "port": "model"
+            "node": "workflow",
+            "port": "compact_model"
           }
         },
         "params.base_url": {
           "from": {
-            "node": "compact_gate",
-            "port": "base_url"
+            "node": "workflow",
+            "port": "compact_base_url"
           }
         },
         "params.api_key": {
           "from": {
-            "node": "compact_gate",
-            "port": "api_key"
+            "node": "workflow",
+            "port": "compact_api_key"
           }
         }
       }
@@ -334,9 +354,15 @@
     },
     {
       "id": "finish",
-      "kind": "mf_chat.conversation.finish",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "mf-chat.finish",
+        "body": {
+          "nodes": []
+        }
+      },
       "inputs": {
-        "title": {
+        "params.title": {
           "exclusive": [
             {
               "node": "selected_title",
@@ -352,13 +378,13 @@
             }
           ]
         },
-        "title_usages": {
+        "params.title_usages": {
           "from": {
             "node": "resolved_title_usages",
             "port": "value"
           }
         },
-        "compacted_messages": {
+        "params.compacted_messages": {
           "exclusive": [
             {
               "node": "compacted_messages",
@@ -374,7 +400,7 @@
             }
           ]
         },
-        "compaction_usages": {
+        "params.compaction_usages": {
           "exclusive": [
             {
               "node": "compact",
@@ -386,9 +412,9 @@
             }
           ]
         },
-        "completed": {
+        "params.completed": {
           "from": {
-            "node": "route",
+            "node": "workflow",
             "port": "completed"
           }
         }
@@ -398,15 +424,14 @@
   "outputs": [
     {
       "name": "preview",
-      "node": "route",
+      "node": "workflow",
       "port": "preview",
       "optional": true
     },
     {
       "name": "settlement",
       "node": "finish",
-      "port": "settlement",
-      "optional": true
+      "port": "settlement"
     }
   ],
   "flows": {

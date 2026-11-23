@@ -45,7 +45,7 @@ platform = 'cfg(unix)'
 # Match build-oriented targets as a whole so new or renamed cases retain the cache.
 # Provider discovery also builds probes before some CLI validation failures.
 filter = '''
-(binary_id(=mf-cli::chat_tui) & test(=compiled_context_replacement_keeps_tool_audit_and_save_only_retries_after_reopen)) |
+binary_id(=mf-cli::chat_tui) |
 (binary_id(=mf-compiler::workflow_variables) & test(=generated_variables_match_memory_without_sources)) |
 binary_id(=mf-tui::runner_flow) |
 (binary_id(=mf-compiler) & test(pipeline::tests::)) |
@@ -65,10 +65,6 @@ binary_id(=mfn-test-affected::process) |
 (binary_id(=mf-chat::packaging) & (
     test(=source_free_host_preserves_multi_session_retry_title_and_statistics) |
     test(=conversation_example_hosts_a_supplied_workflow)
-)) |
-(binary_id(=mf-cli::chat_tui) & (
-    test(=executable_chat_preserves_sessions_retry_save_usage_and_source_free_restart) |
-    test(=supplied_title_workflow_runs_inside_the_application_lifecycle)
 )) |
 (binary_id(=mf-cli::compile) & (
     test(=compiles_a_runner_without_telemetry_and_preserves_execution) |
@@ -162,7 +158,7 @@ setup = "package-dependencies"
 platform = 'cfg(unix)'
 # Serialize generated builds that share the prewarmed Cargo target.
 filter = '''
-(binary_id(=mf-cli::chat_tui) & test(=compiled_context_replacement_keeps_tool_audit_and_save_only_retries_after_reopen)) |
+binary_id(=mf-cli::chat_tui) |
 (binary_id(=mf-compiler::workflow_variables) & test(=generated_variables_match_memory_without_sources)) |
 binary_id(=mf-tui::runner_flow) |
 (binary_id(=mf-compiler) & test(pipeline::tests::)) |
@@ -182,10 +178,6 @@ binary_id(=mfn-test-affected::process) |
 (binary_id(=mf-chat::packaging) & (
     test(=source_free_host_preserves_multi_session_retry_title_and_statistics) |
     test(=conversation_example_hosts_a_supplied_workflow)
-)) |
-(binary_id(=mf-cli::chat_tui) & (
-    test(=executable_chat_preserves_sessions_retry_save_usage_and_source_free_restart) |
-    test(=supplied_title_workflow_runs_inside_the_application_lifecycle)
 )) |
 (binary_id(=mf-cli::compile) & (
     test(=compiles_a_runner_without_telemetry_and_preserves_execution) |

@@ -160,6 +160,57 @@ fn title_definition_is_owned_and_registered_by_chat() {
 }
 
 #[test]
+fn conversation_uses_no_chat_node_kinds() {
+    let definition = mf_chat::flows::conversation_definition().unwrap();
+    assert!(
+        definition
+            .nodes
+            .iter()
+            .all(|node| !node.kind.starts_with("mf_chat."))
+    );
+    let registry = NodeRegistry::from_inventory().unwrap();
+    assert!(
+        registry
+            .iter()
+            .all(|registration| !registration.kind.starts_with("mf_chat."))
+    );
+}
+
+#[test]
+fn conversation_definition_is_registered_and_describable() {
+    let registry = mf_runtime::BuiltinFlowRegistry::from_inventory().unwrap();
+    let definition = (registry.get("mf-chat.conversation").unwrap().definition)().unwrap();
+    assert_eq!(
+        definition,
+        mf_chat::flows::conversation_definition().unwrap()
+    );
+    let resolved = mf_compiler::resolve_flows(&definition, None).unwrap();
+    let plan = mf_compiler::plan_resolved_workflow(&resolved).unwrap();
+    let description = mf_compiler::describe_compiled(&plan).unwrap();
+    for id in ["begin", "workflow", "finish"] {
+        assert!(
+            description
+                .nodes
+                .iter()
+                .any(|node| node.id == id && node.kind == mf_runtime::CALL_KIND),
+            "missing host call {id}"
+        );
+    }
+    assert!(
+        description
+            .nodes
+            .iter()
+            .any(|node| node.id == "compact_gate" && node.kind == "builtin.code")
+    );
+    assert!(
+        description
+            .nodes
+            .iter()
+            .any(|node| node.id == "compact" && node.kind == mf_runtime::CALL_KIND)
+    );
+}
+
+#[test]
 fn profiles_load_local_child_flows_with_host_owned_provider_paths() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("flows")).unwrap();

@@ -5,13 +5,14 @@ use mf_chat::{
 use mf_runtime::{ExecutionContext, StreamCancellation, StreamError};
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
 
+const FLOOD_COUNT: usize = 256;
+
 struct Backend {
     calls: Arc<AtomicUsize>,
-    returned: Arc<AtomicBool>,
     cancellation: Arc<Mutex<Option<StreamCancellation>>>,
 }
 
@@ -19,7 +20,7 @@ impl ConversationBackend for Backend {
     fn invoke(
         &self,
         _: &Invocation,
-        _: ConversationInputs,
+        input: ConversationInputs,
         context: &mut ExecutionContext,
         preview: Option<&mut dyn FnMut(mf_chat::PreviewDelta) -> Result<(), ChatError>>,
         _: Option<&mf_telemetry::observation::Observer>,
@@ -27,7 +28,12 @@ impl ConversationBackend for Backend {
         self.calls.fetch_add(1, Ordering::SeqCst);
         *self.cancellation.lock().unwrap() = Some(context.cancellation());
         if let Some(consume) = preview {
-            for text in ["provisional", "-tail"] {
+            let count = if input.prompt()? == "flood" {
+                FLOOD_COUNT
+            } else {
+                2
+            };
+            for text in ["provisional", "-tail"].into_iter().cycle().take(count) {
                 consume(
                     mf_chat::TextDelta {
                         text: text.into(),
@@ -37,7 +43,6 @@ impl ConversationBackend for Backend {
                 )?;
             }
         }
-        self.returned.store(true, Ordering::Release);
         Ok(ConversationResult::assistant("canonical"))
     }
 }
@@ -46,7 +51,6 @@ fn setup() -> (tempfile::TempDir, ChatHost, String, Arc<Backend>) {
     let root = tempfile::tempdir().unwrap();
     let backend = Arc::new(Backend {
         calls: Arc::default(),
-        returned: Arc::default(),
         cancellation: Arc::default(),
     });
     let profile = WorkflowProfile::with_backend("fixture", backend.clone()).unwrap();
@@ -104,40 +108,42 @@ fn explicit_subscription_precedes_launch_and_completion_does_not_cancel_closed_o
 }
 
 #[test]
-fn dropped_subscription_and_host_shutdown_interrupt_pressure() {
-    for close in [false, true] {
-        let (_root, host, session, _) = setup();
-        let (job, receiver) = host.submit_stream(&session, "hello").unwrap();
-        receiver.recv().unwrap();
-        if close {
-            let started = Instant::now();
-            host.close().unwrap();
-            assert!(started.elapsed() < Duration::from_secs(2));
-        } else {
-            drop(receiver);
-        }
-        assert!(job.join().is_err());
-    }
+fn dropped_subscription_does_not_cancel_or_prevent_settlement() {
+    let (_root, host, session, backend) = setup();
+    let (job, receiver) = host.submit_stream(&session, "hello").unwrap();
+    drop(receiver);
+    let completion = job.join().unwrap();
+    assert_eq!(completion.result.final_text(), Some("canonical"));
+    assert_eq!(host.database().model_context(&session).unwrap().revision, 1);
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+    assert!(
+        backend
+            .cancellation
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .failure()
+            .is_none()
+    );
 }
 
 #[test]
-fn failed_final_drain_retains_authoritative_reply_for_save_only_retry() {
-    let (_root, host, session, backend) = setup();
-    let (job, receiver) = host.submit_stream(&session, "hello").unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !backend.returned.load(Ordering::Acquire) {
-        assert!(Instant::now() < deadline);
+fn full_unread_subscription_does_not_block_settlement() {
+    let (_root, host, session, _) = setup();
+    let (mut job, receiver) = host.submit_stream(&session, "flood").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !job.poll() {
+        assert!(
+            Instant::now() < deadline,
+            "unread previews blocked completion"
+        );
         std::thread::sleep(Duration::from_millis(1));
     }
-    // All publications succeeded; only the post-result drain can now fail.
-    drop(receiver);
-    let ChatError::Uncommitted { pending, .. } = job.join().unwrap_err() else {
-        panic!("expected retained authoritative reply")
-    };
-    assert_eq!(pending.completion.result.final_text(), Some("canonical"));
-    let saved = host.retry_completion(*pending).unwrap();
-    assert_eq!(saved.result.final_text(), Some("canonical"));
-    assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(job.join().unwrap().result.final_text(), Some("canonical"));
+    let buffered = std::iter::from_fn(|| receiver.try_recv().ok()).count();
+    assert!((1..FLOOD_COUNT).contains(&buffered));
+    assert!(receiver.recv().is_err());
 }
 
 #[derive(mf_runtime::NodeValue)]
@@ -272,6 +278,70 @@ fn embedded_call_without_a_subscription_joins_with_its_terminal_result() {
         2
     );
     host.close().unwrap();
+}
+
+#[test]
+fn embedded_call_commits_while_a_native_preview_receipt_is_pending() {
+    use mf_chat::{
+        ModelIdentity, PreviewConsumer, contract::CompletionState, nodes::BeginTurnInputs,
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let database = mf_chat::ChatDatabase::open(root.path().join("chat.sqlite")).unwrap();
+    let session = database.create_session("embedded", None, None).unwrap();
+    let invocation = Invocation::new(&session.id);
+    let request = BeginTurnInputs {
+        database_path: database.path().to_str().unwrap().into(),
+        session_id: session.id.clone(),
+        turn_id: invocation.turn_id.clone(),
+        call_id: invocation.call_id.clone(),
+        prompt: "hello".into(),
+        model: ModelIdentity {
+            profile: "embedded".into(),
+            model: None,
+        },
+        retry_of: None,
+        result_alternatives: None,
+    };
+    let resolution = std::thread::scope(|scope| {
+        let (delivered, ready) = std::sync::mpsc::channel();
+        let (resume, wait) = std::sync::mpsc::channel();
+        let wait = Mutex::new(wait);
+        let consumer = PreviewConsumer::new(move |event, _| {
+            delivered.send(event).unwrap();
+            wait.lock().unwrap().recv().unwrap();
+            Ok(())
+        });
+        let database = &database;
+        let run = scope.spawn(move || {
+            mf_chat::workflow::run_conversation_with_preview(
+                database,
+                request,
+                embedded_profile().backend(),
+                Default::default(),
+                false,
+                None,
+                Some(consumer),
+            )
+        });
+        let event = ready.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(event.invocation, invocation);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while database.turn(&invocation.turn_id).unwrap().state != "succeeded" {
+            assert!(
+                Instant::now() < deadline,
+                "settlement waited for the receipt"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        resume.send(()).unwrap();
+        run.join().unwrap().unwrap()
+    });
+    let CompletionState::Committed(completion) = resolution.state else {
+        panic!("expected a committed reply");
+    };
+    assert_eq!(completion.result.final_text(), Some("isolated-final"));
+    assert_eq!(database.model_context(&session.id).unwrap().revision, 1);
 }
 
 #[test]
@@ -499,28 +569,6 @@ fn pre_cancelled_requests_do_not_begin_application_or_embedded_flows() {
         Err(ChatError::Stream { source: StreamError::Execution { message } })
             if message == "cancelled before dispatch"
     ));
-}
-
-#[test]
-fn nonblocking_preview_consumption_releases_native_settlement() {
-    let (_root, host, session, _) = setup();
-    let (mut job, receiver) = host.submit_stream(&session, "hello").unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut events = Vec::new();
-    loop {
-        match receiver.try_recv() {
-            Ok(event) => events.push(event),
-            Err(std::sync::mpsc::TryRecvError::Empty) => {}
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
-        }
-        if job.poll() {
-            break;
-        }
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(1));
-    }
-    assert_eq!(events.len(), 2);
-    assert_eq!(job.join().unwrap().result.final_text(), Some("canonical"));
 }
 
 struct RetryBackend(AtomicUsize);

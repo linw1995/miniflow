@@ -1185,7 +1185,6 @@ impl ChatView {
                             .collect();
                         match resolution.state {
                             CompletionState::Committed(completion) => {
-                                self.preview = LivePreview::default();
                                 if completion.result.status != "failed" {
                                     if matches!(
                                         completion.result.update,
@@ -1202,23 +1201,16 @@ impl ChatView {
                                 if let Some(error) = &completion.result.error {
                                     details.push(error.clone());
                                 }
-                                self.reply = Some(PresentedResult {
-                                    result: completion.result,
-                                    saved: true,
-                                });
+                                self.present_result(completion.result, true);
                             }
                             CompletionState::Uncommitted(pending) => {
-                                self.preview = LivePreview::default();
                                 self.retained = true;
                                 self.notice =
                                     "Result not saved. Ctrl+P to save or discard it".into();
                                 if let Some(error) = &pending.completion.result.error {
                                     details.push(error.clone());
                                 }
-                                self.reply = Some(PresentedResult {
-                                    result: pending.completion.result,
-                                    saved: false,
-                                });
+                                self.present_result(pending.completion.result, false);
                             }
                             CompletionState::Finished(turn) => {
                                 self.notice = format!("Turn {}. Ctrl+P for recovery", turn.state);
@@ -1419,6 +1411,40 @@ impl ChatView {
             self.earlier = false;
         }
     }
+    fn present_result(&mut self, result: mf_chat::ConversationResult, saved: bool) {
+        if result.status != "failed" {
+            self.preview = LivePreview::default();
+        } else if !result.display_messages().is_empty() {
+            // Keep the failed call's unfinished output alongside completed audit messages.
+            self.preview.segments.retain(|segment| {
+                result
+                    .usages
+                    .iter()
+                    .any(|usage| usage.error.is_some() && usage.call_id == segment.model_call_id)
+                    && !result.display_messages().iter().any(|message| {
+                        let mf_chat::ChatMessage::Assistant {
+                            content,
+                            tool_calls,
+                            ..
+                        } = message
+                        else {
+                            return false;
+                        };
+                        match &segment.tool {
+                            Some(tool) => tool.id.as_ref().is_some_and(|id| {
+                                tool_calls.iter().flatten().any(|call| &call.id == id)
+                            }),
+                            None => content == &segment.text,
+                        }
+                    })
+            });
+            if self.preview.segments.is_empty() {
+                self.preview = LivePreview::default();
+            }
+        }
+        self.reply = Some(PresentedResult { result, saved });
+    }
+
     fn replace_preview(&mut self, preview: LivePreview) {
         let Some(invocation) = &preview.invocation else {
             return;
@@ -1511,6 +1537,12 @@ impl ChatView {
                     .is_some_and(|run| run.reader.call_events().has_active_purpose("compaction")))
     }
 
+    fn shows_previews(&self) -> bool {
+        self.reply.is_none()
+            || (self.preview.incomplete
+                && (!self.preview.segments.is_empty() || self.preview.omitted))
+    }
+
     fn tool_keys(&self) -> Vec<String> {
         let mut keys = Vec::new();
         for records in self.page.iter().flat_map(page_turns) {
@@ -1527,7 +1559,8 @@ impl ChatView {
             for group in message_groups(reply.result.display_messages().iter()) {
                 keys.extend(group.tool_ids().map(|id| tool_key(turn, id)));
             }
-        } else {
+        }
+        if self.shows_previews() {
             let executions = if self.running {
                 self.tool_executions()
             } else {
@@ -1979,6 +2012,14 @@ impl ChatView {
             transcript.literal(format!("turn:{turn}:you:body"), prompt, Style::default());
             transcript.plain(format!("turn:{turn}:you:metadata"), vec![Line::default()]);
         }
+        if !self.outcome.is_empty() {
+            // Keep diagnostics scrollable without pushing an unfinished response out of view.
+            transcript.literal(
+                "outcome".into(),
+                &self.outcome,
+                Style::default().fg(Color::Yellow),
+            );
+        }
         let compacting = self.is_compacting();
         if let Some(reply) = &self.reply {
             for group in message_groups(reply.result.display_messages().iter()) {
@@ -2003,7 +2044,8 @@ impl ChatView {
             }
             metadata.push(Line::default());
             transcript.plain(format!("turn:{turn}:metadata"), metadata);
-        } else {
+        }
+        if self.shows_previews() {
             let loading = self.pending.is_some() || self.running;
             let has_preview = !self.preview.segments.is_empty();
             let executions = if self.running {
@@ -2074,19 +2116,14 @@ impl ChatView {
                 ));
             }
             if self.preview.omitted {
-                status.push(Line::styled(
-                    "[Preview limit reached; remaining output is still being received]",
-                    Style::default().fg(Color::Yellow),
-                ));
+                let label = if loading {
+                    "[Preview limit reached; remaining output is still being received]"
+                } else {
+                    "[Preview limit reached; some output was omitted]"
+                };
+                status.push(Line::styled(label, Style::default().fg(Color::Yellow)));
             }
             transcript.plain(format!("turn:{turn}:status"), status);
-        }
-        if !self.outcome.is_empty() {
-            transcript.literal(
-                "outcome".into(),
-                &self.outcome,
-                Style::default().fg(Color::Yellow),
-            );
         }
         if transcript.is_empty() {
             transcript.plain(
@@ -2403,10 +2440,7 @@ mod tests {
         ])).unwrap());
         result.validate().unwrap();
         view.running = false;
-        view.reply = Some(PresentedResult {
-            result,
-            saved: true,
-        });
+        view.present_result(result, true);
         let settled = render(&view, 100, 30);
         assert_layout(&settled);
         assert!(!settled.contains(LOADING_FRAMES));
@@ -4446,7 +4480,7 @@ mod tests {
                     diagnostics: vec![],
                 }),
                 status: None,
-                stderr: String::new(),
+                stderr: (0..40).map(|i| format!("Diagnostic {i}\n")).collect(),
                 capture_error: None,
             },
             &controller,
@@ -4482,6 +4516,75 @@ mod tests {
         assert!(!screen.contains("partial text"));
         assert!(view.retained);
         controller.close().unwrap();
+    }
+
+    #[test]
+    fn failed_calls_keep_unrepresented_previews_beside_audit_messages() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
+        let invocation = Invocation::new("session");
+        view.preview.begin(invocation.clone());
+        for (call_id, text) in [
+            ("first", "first provisional"),
+            ("recorded", "recorded partial"),
+            ("missing", "unrecorded partial"),
+        ] {
+            view.preview
+                .apply(mf_chat::PreviewEvent {
+                    invocation: invocation.clone(),
+                    delta: mf_chat::TextDelta {
+                        model_call_id: call_id.into(),
+                        text: text.into(),
+                    }
+                    .into(),
+                })
+                .unwrap();
+        }
+        for (index, id) in ["recorded-tool", "pending-tool"].into_iter().enumerate() {
+            view.preview
+                .apply(mf_chat::PreviewEvent {
+                    invocation: invocation.clone(),
+                    delta: mf_chat::ToolCallDelta {
+                        model_call_id: "missing".into(),
+                        index: index as u64,
+                        arguments: "{}".into(),
+                        id: Some(id.into()),
+                        name: Some("lookup".into()),
+                    }
+                    .into(),
+                })
+                .unwrap();
+        }
+        let mut reply = mf_chat::ConversationResult::append(
+            serde_json::from_value(serde_json::json!([
+                {"role":"assistant", "content":"recorded partial", "tool_calls":[
+                    {"id":"recorded-tool", "name":"lookup", "arguments":{}}
+                ]}
+            ]))
+            .unwrap(),
+        );
+        reply.status = "failed".into();
+        reply.error = Some("Provider failed".into());
+        reply.usages = serde_json::from_value(serde_json::json!([
+            {"call_id":"first", "model":"fixture"},
+            {"call_id":"recorded", "model":"fixture", "error":"provider failed"},
+            {"call_id":"missing", "model":"fixture", "error":"provider failed"}
+        ]))
+        .unwrap();
+        reply.validate().unwrap();
+        view.preview.incomplete = true;
+        view.present_result(reply, true);
+        let [partial, pending] = view.preview.segments.as_slice() else {
+            panic!("expected only the failed previews absent from the audit transcript");
+        };
+        assert_eq!(partial.model_call_id, "missing");
+        assert_eq!(partial.text, "unrecorded partial");
+        assert_eq!(
+            pending.tool.as_ref().unwrap().id.as_deref(),
+            Some("pending-tool")
+        );
+        assert!(view.shows_previews());
     }
 
     #[test]

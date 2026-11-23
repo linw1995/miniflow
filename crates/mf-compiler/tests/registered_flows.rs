@@ -108,6 +108,42 @@ fn registered_calls_use_host_execution_without_loading_child_providers() {
     ));
 }
 
+#[test]
+fn preparing_a_call_body_requires_a_root_call_with_an_authored_body() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let definition: WorkflowDefinition = serde_json::from_value(json!({
+        "version":"2026-10-28", "dependencies":{},
+        "nodes":[
+            {"id":"invoke", "kind":"workflow.call", "config":{"flow":"inline", "body":{
+                "nodes":[{"id":"literal", "kind":"builtin.constant", "config":{"value":"inside"}}],
+                "outputs":[{"name":"value", "node":"literal", "port":"value"}]
+            }}},
+            {"id":"literal", "kind":"builtin.constant", "config":{"value":"outside"}},
+            {"id":"dynamic", "kind":"workflow.call", "config":{"inputs":[], "outputs":[]}}
+        ],
+        "outputs":[{"name":"value", "node":"invoke", "port":"value"}]
+    }))
+    .unwrap();
+    let plan = mf_compiler::plan_resolved_definition(&definition, &registry).unwrap();
+    let body = mf_compiler::prepare_call_body(&plan, &registry, "invoke").unwrap();
+    let origin = body.origin().unwrap();
+    assert_eq!(origin.workflow_id, plan.graph.workflow_id().unwrap());
+    assert_eq!(origin.path, ["invoke"]);
+    let outputs = body.execute_in_context(&mut Default::default()).unwrap();
+    assert_eq!(outputs["value"].as_str(), Some("inside"));
+
+    for (id, expected) in [
+        ("literal", "expected a root Flow call"),
+        ("dynamic", "expected an authored Flow call body"),
+    ] {
+        assert!(matches!(
+            mf_compiler::prepare_call_body(&plan, &registry, id),
+            Err(mf_compiler::WorkflowCompileError::InvalidGraph { definition_id, message })
+                if definition_id.as_str() == id && message == expected
+        ));
+    }
+}
+
 #[cfg(feature = "codegen")]
 #[test]
 fn registered_host_calls_cannot_be_emitted_into_generated_runners() {

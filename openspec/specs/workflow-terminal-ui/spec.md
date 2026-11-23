@@ -1016,7 +1016,9 @@ The TUI SHALL advance elapsed time while a local run is active. Once completion 
 
 ### Requirement: Display provisional streamed chat replies
 
-The chat terminal SHALL consume application preview outputs from the conversation Flow before final settlement. Records SHALL be processed independently of rendering. Presentation state SHALL be bounded and grouped by actual model-call identity. A preview MUST NOT imply conversation success, and unrelated internal model output MUST NOT become answer text.
+The chat terminal SHALL consume application previews independently of rendering and settlement.
+Presentation state SHALL be bounded and grouped by actual model-call identity. A preview MUST NOT
+imply conversation success, and unrelated internal model output MUST NOT become answer text.
 
 #### Scenario: Wait for title generation
 
@@ -1041,6 +1043,12 @@ The terminal SHALL reconcile live text against the final result. Successful pers
 
 - **WHEN** a user cancels an active turn after visible increments
 - **THEN** the terminal marks that text incomplete and preserves existing cancellation and retry behavior
+
+#### Scenario: Settle a captured failure without replacement messages
+
+- **WHEN** a Flow streams an answer prefix and then reports a failed result with no display messages
+- **THEN** the terminal keeps the prefix visible as unfinished even after loading the saved turn
+- **AND** only the authoritative result is persisted, without adding the preview to history or model context
 
 #### Scenario: Retain a reply after storage failure
 

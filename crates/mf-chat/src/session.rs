@@ -124,14 +124,7 @@ pub fn load(connection: &mut SqliteConnection, id: &str) -> Result<Session, Chat
         .context(SessionMissingSnafu { id })
 }
 
-fn create(input: CreateSessionInputs) -> Result<SessionOutputs, ChatError> {
-    create_with_source(input, false)
-}
-
-fn create_with_source(
-    input: CreateSessionInputs,
-    provisional: bool,
-) -> Result<SessionOutputs, ChatError> {
+fn create(input: CreateSessionInputs, provisional: bool) -> Result<SessionOutputs, ChatError> {
     ensure!(
         !input.session_id.is_empty(),
         InvalidSnafu {
@@ -239,13 +232,6 @@ fn set_archived(input: SessionInputs, archived: bool) -> Result<SessionOutputs, 
     })
 }
 
-fn archive(input: SessionInputs) -> Result<SessionOutputs, ChatError> {
-    set_archived(input, true)
-}
-fn restore(input: SessionInputs) -> Result<SessionOutputs, ChatError> {
-    set_archived(input, false)
-}
-
 fn list(input: ListSessionsInputs) -> Result<SessionPageOutputs, ChatError> {
     validate_page(input.limit)?;
     let mut connection = storage::connect(Path::new(&input.database_path))?;
@@ -337,56 +323,6 @@ fn message_page(input: MessagesInputs) -> Result<MessagePageOutputs, ChatError> 
     })
 }
 
-register_operation!(
-    "mf_chat.session.create",
-    CreateSession,
-    CreateSessionInputs,
-    SessionOutputs,
-    create
-);
-register_operation!(
-    "mf_chat.session.load",
-    LoadSession,
-    SessionInputs,
-    SessionOutputs,
-    get
-);
-register_operation!(
-    "mf_chat.session.rename",
-    RenameSession,
-    RenameSessionInputs,
-    SessionOutputs,
-    rename
-);
-register_operation!(
-    "mf_chat.session.archive",
-    ArchiveSession,
-    SessionInputs,
-    SessionOutputs,
-    archive
-);
-register_operation!(
-    "mf_chat.session.restore",
-    RestoreSession,
-    SessionInputs,
-    SessionOutputs,
-    restore
-);
-register_operation!(
-    "mf_chat.session.list",
-    ListSessions,
-    ListSessionsInputs,
-    SessionPageOutputs,
-    list
-);
-register_operation!(
-    "mf_chat.messages.list",
-    ListMessages,
-    MessagesInputs,
-    MessagePageOutputs,
-    message_page
-);
-
 impl ChatDatabase {
     pub fn create_session(
         &self,
@@ -414,7 +350,7 @@ impl ChatDatabase {
         title: Option<String>,
         provisional: bool,
     ) -> Result<Session, ChatError> {
-        let result: SessionOutputs = create_with_source(
+        let result: SessionOutputs = create(
             CreateSessionInputs {
                 database_path: self
                     .path()
@@ -523,26 +459,8 @@ mod tests {
     use diesel::connection::SimpleConnection;
 
     #[test]
-    fn node_preparation_accepts_empty_config_and_query_errors_keep_sources() {
+    fn session_query_errors_keep_typed_sources() {
         let directory = tempfile::tempdir().unwrap();
-        let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
-        for kind in [
-            "mf_chat.storage.initialize",
-            "mf_chat.session.create",
-            "mf_chat.session.load",
-            "mf_chat.session.list",
-            "mf_chat.session.rename",
-            "mf_chat.session.archive",
-            "mf_chat.session.restore",
-            "mf_chat.messages.list",
-            "mf_chat.context.load",
-        ] {
-            registry
-                .get(kind)
-                .unwrap()
-                .instantiate(serde_json::json!({}))
-                .unwrap();
-        }
         let database = ChatDatabase::open(directory.path().join("chat.sqlite")).unwrap();
         storage::connect(database.path())
             .unwrap()
@@ -560,7 +478,7 @@ mod tests {
     }
 
     #[test]
-    fn session_nodes_preserve_identity_pages_and_archived_data() {
+    fn session_apis_preserve_identity_pages_and_archived_data() {
         let directory = tempfile::tempdir().unwrap();
         let database = ChatDatabase::open(directory.path().join("chat.sqlite")).unwrap();
         let first = database
@@ -663,7 +581,7 @@ mod tests {
         title.title = Some(" ".into());
         for (input, expected) in [(id, "session_id"), (profile, "profile"), (title, "title")] {
             assert!(
-                matches!(create(input), Err(ChatError::Invalid { field, .. }) if field == expected)
+                matches!(create(input, false), Err(ChatError::Invalid { field, .. }) if field == expected)
             );
         }
         assert!(
@@ -673,7 +591,7 @@ mod tests {
                 .sessions
                 .is_empty()
         );
-        let owner = create(base).unwrap().session;
+        let owner = create(base, false).unwrap().session;
         assert!(matches!(
             rename(RenameSessionInputs {
                 database_path: database.path().to_str().unwrap().into(),

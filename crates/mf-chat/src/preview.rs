@@ -1,6 +1,6 @@
 use crate::{ChatError, Invocation, TextDelta, ToolCallDelta, error::*};
 use mf_runtime::{NodeEnum, NodeValue, StreamCancellation, StreamDelivery};
-use snafu::{ResultExt, ensure};
+use snafu::ensure;
 use std::sync::mpsc;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, NodeEnum)]
@@ -71,37 +71,24 @@ impl PreviewEvent {
     }
 }
 
-type Consume = dyn Fn(PreviewEvent, StreamDelivery, &StreamCancellation) -> Result<(), ChatError>
-    + Send
-    + Sync;
+type Consume = dyn Fn(PreviewEvent, &StreamCancellation) -> Result<(), ChatError> + Send + Sync;
 
 pub struct PreviewConsumer(Box<Consume>);
 
-struct Delivery {
-    event: PreviewEvent,
-    receipt: StreamDelivery,
-}
+pub struct PreviewReceiver(mpsc::Receiver<PreviewEvent>);
 
-pub struct PreviewReceiver(mpsc::Receiver<Delivery>);
-
-impl std::fmt::Debug for Delivery {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("Delivery").finish_non_exhaustive()
-    }
-}
+const PREVIEW_QUEUE_CAPACITY: usize = 64;
 
 impl PreviewConsumer {
+    /// Runs a callback while draining the Flow, independently of rendering.
+    /// Keep it nonblocking; an error from the callback fails native delivery.
     pub fn new(
         consume: impl Fn(PreviewEvent, &StreamCancellation) -> Result<(), ChatError>
         + Send
         + Sync
         + 'static,
     ) -> Self {
-        Self(Box::new(move |event, receipt, cancellation| {
-            consume(event, cancellation)?;
-            receipt.acknowledge()?;
-            Ok(())
-        }))
+        Self(Box::new(consume))
     }
 
     pub fn send(
@@ -111,19 +98,19 @@ impl PreviewConsumer {
         cancellation: &StreamCancellation,
     ) -> Result<(), ChatError> {
         check_cancellation(cancellation)?;
-        (self.0)(event, receipt, cancellation)?;
+        (self.0)(event, cancellation)?;
+        receipt.acknowledge()?;
         check_cancellation(cancellation)
     }
 
+    /// Offers previews to a bounded subscription without waiting for its reader.
+    /// New previews are discarded when the queue is full or its receiver is dropped.
     pub fn channel() -> (Self, PreviewReceiver) {
-        // Native receipts permit only one outstanding preview per invocation.
-        let (sender, receiver) = mpsc::channel();
-        let consumer = Self(Box::new(move |event, receipt, _| {
-            sender
-                .send(Delivery { event, receipt })
-                .boxed()
-                .context(PreviewDeliverySnafu)
-        }));
+        let (sender, receiver) = mpsc::sync_channel(PREVIEW_QUEUE_CAPACITY);
+        let consumer = Self::new(move |event, _| {
+            let _ = sender.try_send(event);
+            Ok(())
+        });
         (consumer, PreviewReceiver(receiver))
     }
 }
@@ -137,18 +124,12 @@ fn check_cancellation(cancellation: &StreamCancellation) -> Result<(), ChatError
 
 impl PreviewReceiver {
     pub fn try_recv(&self) -> Result<PreviewEvent, mpsc::TryRecvError> {
-        self.0.try_recv().map(consume)
+        self.0.try_recv()
     }
 
     pub fn recv(&self) -> Result<PreviewEvent, mpsc::RecvError> {
-        self.0.recv().map(consume)
+        self.0.recv()
     }
-}
-
-fn consume(delivery: Delivery) -> PreviewEvent {
-    // Acknowledgement releases the native message domain after the caller takes its preview.
-    let _ = delivery.receipt.acknowledge();
-    delivery.event
 }
 
 #[cfg(test)]

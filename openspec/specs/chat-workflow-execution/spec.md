@@ -44,13 +44,14 @@ identity and MAY report a workflow-selected configuration profile label.
 
 ### Requirement: Execute conversations through the embedded flow
 
-Both embedded and executable backends SHALL execute the application flow: `mf_chat.turn.begin` loads
-history and context, `mf_chat.workflow.invoke` calls the supplied user workflow through the common
-conversation protocol, and `mf_chat.turn.settle` saves the final result. The invocation node SHALL bind a
-per-host backend without global mutable registration. The user workflow SHALL define conversation,
-optional title generation, and usage collection without requiring `mf-chat` nodes or database access.
-System instructions SHALL remain separate from history. Returned completions SHALL identify their
-session, turn, and call.
+Embedded and executable backends SHALL execute the application Flow. Its `begin`, `workflow`, and
+`finish` stages SHALL use `workflow.call` with per-invocation host bindings for admission, backend
+execution, and settlement. The backend call SHALL validate and forward the conversation protocol
+while retaining nested observation for embedded callable Flows. The application Flow SHALL use
+existing `mf` node kinds and the package SHALL NOT register custom chat node kinds. The user workflow
+SHALL define conversation, optional title generation, and usage collection without requiring
+`mf-chat` nodes or database access. System instructions SHALL remain separate from history. Returned
+completions SHALL identify their session, turn, and call.
 
 #### Scenario: Complete two conversation turns
 
@@ -169,28 +170,34 @@ Shutdown SHALL stop accepting requests, cancel or complete active workflows, fin
 - **THEN** their local execution is joined and database ownership is released only after finalization is attempted
 - **AND** unresolved work is recoverable as interrupted on the next open
 
-### Requirement: Route incremental events through the conversation Flow
+### Requirement: Export previews independently of settlement
 
-The application-owned conversation JSON SHALL admit, invoke, route, and settle the turn. Backend deltas SHALL enter the invocation node's ordinary Stream output. An Event node SHALL publish application previews and retain the final response until successful upstream close. Hosts MUST NOT forward model deltas around this graph.
+The application-owned conversation Flow SHALL export provisional previews from the backend call's
+incremental port. Hosts MUST NOT forward model deltas around the graph. Title, compaction, and
+settlement SHALL depend on a validated terminal result from a normally completed backend call,
+not on preview delivery or acknowledgment.
 
-#### Scenario: Receive previews before title completion
+#### Scenario: Receive previews during a pending call
 
-- **WHEN** a backend emits answer text while later work remains active
-- **THEN** the conversation Flow delivers previews and defers settlement until backend success
+- **WHEN** a backend emits answer text before it returns its terminal result
+- **THEN** the conversation Flow can deliver previews without settling the turn
 
 #### Scenario: Fail after a provisional prefix
 
-- **WHEN** the backend fails before producing a successful final event
-- **THEN** the route does not release settlement inputs and no partial assistant message is saved
+- **WHEN** the backend fails before producing a valid final result
+- **THEN** no settlement inputs are published and no partial assistant message is saved
 
-### Requirement: Acknowledge application preview delivery before settlement
+### Requirement: Drain native previews without waiting for subscribers
 
-Preview and settlement outputs SHALL share one ordered application message domain. Hosts SHALL acknowledge each native preview delivery only after its consumer receives it. Terminal-only submissions SHALL allocate no unread preview receiver. Cancellation and receiver closure SHALL interrupt blocked delivery and host teardown SHALL join active instances before releasing storage.
+The host SHALL acknowledge native preview deliveries after handling or discarding them. Channel
+subscriptions SHALL be bounded and MUST NOT block the Flow when full or disconnected. Terminal-only
+submissions SHALL allocate no preview subscription. Explicit cancellation SHALL interrupt active work,
+and host teardown SHALL join active instances before releasing storage.
 
-#### Scenario: Drop an unread preview
+#### Scenario: Leave previews unread or drop the subscription
 
-- **WHEN** a subscribed preview receiver closes before consuming pending text
-- **THEN** settlement cannot overtake that delivery and a retained complete reply remains eligible for save-only recovery
+- **WHEN** a preview subscriber stops reading or closes its receiver without cancelling the turn
+- **THEN** a successfully completed backend result can settle without waiting for that subscriber
 
 ### Requirement: Preserve application and model identities in previews
 

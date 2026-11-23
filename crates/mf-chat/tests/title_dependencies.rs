@@ -85,6 +85,29 @@ fn title_dependencies_reject_missing_or_nonportable_providers() {
 }
 
 #[test]
+fn conversation_dependencies_bind_self_package_version() {
+    let package = manifest();
+    let mut definition: Value =
+        serde_json::from_str(include_str!("../workflows/conversation.json")).unwrap();
+    title::bind_dependencies(&mut definition, &package).unwrap();
+    let definition = mf_runtime::WorkflowDefinition::from_json(&definition.to_string()).unwrap();
+    let chat = &definition.dependencies["chat"];
+    assert_eq!(chat.package, "mf-chat");
+    assert_eq!(chat.version.as_deref(), Some("=9.8.7"));
+    assert!(chat.default_features);
+    assert!(chat.features.is_empty());
+    assert!(chat.path.is_none());
+
+    let mut missing_version = manifest();
+    missing_version["version"] = json!("");
+    let mut invalid: Value =
+        serde_json::from_str(include_str!("../workflows/conversation.json")).unwrap();
+    let error = title::bind_dependencies(&mut invalid, &missing_version).unwrap_err();
+    assert!(error.to_string().contains("mf-chat"));
+    assert!(error.to_string().contains("portable registry version"));
+}
+
+#[test]
 fn registered_title_dependencies_match_the_chat_cargo_manifest() {
     let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
         .args(["read-manifest", "--manifest-path"])
@@ -98,6 +121,13 @@ fn registered_title_dependencies_match_the_chat_cargo_manifest() {
     assert_eq!(
         mf_chat::flows::title_definition().unwrap(),
         mf_runtime::WorkflowDefinition::from_json(&expected.to_string()).unwrap()
+    );
+    let mut expected_conversation: Value =
+        serde_json::from_str(include_str!("../workflows/conversation.json")).unwrap();
+    title::bind_dependencies(&mut expected_conversation, &package).unwrap();
+    assert_eq!(
+        mf_chat::flows::conversation_definition().unwrap(),
+        mf_runtime::WorkflowDefinition::from_json(&expected_conversation.to_string()).unwrap()
     );
     let mut expected_compact: Value =
         serde_json::from_str(include_str!("../workflows/compact.json")).unwrap();

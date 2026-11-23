@@ -572,14 +572,6 @@ pub fn query(input: UsageInputs) -> Result<UsageOutputs, ChatError> {
     })
 }
 
-register_operation!(
-    "mf_chat.usage.query",
-    QueryUsage,
-    UsageInputs,
-    UsageOutputs,
-    query
-);
-
 impl ChatDatabase {
     pub fn usage(&self, query: UsageQuery) -> Result<UsageStatistics, ChatError> {
         Ok(self::query(UsageInputs {

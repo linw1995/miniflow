@@ -64,10 +64,6 @@ sessions from those instructions and successful legacy exchanges exactly once. A
 edit or remove system instructions; later requests do not reinsert `session.system`. Archiving keeps
 all records but prevents new turns until restoration.
 
-Registered kinds include `mf_chat.session.create`, `.list`, `.load`, `.rename`, `.archive`, `.restore`,
-`mf_chat.messages.list`, and `mf_chat.context.load`. The former `history()` API and
-`mf_chat.history.load` are removed. All node inputs name an explicit database path.
-
 ## Shared conversation contract
 
 ### Inputs
@@ -230,16 +226,17 @@ and observations are never substitutes for missing messages or usages.
 
 ## Turn lifecycle
 
-`mf_chat.turn.begin` atomically stores the original user, running turn and application invocation,
+The host-bound `begin` call atomically stores the original user, running turn and application invocation,
 admitted context revision, and advertised alternatives when contract-backed. It reserves one user
 sequence and loads the complete admitted context before releasing its short transaction. Only one
 turn runs per session; other sessions can progress while a provider is pending.
 
-`mf_chat.turn.complete` validates against that immutable admission, appends every display message
-with checked sequence allocation, and saves the complete canonical result, usages, and terminal
-state together. Successful settlement also publishes the derived context revision and applies an
-eligible title in that transaction. Failed results save their valid display prefix and facts but
-publish neither context nor title.
+`ChatDatabase::complete_turn` and the host-bound `finish` call share the same settlement logic. It
+validates against that immutable admission, appends every display message with checked sequence
+allocation, and saves the complete canonical result, usages, and terminal state together. Successful
+settlement also publishes the derived context revision and applies an eligible title in that
+transaction. Failed results save their valid display prefix and facts but publish neither context
+nor title.
 
 Context publication compares-and-swaps the admitted revision. A stale successful update fails
 without partial messages, facts, or title writes; save-only retry cannot silently rebase it. Title
@@ -251,32 +248,40 @@ Replay compares the complete canonical result, including variant, both replaceme
 title, metadata, and usages. Identical replay returns the stored completion before attempting CAS.
 It never republishes an old context after later turns. Different data for the same identity conflicts.
 
-`mf_chat.turn.fail` and `mf_chat.call.fail` finalize work without a terminal result and cannot
-overwrite committed data. Operational error summaries are bounded; canonical result errors remain
-complete. `mf_chat.turn.load` and `mf_chat.call.load` expose individual records for inspection.
-Opening a database under its ownership lock marks abandoned running work interrupted, without
-automatically resending requests or rebuilding context from previews.
+`ChatDatabase::fail_turn` and `ChatDatabase::fail_call` finalize work without a terminal result and
+cannot overwrite committed data. Operational error summaries are bounded; canonical result errors
+remain complete. `ChatDatabase::turn` and `ChatDatabase::call` expose individual records for
+inspection. Opening a database under its ownership lock marks abandoned running work interrupted,
+without automatically resending requests or rebuilding context from previews.
 
 ## Embedded conversation host
 
 `ChatHost` owns database access, profiles, admission limits, execution workers, and abort cleanup.
-Each submission executes the application-owned conversation Flow:
+Each submission executes the application-owned conversation Flow (registered as the built-in
+`mf-chat.conversation` Flow and inspectable with `mf flows mf-chat.conversation`):
 
 ```mermaid
 flowchart LR
     Admit["Admit and load context"] --> Bind["Bind request"]
     Bind --> Invoke["Invoke user chatflow once"]
-    Invoke --> Validate["Validate result and await delivery closure"]
+    Invoke --> Preview["Publish provisional previews"]
+    Invoke --> Validate["Validate terminal result after backend completion"]
     Validate --> Title["Optional application title"]
     Title --> Compact["Optional application compaction"]
     Compact --> Settle["Settle atomically"]
 ```
 
-Finite and compatible TaskStream graphs are composed through `workflow.call`; preparation binds
-native values and completion reads the produced alternative after call success. An inactive optional
-port must not skip settlement. Graphs requiring a native Event/Stream coordinator use the host-bound
-`mf_chat.workflow.invoke` adapter. Both paths share cancellation, result validation, and storage.
-The host drains declared streams even without a preview subscriber.
+The host supplies the executors for the `begin`, `workflow`, and `finish` calls in
+[`conversation.json`](../crates/mf-chat/workflows/conversation.json). Finite and compatible
+TaskStream graphs run as the `workflow` call's child, preserving their nested execution scopes.
+Executable runners, custom backends, and embedded graphs with their own Event/Stream coordinator
+use the same call contract. Its incremental output publishes previews, and its terminal outputs drive
+settlement after the backend completes normally and the result is validated. The host drains declared
+streams with or without a preview subscriber; subscriber delivery does not gate persistence.
+
+CEL gates decide whether to call the title and compaction Flows using eligibility facts. Credentials
+and transcripts travel over separate native ports. Load a chat profile through `ChatHost` or the
+chat CLI to execute the conversation Flow with its host bindings.
 
 The user Flow owns business generation, tools, explicit usage composition, and captured-failure
 policy, and may also own compaction thresholds and summary requests by declaring `replace_context`.
@@ -473,8 +478,8 @@ arguments or metadata. No placeholder or alternative message schema is introduce
 
 ## Usage statistics
 
-Use `ChatDatabase::usage`, `ChatHost::usage`, or `mf_chat.usage.query`. Queries read committed facts
-in one SQLite snapshot and never execute a model or change billing records:
+Use `ChatDatabase::usage` or `ChatHost::usage`. Queries read committed facts in one SQLite snapshot
+and never execute a model or change billing records:
 
 ```rust
 let statistics = host.usage(mf_chat::UsageQuery {
@@ -532,8 +537,8 @@ facts. `UsageSummary::from_calls` shares persisted aggregation rules.
 
 ## Optional live answer subscriptions
 
-`ChatHost::submit` and `retry` allocate no stream receiver. Subscribe before launch with
-`submit_stream` or `retry_stream`, and drain concurrently with completion:
+`ChatHost::submit` and `retry` allocate no preview receiver. Use `submit_stream` or `retry_stream`
+to subscribe before launch and read concurrently for live display:
 
 ```rust
 let (job, events) = host.submit_stream(&session.id, "Hello")?;
@@ -551,10 +556,11 @@ outputs independently of internal node kinds. An application `Invocation.call_id
 call ID; one turn can contain many model calls. A model can emit no fragments. Normal stream drain
 and execution closure establish completion, not a special chat transport envelope.
 
-Subscribed previews retain delivery receipts until consumed. Dropping a receiver with pending output
-fails delivery; shutdown interrupts blocked publishers. A completed job does not cancel closed
-output. A valid terminal result retained before final drain remains available for explicit save-only
-recovery if drain fails. Text prefixes alone never become database messages or usage facts.
+The host acknowledges native deliveries after handling or discarding them. Channel subscriptions
+queue a bounded number of previews in order and drop new previews while full. A slow or disconnected
+subscriber does not block or cancel the turn, and `join` does not require draining the subscription.
+Explicit cancellation and host shutdown still interrupt active work. Text prefixes alone never become
+database messages or usage facts.
 
 Tool-aware chatflows may select the shared Agent's optional `tool_call_delta` stream. Each event
 contains a raw `arguments` fragment, its `model_call_id`, and the provider tool `index`, with optional
@@ -569,16 +575,17 @@ entries and 128 KiB of UTF-8 data, including correlation metadata, with an expli
 while continuing to drain and validate. Each tool call retains at most 8 KiB of recent argument text
 within that shared budget. Older argument deltas are omitted from the provisional view, not from
 tool dispatch or persistence. The notice counts both fully and partially omitted deltas.
-A complete result replaces provisional segments with its display delta. Prefixes without a valid
-result stay visibly unfinished. Older invocation events cannot alter the active turn.
+The final result supplies the authoritative display transcript. If execution fails with no display
+replacement for a partial reply, the terminal keeps the preview visibly unfinished. It is not added
+to the database or model context. Older invocation events cannot alter the active turn.
 
 ## Executable conversation backend
 
 `ChatContract` validates the external startup/result interface, not internal model counts, graph
-layout, loops, or business policy. `mf run runner --chat` registers the frozen executable as
-`mf-chat.runner` and calls it through the same application lifecycle. Opening chat and submitting
-turns do not rebuild the executable or load original Flow sources. Provider configuration travels
-through a private argument file. The supervisor owns child execution, cancellation, and observation.
+layout, loops, or business policy. `mf run runner --chat` uses the frozen executable as the backend
+of the application Flow's `workflow` call. Opening chat and submitting turns do not rebuild the
+executable or load original Flow sources. Provider configuration travels through a private argument
+file. The supervisor owns child execution, cancellation, and observation.
 
 Finite executables keep terminal JSON. Native streaming executables use JSONL with optional `answer`
 records and exactly one complete alternative result. Capture validates the whole invocation and
@@ -588,16 +595,19 @@ Result capture is bounded by `MAX_RECOVERY_BYTES` (16 MiB).
 
 The [single-call](../examples/chat-flow.json), [title](../examples/chat-title-flow.json),
 [loop](../examples/chat-loop-flow.json), [calculator](../examples/chat-calculator-flow.json), and
-[context-replacement](../examples/chat-context-flow.json) examples compile directly. The loop
-forwards `chat.delta` through `config.stream_outputs.answer` while accumulating all generated
-assistants and usages. Private loop context is distinct from its exported additions.
+[context-replacement](../examples/chat-context-flow.json) examples compile directly. The single-call
+example exports only its terminal result; use a Flow that exports `answer`, such as the title
+example, for live text previews. The loop forwards `chat.delta` through
+`config.stream_outputs.answer` while accumulating all generated assistants and usages. Private loop
+context is distinct from its exported additions.
 
 ## Persistence and recovery
 
-`mf_chat.conversation.finish` composes optional title facts and invokes shared settlement. Host abort
-cleanup and save-only retries use those handlers directly, independently of a cancelled execution
-context. Direct callers can begin an `Invocation`, bind its request with `contract.arguments`, then
-pass typed data to `reconcile_result` or bounded JSON to `reconcile_completion`.
+The host-bound `finish` call composes optional title and compaction facts and invokes shared
+settlement. Host abort cleanup and save-only retries use those handlers directly, independently of a
+cancelled execution context. Direct callers can begin an `Invocation`, bind its request with
+`contract.arguments`, then pass typed data to `reconcile_result` or bounded JSON to
+`reconcile_completion`.
 
 Recovery uses the admitted revision, original user, and stored advertised alternatives. It needs no
 current manifest, source files, or workflow execution. `CompletionState::Committed` means a terminal

@@ -190,7 +190,12 @@ A native streaming executable MAY select an ordinary output named `answer`. Its 
 
 ### Requirement: Reconcile only authoritative final results
 
-Deltas SHALL remain provisional and MUST NOT synthesize a reply or usage. A successful complete backend result SHALL enter the conversation Flow's settlement route. A validated reply retained before a later process or delivery failure SHALL be available for explicit save-only recovery. Prefixes without a complete result MUST NOT be saved. Existing committed state SHALL retain precedence.
+Deltas SHALL remain provisional and MUST NOT synthesize a reply or usage. A validated terminal
+result from a normally completed executable SHALL drive conversation settlement. A validated reply
+retained before a later failure of executable output, process completion, or native delivery SHALL be
+available for explicit save-only recovery. Closing a presentation subscription MUST NOT be treated
+as an executable failure. Prefixes without a complete result MUST NOT be saved. Existing committed
+state SHALL retain precedence.
 
 #### Scenario: Fail after a complete result
 
