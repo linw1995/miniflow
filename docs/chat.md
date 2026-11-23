@@ -260,7 +260,8 @@ automatically resending requests or rebuilding context from previews.
 ## Embedded conversation host
 
 `ChatHost` owns database access, profiles, admission limits, execution workers, and abort cleanup.
-Each submission executes the application-owned conversation Flow:
+Each submission executes the application-owned conversation Flow (registered as the built-in
+`mf-chat.conversation` Flow and inspectable with `mf flows mf-chat.conversation`):
 
 ```mermaid
 flowchart LR

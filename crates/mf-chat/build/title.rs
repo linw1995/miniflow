@@ -19,12 +19,25 @@ pub enum TitleBuildError {
 pub fn bind_dependencies(definition: &mut Value, manifest: &Value) -> Result<(), TitleBuildError> {
     for dependency in definition["dependencies"]
         .as_object_mut()
-        .expect("title workflow declares its providers")
+        .expect("workflow declares its providers")
         .values_mut()
     {
         let package = dependency["package"]
             .as_str()
-            .expect("title provider declares its package");
+            .expect("provider declares its package");
+        if manifest["name"].as_str() == Some(package) {
+            let version = manifest["version"]
+                .as_str()
+                .filter(|version| !version.is_empty())
+                .context(VersionUnavailableSnafu { package })?;
+            *dependency = json!({
+                "package": package,
+                "version": format!("={version}"),
+                "features": [],
+                "default-features": true
+            });
+            continue;
+        }
         let provider = manifest["dependencies"]
             .as_array()
             .expect("Cargo package dependencies")

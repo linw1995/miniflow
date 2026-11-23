@@ -43,6 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     for workflow in [
         "title.json",
+        "conversation.json",
         "compact.json",
         "compact-run.json",
         "compact-plan.json",

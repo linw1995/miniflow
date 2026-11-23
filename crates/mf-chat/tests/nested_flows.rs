@@ -160,6 +160,43 @@ fn title_definition_is_owned_and_registered_by_chat() {
 }
 
 #[test]
+fn conversation_definition_is_registered_and_describable() {
+    let registry = mf_runtime::BuiltinFlowRegistry::from_inventory().unwrap();
+    let definition = (registry.get("mf-chat.conversation").unwrap().definition)().unwrap();
+    assert_eq!(
+        definition,
+        mf_chat::flows::conversation_definition().unwrap()
+    );
+    let resolved = mf_compiler::resolve_flows(&definition, None).unwrap();
+    let plan = mf_compiler::plan_resolved_workflow(&resolved).unwrap();
+    let description = mf_compiler::describe_compiled(&plan).unwrap();
+    assert!(
+        description
+            .nodes
+            .iter()
+            .any(|node| node.id == "begin" && node.kind == "mf_chat.turn.begin")
+    );
+    assert!(
+        description
+            .nodes
+            .iter()
+            .any(|node| node.id == "prepare_compact" && node.kind == "mf_chat.compact.prepare")
+    );
+    assert!(
+        description
+            .nodes
+            .iter()
+            .any(|node| node.id == "compact" && node.kind == mf_runtime::CALL_KIND)
+    );
+    assert!(
+        description
+            .nodes
+            .iter()
+            .any(|node| node.id == "finish" && node.kind == "mf_chat.conversation.finish")
+    );
+}
+
+#[test]
 fn profiles_load_local_child_flows_with_host_owned_provider_paths() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("flows")).unwrap();

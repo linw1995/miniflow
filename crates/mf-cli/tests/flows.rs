@@ -14,6 +14,7 @@ fn lists_linked_builtin_flows_in_sorted_order() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let names: Vec<_> = stdout.lines().collect();
     assert!(names.contains(&"mf-chat.chat-title"), "{stdout}");
+    assert!(names.contains(&"mf-chat.conversation"), "{stdout}");
     assert!(names.contains(&"mfn-llm.agent"), "{stdout}");
     assert!(names.contains(&"mfn-llm.agent-turn"), "{stdout}");
     let mut sorted = names.clone();
@@ -37,7 +38,12 @@ fn unknown_builtin_flow_names_the_listing_command() {
 fn describes_a_builtin_flow_before_requiring_a_terminal() {
     // Piped stdio cannot present the graph, so reaching the terminal diagnostic
     // proves the linked definition resolved into a description.
-    for name in ["mfn-llm.agent", "mfn-llm.agent-turn", "mf-chat.chat-title"] {
+    for name in [
+        "mfn-llm.agent",
+        "mfn-llm.agent-turn",
+        "mf-chat.chat-title",
+        "mf-chat.conversation",
+    ] {
         let output = command().args(["flows", name]).output().unwrap();
         assert!(!output.status.success(), "{output:?}");
         let stderr = String::from_utf8(output.stderr).unwrap();
