@@ -1016,7 +1016,9 @@ The TUI SHALL advance elapsed time while a local run is active. Once completion 
 
 ### Requirement: Display provisional streamed chat replies
 
-The chat terminal SHALL consume application preview outputs from the conversation Flow before final settlement. Records SHALL be processed independently of rendering. Presentation state SHALL be bounded and grouped by actual model-call identity. A preview MUST NOT imply conversation success, and unrelated internal model output MUST NOT become answer text.
+The chat terminal SHALL consume application previews independently of rendering and settlement.
+Presentation state SHALL be bounded and grouped by actual model-call identity. A preview MUST NOT
+imply conversation success, and unrelated internal model output MUST NOT become answer text.
 
 #### Scenario: Wait for title generation
 

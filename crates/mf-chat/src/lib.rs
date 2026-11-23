@@ -1,4 +1,4 @@
-//! Persistent chat operations shared by direct APIs and application-owned workflow nodes.
+//! Persistent chat operations shared by direct APIs and the application Flow.
 
 mod call_events;
 mod context;

@@ -174,6 +174,8 @@ impl ChatHost {
         self.start(session_id, prompt, None, None)
     }
 
+    /// Starts a turn with a bounded, best-effort preview subscription.
+    /// Unread or discarded previews do not prevent settlement.
     pub fn submit_stream(
         &self,
         session_id: &str,
@@ -184,6 +186,7 @@ impl ChatHost {
         Ok((job, receiver))
     }
 
+    /// Retries a turn with the same preview policy as [`Self::submit_stream`].
     pub fn retry_stream(
         &self,
         turn_id: &str,

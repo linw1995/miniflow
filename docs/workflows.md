@@ -2109,9 +2109,8 @@ outputs from multiple domains, but each JSONL record contains only the fields se
 Per-domain ordering and native delivery acknowledgment remain enforced. Successful workflow completion
 waits for connected work to drain, and terminal values are never reconstructed from increments.
 
-Use application event nodes when several delivery kinds must share one ordered protocol. The conversation
-Flow routes preview events and publishes a completed-conversation event on upstream close, so the graph
-owns their ordering.
+The chat conversation Flow uses a Call with an incremental preview port alongside terminal ports.
+Title generation, compaction, and settlement depend on the terminal values, not preview delivery.
 
 ## Streaming through the in-memory API
 

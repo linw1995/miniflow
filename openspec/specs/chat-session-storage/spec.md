@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Provide durable, independent chat sessions with ordered messages and recoverable turn state through shared storage handlers and application-owned workflow nodes.
+Provide durable, independent chat sessions with ordered messages and recoverable turn state through shared storage handlers and the application Flow.
 
 ## Requirements
 

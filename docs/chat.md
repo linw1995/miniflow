@@ -264,7 +264,8 @@ Each submission executes the application-owned conversation Flow (registered as 
 flowchart LR
     Admit["Admit and load context"] --> Bind["Bind request"]
     Bind --> Invoke["Invoke user chatflow once"]
-    Invoke --> Validate["Validate result and await delivery closure"]
+    Invoke --> Preview["Publish provisional previews"]
+    Invoke --> Validate["Validate terminal result after backend completion"]
     Validate --> Title["Optional application title"]
     Title --> Compact["Optional application compaction"]
     Compact --> Settle["Settle atomically"]
@@ -274,10 +275,9 @@ The host supplies the executors for the `begin`, `workflow`, and `finish` calls 
 [`conversation.json`](../crates/mf-chat/workflows/conversation.json). Finite and compatible
 TaskStream graphs run as the `workflow` call's child, preserving their nested execution scopes.
 Executable runners, custom backends, and embedded graphs with their own Event/Stream coordinator
-use the same call contract. It binds the request, validates the terminal result, and publishes
-previews and the final response on one stream. `mf_chat.conversation.route` forwards previews and
-releases the completed turn only on successful upstream closure. The host drains declared streams
-with or without a preview subscriber.
+use the same call contract. Its incremental output publishes previews, and its terminal outputs drive
+settlement after the backend completes normally and the result is validated. The host drains declared
+streams with or without a preview subscriber; subscriber delivery does not gate persistence.
 
 CEL gates decide whether to call the title and compaction Flows using eligibility facts. Credentials
 and transcripts travel over separate native ports. Load a chat profile through `ChatHost` or the
@@ -537,8 +537,8 @@ facts. `UsageSummary::from_calls` shares persisted aggregation rules.
 
 ## Optional live answer subscriptions
 
-`ChatHost::submit` and `retry` allocate no stream receiver. Subscribe before launch with
-`submit_stream` or `retry_stream`, and drain concurrently with completion:
+`ChatHost::submit` and `retry` allocate no preview receiver. Use `submit_stream` or `retry_stream`
+to subscribe before launch and read concurrently for live display:
 
 ```rust
 let (job, events) = host.submit_stream(&session.id, "Hello")?;
@@ -556,10 +556,11 @@ outputs independently of internal node kinds. An application `Invocation.call_id
 call ID; one turn can contain many model calls. A model can emit no fragments. Normal stream drain
 and execution closure establish completion, not a special chat transport envelope.
 
-Subscribed previews retain delivery receipts until consumed. Dropping a receiver with pending output
-fails delivery; shutdown interrupts blocked publishers. A completed job does not cancel closed
-output. A valid terminal result retained before final drain remains available for explicit save-only
-recovery if drain fails. Text prefixes alone never become database messages or usage facts.
+The host acknowledges native deliveries after handling or discarding them. Channel subscriptions
+queue a bounded number of previews in order and drop new previews while full. A slow or disconnected
+subscriber does not block or cancel the turn, and `join` does not require draining the subscription.
+Explicit cancellation and host shutdown still interrupt active work. Text prefixes alone never become
+database messages or usage facts.
 
 Tool-aware chatflows may select the shared Agent's optional `tool_call_delta` stream. Each event
 contains a raw `arguments` fragment, its `model_call_id`, and the provider tool `index`, with optional
@@ -580,10 +581,10 @@ result stay visibly unfinished. Older invocation events cannot alter the active 
 ## Executable conversation backend
 
 `ChatContract` validates the external startup/result interface, not internal model counts, graph
-layout, loops, or business policy. `mf run runner --chat` registers the frozen executable as
-`mf-chat.runner` and calls it through the same application lifecycle. Opening chat and submitting
-turns do not rebuild the executable or load original Flow sources. Provider configuration travels
-through a private argument file. The supervisor owns child execution, cancellation, and observation.
+layout, loops, or business policy. `mf run runner --chat` uses the frozen executable as the backend
+of the application Flow's `workflow` call. Opening chat and submitting turns do not rebuild the
+executable or load original Flow sources. Provider configuration travels through a private argument
+file. The supervisor owns child execution, cancellation, and observation.
 
 Finite executables keep terminal JSON. Native streaming executables use JSONL with optional `answer`
 records and exactly one complete alternative result. Capture validates the whole invocation and

@@ -49,18 +49,6 @@
       }
     },
     {
-      "id": "route",
-      "kind": "mf_chat.conversation.route",
-      "inputs": {
-        "event": {
-          "from": {
-            "node": "workflow",
-            "port": "event"
-          }
-        }
-      }
-    },
-    {
       "id": "prepare_title",
       "kind": "builtin.code",
       "config": {
@@ -76,7 +64,7 @@
       "inputs": {
         "facts": {
           "from": {
-            "node": "route",
+            "node": "workflow",
             "port": "auxiliary"
           }
         }
@@ -110,13 +98,13 @@
       "inputs": {
         "params.prompt": {
           "from": {
-            "node": "route",
+            "node": "workflow",
             "port": "title_prompt"
           }
         },
         "params.text": {
           "from": {
-            "node": "route",
+            "node": "workflow",
             "port": "title_text"
           }
         },
@@ -128,25 +116,25 @@
         },
         "params.context": {
           "from": {
-            "node": "route",
+            "node": "workflow",
             "port": "title_context"
           }
         },
         "params.model": {
           "from": {
-            "node": "route",
+            "node": "workflow",
             "port": "title_model"
           }
         },
         "params.base_url": {
           "from": {
-            "node": "route",
+            "node": "workflow",
             "port": "title_base_url"
           }
         },
         "params.api_key": {
           "from": {
-            "node": "route",
+            "node": "workflow",
             "port": "title_api_key"
           }
         }
@@ -236,7 +224,7 @@
       "inputs": {
         "facts": {
           "from": {
-            "node": "route",
+            "node": "workflow",
             "port": "auxiliary"
           }
         }
@@ -270,43 +258,43 @@
       "inputs": {
         "params.messages": {
           "from": {
-            "node": "route",
+            "node": "workflow",
             "port": "compact_messages"
           }
         },
         "params.append_messages": {
           "from": {
-            "node": "route",
+            "node": "workflow",
             "port": "compact_append_messages"
           }
         },
         "params.usages": {
           "from": {
-            "node": "route",
+            "node": "workflow",
             "port": "compact_usages"
           }
         },
         "params.context": {
           "from": {
-            "node": "route",
+            "node": "workflow",
             "port": "compact_context"
           }
         },
         "params.model": {
           "from": {
-            "node": "route",
+            "node": "workflow",
             "port": "compact_model"
           }
         },
         "params.base_url": {
           "from": {
-            "node": "route",
+            "node": "workflow",
             "port": "compact_base_url"
           }
         },
         "params.api_key": {
           "from": {
-            "node": "route",
+            "node": "workflow",
             "port": "compact_api_key"
           }
         }
@@ -426,7 +414,7 @@
         },
         "params.completed": {
           "from": {
-            "node": "route",
+            "node": "workflow",
             "port": "completed"
           }
         }
@@ -436,15 +424,14 @@
   "outputs": [
     {
       "name": "preview",
-      "node": "route",
+      "node": "workflow",
       "port": "preview",
       "optional": true
     },
     {
       "name": "settlement",
       "node": "finish",
-      "port": "settlement",
-      "optional": true
+      "port": "settlement"
     }
   ],
   "flows": {
