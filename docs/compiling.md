@@ -20,6 +20,7 @@ mf compile flow.json --output ./flow
 ./flow
 mf run ./flow --verbose
 mf run ./flow --tui
+mf run ./flow --preview
 mf compile flow.json --output ./flow --locked
 ```
 
@@ -49,6 +50,9 @@ levels identify its original start event. Completion, failure, and observation c
 These reminders also work with `--no-telemetry` and do not add OTLP lifecycle events.
 Place CLI options before named workflow parameters, for example `mf run ./flow -v --read.path data.txt`.
 With `--tui`, verbose runner diagnostics appear in the TUI's captured stderr history.
+`mf run ./flow --preview` inspects the embedded graph description without running the workflow, and
+`mf flows` / `mf flows <package.name>` list and inspect the built-in Flows linked into the CLI; see
+[local TUI execution](observability.md#local-tui-execution).
 `mf compile flow.json --output ./flow --verbose` reports compilation options, elapsed time, and the retained project;
 any positive verbosity enables that compilation summary.
 Recompile existing executables to add the runner's verbose option.

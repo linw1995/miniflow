@@ -28,6 +28,7 @@ impl Cli {
         // Global Count arguments overwrite parent counts when repeated in a subcommand.
         let local = match &self.command {
             Command::Compile(options) => options.verbose,
+            Command::Flows { .. } => 0,
             Command::Run { verbose, .. } => *verbose,
         };
         self.verbose.saturating_add(local).min(3)
@@ -38,6 +39,11 @@ impl Cli {
 enum Command {
     /// Compile a workflow definition into a native executable.
     Compile(CompileOptions),
+    /// List linked built-in Flows, or inspect one without executing it.
+    Flows {
+        /// Qualified built-in Flow name, such as mfn-llm.agent.
+        name: Option<String>,
+    },
     /// Run a workflow executable.
     Run {
         /// Increase execution detail: -v summaries, -vv metadata, -vvv full records.
@@ -48,6 +54,9 @@ enum Command {
         /// Observe workflow execution in the terminal UI.
         #[arg(long)]
         tui: bool,
+        /// Inspect the workflow graph without executing it (implies --tui).
+        #[arg(long, conflicts_with = "chat")]
+        preview: bool,
         /// Keep an interactive conversation using this executable (implies --tui).
         #[arg(long)]
         chat: bool,
@@ -57,13 +66,13 @@ enum Command {
         #[arg(long, value_name = "NAME", requires = "chat")]
         chat_profile: Option<String>,
         /// Workflow startup arguments keyed by qualified node.port names.
-        #[arg(long, value_name = "JSON", conflicts_with = "inputs_file")]
+        #[arg(long, value_name = "JSON", conflicts_with_all = ["inputs_file", "preview"])]
         inputs: Option<String>,
         /// Read workflow startup arguments from a JSON file (up to 1 MiB).
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", conflicts_with = "preview")]
         inputs_file: Option<PathBuf>,
         /// Workflow parameters, such as --read.path /data/events.txt.
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true, conflicts_with_all = ["inputs", "inputs_file"])]
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, conflicts_with_all = ["inputs", "inputs_file", "preview"])]
         arguments: Vec<std::ffi::OsString>,
     },
 }
@@ -81,6 +90,8 @@ enum CliError {
     #[snafu(display("could not write command help: {source}"))]
     HelpOutput { source: io::Error },
     #[snafu(transparent)]
+    Builtin { source: BuiltinFlowError },
+    #[snafu(transparent)]
     Build { source: PipelineError },
     #[cfg(unix)]
     #[snafu(transparent)]
@@ -97,6 +108,35 @@ enum CliError {
     #[cfg(not(unix))]
     #[snafu(display("workflow manifest inspection is supported on Linux and macOS"))]
     UnsupportedInspection,
+}
+
+/// Failures that prevent describing a linked built-in Flow.
+#[derive(Debug, Snafu)]
+enum BuiltinFlowError {
+    #[snafu(transparent)]
+    Registry {
+        source: mf_runtime::BuiltinFlowRegistryError,
+    },
+    #[snafu(display("unknown built-in Flow `{name}`; run `mf flows` to list the linked Flows"))]
+    Unknown { name: String },
+    #[snafu(transparent)]
+    Definition {
+        source: mf_runtime::DefinitionParseError,
+    },
+    #[snafu(transparent)]
+    Resolution {
+        source: mf_compiler::FlowResolutionError,
+    },
+    #[snafu(transparent)]
+    Compile {
+        source: mf_compiler::WorkflowCompileError,
+    },
+    #[snafu(transparent)]
+    Description {
+        source: mf_compiler::DescriptionError,
+    },
+    #[snafu(display("could not write the built-in Flow list: {source}"))]
+    Output { source: io::Error },
 }
 
 struct RunHelp {
@@ -224,9 +264,11 @@ fn run(cli: Cli) -> Result<u8, CliError> {
             compile(options, verbose > 0)?;
             Ok(0)
         }
+        Command::Flows { name } => flows(name),
         Command::Run {
             executable,
             tui,
+            preview,
             chat,
             chat_db,
             chat_profile,
@@ -235,6 +277,12 @@ fn run(cli: Cli) -> Result<u8, CliError> {
             arguments,
             ..
         } => {
+            if preview {
+                #[cfg(unix)]
+                return Ok(mf_tui::run::preview_executable(&executable)?);
+                #[cfg(not(unix))]
+                return UnsupportedTuiSnafu.fail();
+            }
             if !tui && !chat {
                 let mut command = std::process::Command::new(&executable);
                 for _ in 0..verbose {
@@ -299,6 +347,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                     inputs,
                     inputs_file,
                     arguments,
+                    preview,
                     chat,
                     chat_db,
                     chat_profile,
@@ -307,6 +356,41 @@ fn run(cli: Cli) -> Result<u8, CliError> {
             }
         }
     }
+}
+
+fn flows(name: Option<String>) -> Result<u8, CliError> {
+    let registry =
+        mf_runtime::BuiltinFlowRegistry::from_inventory().map_err(BuiltinFlowError::from)?;
+    let Some(name) = name else {
+        let mut stdout = io::stdout().lock();
+        for (name, _) in registry.iter() {
+            writeln!(stdout, "{name}").context(OutputSnafu)?;
+        }
+        stdout.flush().context(OutputSnafu)?;
+        return Ok(0);
+    };
+    let description = describe_builtin(&registry, &name)?;
+    #[cfg(unix)]
+    return Ok(mf_tui::run::preview_description(description)?);
+    #[cfg(not(unix))]
+    {
+        let _ = description;
+        UnsupportedTuiSnafu.fail()
+    }
+}
+
+/// Describe a linked built-in Flow without compiling a runner.
+fn describe_builtin(
+    registry: &mf_runtime::BuiltinFlowRegistry,
+    name: &str,
+) -> Result<mf_telemetry::description::WorkflowDescription, BuiltinFlowError> {
+    let registration = registry.get(name).context(UnknownSnafu {
+        name: name.to_owned(),
+    })?;
+    let definition = (registration.definition)()?;
+    let resolved = mf_compiler::resolve_flows(&definition, None)?;
+    let plan = mf_compiler::plan_resolved_workflow(&resolved)?;
+    Ok(mf_compiler::describe_compiled(&plan)?)
 }
 
 #[cfg(unix)]
@@ -568,6 +652,66 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preview_parses_with_and_without_tui() {
+        for tui in [vec![], vec!["--tui"]] {
+            let cli =
+                Cli::try_parse_from(["mf", "run", "flow", "--preview"].into_iter().chain(tui))
+                    .unwrap();
+            let Command::Run {
+                executable,
+                preview,
+                arguments,
+                ..
+            } = cli.command
+            else {
+                panic!("expected run")
+            };
+            assert!(preview);
+            assert_eq!(executable, PathBuf::from("flow"));
+            assert!(arguments.is_empty());
+        }
+    }
+
+    #[test]
+    fn preview_rejects_execution_only_options() {
+        for conflicting in [
+            vec!["--chat"],
+            vec!["--inputs", "{}"],
+            vec!["--inputs-file", "args.json"],
+            vec!["--task.path", "input"],
+        ] {
+            let args = ["mf", "run", "flow", "--preview"]
+                .into_iter()
+                .chain(conflicting.iter().copied());
+            let error = Cli::try_parse_from(args).unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
+    }
+
+    #[test]
+    fn parses_flows_listing_and_preview() {
+        let Command::Flows { name } = Cli::try_parse_from(["mf", "flows"]).unwrap().command else {
+            panic!("expected flows")
+        };
+        assert!(name.is_none());
+        let Command::Flows { name } = Cli::try_parse_from(["mf", "flows", "mfn-llm.agent"])
+            .unwrap()
+            .command
+        else {
+            panic!("expected flows")
+        };
+        assert_eq!(name.as_deref(), Some("mfn-llm.agent"));
+        assert!(Cli::try_parse_from(["mf", "flows", "one", "two"]).is_err());
+    }
+
+    #[test]
+    fn flows_accepts_the_global_verbose_flag() {
+        let cli = Cli::try_parse_from(["mf", "-v", "flows"]).unwrap();
+        assert_eq!(cli.verbosity(), 1);
     }
 
     #[cfg(unix)]
