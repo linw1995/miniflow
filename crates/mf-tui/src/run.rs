@@ -35,7 +35,7 @@ use nix::{
 use process_wrap::std::{ChildWrapper, CommandWrap, ProcessGroup};
 use ratatui::{
     Frame, Terminal, TerminalOptions, Viewport,
-    backend::CrosstermBackend,
+    backend::{Backend, CrosstermBackend},
     layout::{Constraint, Layout, Position, Rect},
     style::{Color, Style},
     widgets::{Block, Borders, Clear, Paragraph},
@@ -226,6 +226,120 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
 
 pub fn run_executable(path: &Path) -> Result<u8, RunError> {
     run_executable_with_options(path, &RunOptions::default())
+}
+
+/// Whether the terminal presentation describes a launched workflow or a static preview.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Presentation {
+    /// A launched workflow whose observations arrive over the local receiver.
+    Live,
+    /// A compiled workflow inspected from its embedded manifest, without execution.
+    Preview,
+}
+
+/// Inspect a compiled workflow graph without launching it.
+///
+/// The embedded manifest supplies the description, and the session state stays
+/// empty, so the terminal shows node structure, routing, and bindings instead of
+/// observed status. Startup inputs are irrelevant here and never validated.
+pub fn preview_executable(path: &Path) -> Result<u8, RunError> {
+    let description = read_manifest(path).context(ManifestSnafu)?.description()?;
+    preview_description(description)
+}
+
+/// Interactive presentation of a described workflow that never executes.
+struct PreviewSession {
+    view: ObservationView,
+    reader: ObservationReader,
+    capture: CaptureView,
+}
+
+impl PreviewSession {
+    fn new(description: WorkflowDescription) -> Result<Self, RunError> {
+        let view = ObservationView::new(&description)?;
+        let reader =
+            ObservationReader::detached(description, RunId::new()).context(ReceiverSnafu)?;
+        Ok(Self {
+            view,
+            reader,
+            capture: CaptureView::default(),
+        })
+    }
+
+    /// Draw the current frame. Nothing is observed, so elapsed time stays zero.
+    fn draw<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> Result<(), B::Error> {
+        self.view.draw_observation(
+            terminal,
+            &self.reader,
+            &self.capture,
+            Duration::ZERO,
+            None,
+            Presentation::Preview,
+        )
+    }
+
+    /// Apply one terminal event, returning the exit code when the session closes.
+    fn handle<B: Backend>(
+        &mut self,
+        event: Event,
+        terminal: &mut Terminal<B>,
+    ) -> Result<Option<u8>, B::Error> {
+        match event {
+            Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+                if quit_requested(&self.view, &key) {
+                    return Ok(Some(0));
+                }
+                self.view.handle_key(key.code, &self.reader);
+            }
+            Event::Mouse(mouse) => self.view.handle_mouse(mouse),
+            Event::Resize(width, height) => {
+                terminal.resize(Rect::new(0, 0, width, height))?;
+            }
+            _ => {}
+        }
+        Ok(None)
+    }
+}
+
+/// Inspect an already described workflow graph without launching it.
+///
+/// Built-in Flows resolve to a description without a compiled executable, so the
+/// description is the only input this presentation needs.
+pub fn preview_description(description: WorkflowDescription) -> Result<u8, RunError> {
+    if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+        return TerminalRequiredSnafu.fail();
+    }
+    let area = terminal_area().context(TerminalSnafu)?;
+    let mut session = PreviewSession::new(description)?;
+    let signal = SignalGuard::register().context(TerminalSnafu)?;
+    let guard = TerminalGuard::enter().context(TerminalSnafu)?;
+    let mut terminal = Terminal::with_options(
+        CrosstermBackend::new(Box::new(io::stderr()) as Box<dyn Write>),
+        TerminalOptions {
+            viewport: Viewport::Fixed(area),
+        },
+    )
+    .context(TerminalSnafu)?;
+    let result = (|| {
+        loop {
+            session.draw(&mut terminal).context(TerminalSnafu)?;
+            if signal.interrupted.swap(false, Ordering::Relaxed) {
+                return Ok(0);
+            }
+            if event::poll(Duration::from_millis(100)).context(TerminalSnafu)?
+                && let Some(code) = session
+                    .handle(event::read().context(TerminalSnafu)?, &mut terminal)
+                    .context(TerminalSnafu)?
+            {
+                return Ok(code);
+            }
+        }
+    })();
+    *terminal.backend_mut() = CrosstermBackend::new(Box::new(io::sink()));
+    drop(terminal);
+    drop(guard);
+    drop(signal);
+    result
 }
 
 pub fn run_executable_with_options(path: &Path, options: &RunOptions) -> Result<u8, RunError> {
@@ -747,7 +861,7 @@ struct Capture {
     record_bytes: Vec<u8>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct CaptureView {
     pub stdout_open: bool,
     pub stderr_open: bool,
@@ -1351,6 +1465,19 @@ impl ViewState {
     }
 }
 
+/// Whether the key asks to leave the terminal presentation.
+fn quit_requested(view: &ObservationView, key: &crossterm::event::KeyEvent) -> bool {
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return true;
+    }
+    !view.state.help_visible
+        && (matches!(key.code, KeyCode::Char('q') | KeyCode::Enter)
+            || (key.code == KeyCode::Esc
+                && !view.can_collapse_body()
+                && !view.state.traces.visible
+                && !view.state.details_visible))
+}
+
 fn supervise(
     run: &mut LocalRun,
     view: &mut ObservationView,
@@ -1375,15 +1502,9 @@ fn supervise(
                 Event::Key(key)
                     if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                 {
-                    let quit = (!view.state.help_visible
-                        && (matches!(key.code, KeyCode::Char('q') | KeyCode::Enter)
-                            || (key.code == KeyCode::Esc
-                                && !view.can_collapse_body()
-                                && !view.state.traces.visible
-                                && !view.state.details_visible)))
-                        || (key.code == KeyCode::Char('c')
-                            && key.modifiers.contains(KeyModifiers::CONTROL));
-                    if quit && let Some(outcome) = outcome.take() {
+                    if quit_requested(view, &key)
+                        && let Some(outcome) = outcome.take()
+                    {
                         return Ok(outcome);
                     }
                     if key.code == KeyCode::Char('c')
@@ -1391,7 +1512,7 @@ fn supervise(
                     {
                         run.cancel();
                     } else {
-                        view.handle_key(key.code, &observation);
+                        view.handle_key(key.code, &observation.reader);
                     }
                 }
                 Event::Mouse(mouse) => view.handle_mouse(mouse),
@@ -1931,8 +2052,8 @@ fn draw_pips(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw(
-    terminal: &mut Terminal<CrosstermBackend<Box<dyn Write>>>,
+fn draw<B: Backend>(
+    terminal: &mut Terminal<B>,
     root_layout: &GraphLayout,
     pip_layout: &GraphLayout,
     description: &WorkflowDescription,
@@ -1942,25 +2063,24 @@ fn draw(
     view_state: &mut ViewState,
     receiver: &ObservationReader,
     status: Option<ExitStatus>,
-) -> Result<(), RunError> {
+    presentation: Presentation,
+) -> Result<(), B::Error> {
     if view_state.traces.visible {
-        terminal
-            .draw(|frame| {
-                let traces = receiver.trace_snapshot();
-                let logs = receiver.log_snapshot();
-                view_state.traces.draw(
-                    frame,
-                    &TraceViewSnapshot {
-                        traces: &traces,
-                        logs: &logs,
-                        data: &receiver.data_snapshot(),
-                        spans: snapshot.traces,
-                        finished: status.is_some(),
-                    },
-                );
-                draw_help(frame, view_state);
-            })
-            .context(TerminalSnafu)?;
+        terminal.draw(|frame| {
+            let traces = receiver.trace_snapshot();
+            let logs = receiver.log_snapshot();
+            view_state.traces.draw(
+                frame,
+                &TraceViewSnapshot {
+                    traces: &traces,
+                    logs: &logs,
+                    data: &receiver.data_snapshot(),
+                    spans: snapshot.traces,
+                    finished: status.is_some(),
+                },
+            );
+            draw_help(frame, view_state);
+        })?;
         return Ok(());
     }
     let layout = root_layout;
@@ -2002,10 +2122,16 @@ fn draw(
                 None => format!("  |  {scope_label}"),
             }
         }) };
-        frame.render_widget(Paragraph::new(format!(
-            "{}  |  Workflow: {workflow}  |  Process: {phase}  |  Scope: {scope}{pass_label}  |  {:.1}s",
-            connection_summary(layout), elapsed.as_secs_f64()
-        )), header);
+        frame.render_widget(Paragraph::new(match presentation {
+            Presentation::Live => format!(
+                "{}  |  Workflow: {workflow}  |  Process: {phase}  |  Scope: {scope}{pass_label}  |  {:.1}s",
+                connection_summary(layout), elapsed.as_secs_f64()
+            ),
+            Presentation::Preview => format!(
+                "{}  |  Preview  |  Scope: {scope}{pass_label}  |  {} nodes",
+                connection_summary(layout), layout.nodes().len()
+            ),
+        }), header);
         let (graph, details) = if view_state.details_visible {
             let [graph, details] = Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)]).areas(body);
             (graph, Some(details))
@@ -2091,14 +2217,26 @@ fn draw(
                 .block(Block::default().title("Details · d hide").title_bottom("PgUp/PgDn scroll").borders(Borders::ALL)), details);
         }
         let lifecycle = &snapshot.lifecycle;
-        let controls = if status.is_some() { "q/Enter close" } else { "Ctrl-C interrupt" };
+        let controls = match presentation {
+            Presentation::Preview => "q close",
+            Presentation::Live if status.is_some() => "q/Enter close",
+            Presentation::Live => "Ctrl-C interrupt",
+        };
+        let observation_line = match presentation {
+            Presentation::Live => format!(
+                "Delivery: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}",
+                lifecycle.completeness, lifecycle.known_missing_count, lifecycle.local_drops,
+                snapshot.observation.errors + snapshot.observation.protocol_conflicts + lifecycle.protocol_conflicts, snapshot.traces.observed_spans,
+            ),
+            // A preview receives nothing, so reporting delivery or loss counts would
+            // present unobserved state as fact.
+            Presentation::Preview => "Description: static | no execution observed".to_owned(),
+        };
         frame.render_widget(Paragraph::new(format!(
-            "Delivery: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}\nArrows/wheel pan | Tab/click select | m minimap | d details | ? help | {controls}",
-            lifecycle.completeness, lifecycle.known_missing_count, lifecycle.local_drops,
-            snapshot.observation.errors + snapshot.observation.protocol_conflicts + lifecycle.protocol_conflicts, snapshot.traces.observed_spans,
+            "{observation_line}\nArrows/wheel pan | Tab/click select | m minimap | d details | ? help | {controls}",
         )), footer);
         draw_help(frame, view_state);
-    }).context(TerminalSnafu)?;
+    })?;
     Ok(())
 }
 
@@ -3362,11 +3500,10 @@ impl ObservationView {
         self.state
             .handle_key(key, snapshot, &self.root, traces, logs);
     }
-    pub fn handle_key(&mut self, key: KeyCode, observation: &LocalObservation) {
+    pub fn handle_key(&mut self, key: KeyCode, reader: &ObservationReader) {
         if self.state.handle_help(key) {
             return;
         }
-        let reader = &observation.reader;
         let traces = reader.trace_snapshot();
         if !self
             .state
@@ -3524,17 +3661,41 @@ impl ObservationView {
         terminal: &mut Terminal<CrosstermBackend<Box<dyn Write>>>,
         observation: &LocalObservation,
     ) -> Result<(), RunError> {
+        self.draw_observation(
+            terminal,
+            &observation.reader,
+            &observation.capture_view(),
+            observation.elapsed(),
+            observation.status(),
+            Presentation::Live,
+        )
+        .context(TerminalSnafu)
+    }
+    /// Render the presentation from explicit observation inputs.
+    ///
+    /// Live supervision and static previews differ only in where these values come
+    /// from and how the header and footer label the session.
+    pub fn draw_observation<B: Backend>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+        reader: &ObservationReader,
+        capture: &CaptureView,
+        elapsed: Duration,
+        status: Option<ExitStatus>,
+        presentation: Presentation,
+    ) -> Result<(), B::Error> {
         draw(
             terminal,
             &self.root,
             &self.pip_layout,
             &self.description,
-            &observation.reader.snapshot_shared(),
-            &observation.capture_view(),
-            observation.elapsed(),
+            &reader.snapshot_shared(),
+            capture,
+            elapsed,
             &mut self.state,
-            &observation.reader,
-            observation.status(),
+            reader,
+            status,
+            presentation,
         )
     }
 
@@ -4893,6 +5054,7 @@ mod tests {
                 &mut view.state,
                 &reader,
                 None,
+                Presentation::Live,
             )
             .unwrap();
             assert_eq!(view.state.mouse_graph, expected);
@@ -4925,6 +5087,7 @@ mod tests {
             &mut view.state,
             &reader,
             None,
+            Presentation::Live,
         )
         .unwrap();
         let resized = Rect::new(0, 1, 80, 17);
@@ -4970,6 +5133,7 @@ mod tests {
                 &mut view.state,
                 &reader,
                 None,
+                Presentation::Live,
             )
             .unwrap();
         };
@@ -7640,5 +7804,159 @@ mod tests {
         let chat = render_chat_execution(&view, &snapshot);
         assert_eq!(chat.matches(" Running: ").count(), 1, "{chat}");
         assert!(!chat.contains(" Running: execute "), "{chat}");
+    }
+
+    fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
+        let area = buffer.area;
+        (area.top()..area.bottom())
+            .map(|y| {
+                (area.left()..area.right())
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn render_observation_screen(
+        view: &mut ObservationView,
+        reader: &ObservationReader,
+        capture: &CaptureView,
+        elapsed: Duration,
+        status: Option<ExitStatus>,
+        presentation: Presentation,
+    ) -> String {
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+        view.draw_observation(
+            &mut terminal,
+            reader,
+            capture,
+            elapsed,
+            status,
+            presentation,
+        )
+        .unwrap();
+        buffer_text(terminal.backend().buffer())
+    }
+
+    #[test]
+    fn preview_presents_a_described_workflow_without_execution_state() {
+        let description = scope_fixture();
+        let mut view = ObservationView::new(&description).unwrap();
+        let reader = ObservationReader::detached(description, RunId::new()).unwrap();
+        let capture = CaptureView::default();
+        let preview = render_observation_screen(
+            &mut view,
+            &reader,
+            &capture,
+            Duration::ZERO,
+            None,
+            Presentation::Preview,
+        );
+        assert!(preview.contains("Preview  |  Scope: root"), "{preview}");
+        assert!(preview.contains("Description: static"), "{preview}");
+        assert!(preview.contains("q close"), "{preview}");
+        assert!(!preview.contains("Process:"), "{preview}");
+        assert!(!preview.contains("Delivery:"), "{preview}");
+        assert!(!preview.contains("Ctrl-C interrupt"), "{preview}");
+
+        // The same description keeps observed framing when a run is supervised.
+        let running = render_observation_screen(
+            &mut view,
+            &reader,
+            &capture,
+            Duration::from_secs(1),
+            None,
+            Presentation::Live,
+        );
+        assert!(running.contains("Process: Running"), "{running}");
+        assert!(running.contains("Delivery:"), "{running}");
+        assert!(running.contains("Ctrl-C interrupt"), "{running}");
+
+        let exited = render_observation_screen(
+            &mut view,
+            &reader,
+            &capture,
+            Duration::from_secs(1),
+            Some(ExitStatus::from_raw(0)),
+            Presentation::Live,
+        );
+        assert!(exited.contains("Process: Exited: 0"), "{exited}");
+        assert!(exited.contains("q/Enter close"), "{exited}");
+
+        // Keys still navigate the described graph; only execution state is absent.
+        let selected = view.state.selected;
+        view.handle_key(KeyCode::Tab, &reader);
+        assert_ne!(view.state.selected, selected);
+    }
+
+    fn preview_session_terminal() -> Terminal<ratatui::backend::TestBackend> {
+        Terminal::with_options(
+            ratatui::backend::TestBackend::new(100, 24),
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 0, 100, 24)),
+            },
+        )
+        .unwrap()
+    }
+
+    fn key(code: KeyCode) -> Event {
+        Event::Key(crossterm::event::KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    #[test]
+    fn preview_session_closes_on_explicit_requests_only() {
+        let mut terminal = preview_session_terminal();
+        let mut session = PreviewSession::new(scope_fixture()).unwrap();
+        session.draw(&mut terminal).unwrap();
+        let selected = session.view.state.selected;
+        for event in [
+            key(KeyCode::Tab),
+            key(KeyCode::Char('d')),
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 4,
+                row: 6,
+                modifiers: KeyModifiers::NONE,
+            }),
+            Event::Resize(80, 20),
+            Event::FocusGained,
+        ] {
+            assert_eq!(session.handle(event, &mut terminal).unwrap(), None);
+        }
+        assert_ne!(session.view.state.selected, selected);
+        assert!(session.view.state.details_visible);
+        // The resized frame still draws after the viewport change.
+        session.draw(&mut terminal).unwrap();
+        assert_eq!(terminal.current_buffer_mut().area, Rect::new(0, 0, 80, 20));
+        // Trace view can still be opened and dismissed without closing the preview.
+        assert_eq!(
+            session
+                .handle(key(KeyCode::Char('v')), &mut terminal)
+                .unwrap(),
+            None
+        );
+        session.draw(&mut terminal).unwrap();
+        assert_eq!(
+            session.handle(key(KeyCode::Esc), &mut terminal).unwrap(),
+            None
+        );
+        // Esc dismisses the details overlay before closing the preview session.
+        assert_eq!(
+            session.handle(key(KeyCode::Esc), &mut terminal).unwrap(),
+            None
+        );
+        assert!(!session.view.state.details_visible);
+        for closing in [
+            key(KeyCode::Char('q')),
+            key(KeyCode::Enter),
+            Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+            )),
+            key(KeyCode::Esc),
+        ] {
+            assert_eq!(session.handle(closing, &mut terminal).unwrap(), Some(0));
+        }
     }
 }
