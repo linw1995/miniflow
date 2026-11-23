@@ -671,7 +671,7 @@ impl TitleGenerationContext {
 #[derive(Clone, Debug, NodeValue)]
 struct CompactionGenerationContext {
     messages: Vec<mfn_llm::ChatMessage>,
-    config: crate::CompactionContext,
+    context: crate::contract::ConversationContext,
     model: mf_runtime::ValueRef,
     base_url: mf_runtime::ValueRef,
     api_key: mf_runtime::ValueRef,
@@ -696,9 +696,26 @@ impl CompactionGenerationContext {
                     reason: "requires resolved model, base_url, and api_key inputs",
                 })
         };
+        let context = match request.context.as_ref() {
+            Some(context) => {
+                let mut context = context.clone();
+                context.compaction = config.clone();
+                context
+            }
+            None => crate::contract::ConversationContext {
+                title: crate::contract::TitleContext {
+                    source: "provisional".into(),
+                    revision: 0,
+                    attempted: false,
+                    enabled: false,
+                },
+                model_context: crate::contract::ModelContextRevision { revision: 0 },
+                compaction: config.clone(),
+            },
+        };
         Ok(Some(Self {
             messages: request.messages.clone(),
-            config: config.clone(),
+            context,
             model: parameter("model")?,
             base_url: parameter("base_url")?,
             api_key: parameter("api_key")?,
@@ -955,30 +972,27 @@ impl mf_runtime::TypedTaskNode for PrepareTitle {
 register_task!("mf_chat.title.prepare", PrepareTitle);
 
 #[derive(NodeValue)]
-struct PrepareCompactionInputs {
+struct CompactionGateInputs {
     completed: ConversationCompleted,
 }
 
 #[derive(Debug, Default, NodeValue)]
-struct PreparedCompaction {
+struct CompactionGateOutputs {
     enabled: bool,
     messages: Option<Vec<mfn_llm::ChatMessage>>,
     append_messages: Option<Vec<mfn_llm::ChatMessage>>,
     usages: Option<Vec<crate::CallUsage>>,
-    context_window: Option<i64>,
-    reserve_tokens: Option<i64>,
-    keep_recent_tokens: Option<i64>,
-    custom_instructions: Option<String>,
+    context: Option<crate::contract::ConversationContext>,
     model: Option<mf_runtime::ValueRef>,
     base_url: Option<mf_runtime::ValueRef>,
     api_key: Option<mf_runtime::ValueRef>,
 }
 
-struct PrepareCompaction;
+struct CompactGate;
 
-impl mf_runtime::TypedTaskNode for PrepareCompaction {
-    type Input = PrepareCompactionInputs;
-    type Output = PreparedCompaction;
+impl mf_runtime::TypedTaskNode for CompactGate {
+    type Input = CompactionGateInputs;
+    type Output = CompactionGateOutputs;
 
     fn execute(
         &self,
@@ -1002,15 +1016,12 @@ impl mf_runtime::TypedTaskNode for PrepareCompaction {
             });
         if !enabled {
             return Ok(TypedNodeResult {
-                outputs: PreparedCompaction::default(),
+                outputs: CompactionGateOutputs::default(),
                 skipped: [
                     "messages",
                     "append_messages",
                     "usages",
-                    "context_window",
-                    "reserve_tokens",
-                    "keep_recent_tokens",
-                    "custom_instructions",
+                    "context",
                     "model",
                     "base_url",
                     "api_key",
@@ -1026,15 +1037,12 @@ impl mf_runtime::TypedTaskNode for PrepareCompaction {
         let append_messages = append_messages
             .expect("enabled compaction operates on append results")
             .clone();
-        Ok(PreparedCompaction {
+        Ok(CompactionGateOutputs {
             enabled: true,
             messages: Some(compaction.messages),
             append_messages: Some(append_messages),
             usages: Some(completed.result.usages),
-            context_window: Some(compaction.config.context_window),
-            reserve_tokens: Some(compaction.config.reserve_tokens),
-            keep_recent_tokens: Some(compaction.config.keep_recent_tokens),
-            custom_instructions: Some(compaction.config.custom_instructions),
+            context: Some(compaction.context),
             model: Some(compaction.model),
             base_url: Some(compaction.base_url),
             api_key: Some(compaction.api_key),
@@ -1043,7 +1051,7 @@ impl mf_runtime::TypedTaskNode for PrepareCompaction {
     }
 }
 
-register_task!("mf_chat.compact.prepare", PrepareCompaction);
+register_task!("mf_chat.compact.gate", CompactGate);
 
 #[derive(NodeValue)]
 struct FinishConversationInputs {

@@ -9,8 +9,8 @@
     }
   },
   "flows": {
-    "prepare": {
-      "builtin": "mf-chat.chat-compact-prepare"
+    "plan": {
+      "builtin": "mf-chat.chat-compact-plan"
     },
     "summarize": {
       "builtin": "mf-chat.chat-compact-summarize"
@@ -63,10 +63,10 @@
       }
     },
     {
-      "id": "prepare",
+      "id": "plan",
       "kind": "workflow.call",
       "config": {
-        "flow": "prepare"
+        "flow": "plan"
       },
       "inputs": {
         "params.messages": {
@@ -104,7 +104,7 @@
             "id": "compact",
             "condition": {
               "source": {
-                "output": "prepare.should_compact",
+                "output": "plan.should_compact",
                 "path": ""
               },
               "operator": "eq",
@@ -172,13 +172,13 @@
       "inputs": {
         "params.enabled": {
           "from": {
-            "node": "prepare",
+            "node": "plan",
             "port": "has_history"
           }
         },
         "params.messages": {
           "from": {
-            "node": "prepare",
+            "node": "plan",
             "port": "history_request"
           }
         },
@@ -230,7 +230,7 @@
         },
         "has_turn_prefix": {
           "from": {
-            "node": "prepare",
+            "node": "plan",
             "port": "has_turn_prefix"
           }
         }
@@ -251,7 +251,7 @@
         },
         "params.messages": {
           "from": {
-            "node": "prepare",
+            "node": "plan",
             "port": "turn_prefix_request"
           }
         },
@@ -382,25 +382,25 @@
       "inputs": {
         "is_split_turn": {
           "from": {
-            "node": "prepare",
+            "node": "plan",
             "port": "is_split_turn"
           }
         },
         "has_history": {
           "from": {
-            "node": "prepare",
+            "node": "plan",
             "port": "has_history"
           }
         },
         "has_turn_prefix": {
           "from": {
-            "node": "prepare",
+            "node": "plan",
             "port": "has_turn_prefix"
           }
         },
         "previous_summary": {
           "from": {
-            "node": "prepare",
+            "node": "plan",
             "port": "previous_summary"
           }
         },
@@ -445,13 +445,13 @@
         },
         "read_files": {
           "from": {
-            "node": "prepare",
+            "node": "plan",
             "port": "read_files"
           }
         },
         "modified_files": {
           "from": {
-            "node": "prepare",
+            "node": "plan",
             "port": "modified_files"
           }
         }
@@ -488,13 +488,13 @@
       "inputs": {
         "system_messages": {
           "from": {
-            "node": "prepare",
+            "node": "plan",
             "port": "system_messages"
           }
         },
         "kept_messages": {
           "from": {
-            "node": "prepare",
+            "node": "plan",
             "port": "kept_messages"
           }
         },
@@ -512,13 +512,13 @@
         },
         "read_files": {
           "from": {
-            "node": "prepare",
+            "node": "plan",
             "port": "read_files"
           }
         },
         "modified_files": {
           "from": {
-            "node": "prepare",
+            "node": "plan",
             "port": "modified_files"
           }
         },
@@ -756,7 +756,7 @@
   ],
   "edges": [
     {
-      "from_node": "prepare",
+      "from_node": "plan",
       "to_node": "compact_route"
     },
     {
@@ -852,7 +852,7 @@
       "annotation": "Select the cut point, extract cumulative files, and skip cleanly when nothing lies before the cut.",
       "nodes": [
         "params",
-        "prepare",
+        "plan",
         "compact_route",
         "nothing_messages",
         "nothing_result",

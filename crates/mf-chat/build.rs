@@ -45,7 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "title.json",
         "compact.json",
         "compact-run.json",
-        "compact-prepare.json",
+        "compact-plan.json",
         "compact-summarize.json",
     ] {
         let source = Path::new("workflows").join(workflow);
