@@ -268,6 +268,11 @@ fn read_pages_preserve_line_endings_and_do_not_echo_private_text_in_snapshots() 
     assert_eq!(last.skipped, ["next_line".into()].into());
     let empty = call(&read, json!({"path":"input", "start_line":4})).unwrap();
     assert_eq!(empty["content"].as_str(), Some(""));
+    for (field, value) in [("start_line", 0), ("limit", 0), ("limit", 2001)] {
+        let error = business(call(&read, json!({"path":"input", (field):value})));
+        assert!(matches!(error.downcast_ref::<CodingError>(),
+            Some(CodingError::InvalidInput { field: rejected, .. }) if *rejected == field));
+    }
 }
 
 #[test]
@@ -345,6 +350,9 @@ fn missing_ambiguous_overlapping_or_oversized_edits_leave_the_file_unchanged() {
     let write = prepare(WRITE_KIND, config.clone());
     let read = prepare(READ_KIND, config);
     for edits in [
+        json!([]),
+        json!(vec![json!({"old_text":"abc", "new_text":"a"}); 129]),
+        json!([{"old_text":"abc", "new_text":"abc"}]),
         json!([{"old_text":"abc", "new_text":"a"}, {"old_text":"missing", "new_text":"text"}]),
         json!([{"old_text":"aa", "new_text":"b"}]),
         json!([{"old_text":"ab", "new_text":"x"}, {"old_text":"bc", "new_text":"y"}]),
@@ -438,7 +446,7 @@ fn mkdir_creates_only_the_leaf_under_a_locked_verified_parent() {
         business(call(&node, json!({"path":"notes/new"}))).downcast_ref::<CodingError>(),
         Some(CodingError::DirectoryBusy)
     ));
-    drop(lock);
+    flock(&lock, FlockOperation::Unlock).unwrap();
     assert!(!root.join("notes/new").exists());
     call(&node, json!({"path":"notes/new"})).unwrap();
     assert!(root.join("notes/new").is_dir());
@@ -459,7 +467,8 @@ fn cooperating_writers_fail_without_waiting_for_a_busy_directory() {
         Some(CodingError::DirectoryBusy)
     ));
     assert!(!dir.path().join("input").exists());
-    drop(lock);
+    // A parallel shell spawn can inherit this open file description until exec.
+    flock(&lock, FlockOperation::Unlock).unwrap();
     call(&write, json!({"path":"input", "content":"a"})).unwrap();
 }
 
@@ -642,13 +651,15 @@ fn preparation_validates_syntax_without_opening_a_workspace_or_command() {
         json!({"workspace_root": &missing, "shell":{"path":missing.join("bash")}}),
     );
     let registry = NodeRegistry::from_inventory().unwrap();
-    assert!(
-        registry
-            .get(READ_KIND)
-            .unwrap()
-            .instantiate(json!({"workspace_root": "."}))
-            .is_err()
-    );
+    let factory = registry.get(READ_KIND).unwrap();
+    assert!(factory.instantiate(json!({"workspace_root": "."})).is_err());
+    for invalid in [0, 16 * 1024 * 1024 + 1] {
+        assert!(
+            factory
+                .instantiate(json!({"workspace_root": &missing, "max_file_bytes":invalid}))
+                .is_err()
+        );
+    }
     let read = prepare(READ_KIND, json!({"workspace_root":{"$ref":"params.root"}}));
     assert_eq!(
         read.metadata.context_references,
