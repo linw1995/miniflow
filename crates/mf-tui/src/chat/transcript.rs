@@ -463,25 +463,27 @@ mod tests {
 
     #[test]
     fn viewport_loads_only_intersecting_bodies_and_reloads_evicted_rows() {
-        let store = mf_chat::display::Fragments::open().unwrap();
         let mut expected = Vec::new();
-        let bodies: Vec<_> = (0..64)
+        let messages = (0..64)
             .map(|id| {
                 let lines: Vec<_> = (0..8)
                     .map(|line| format!("body-{id}: line-{line}"))
                     .collect();
-                let body = store
-                    .append(&Default::default(), &lines.join("\n"))
-                    .unwrap();
+                let content = lines.join("\n");
                 expected.extend(lines);
-                (format!("body-{id}"), body)
+                mf_chat::ChatMessage::User {
+                    content,
+                    metadata: None,
+                }
             })
             .collect();
+        let (bodies, warning) = mf_chat::display::stage(messages);
+        assert!(warning.is_none());
         let mut t = Transcript::default();
         let frame = |t: &mut Transcript, scroll| {
             t.begin(32);
-            for (key, body) in &bodies {
-                t.deferred(key.clone(), body, Format::Literal);
+            for (id, body) in bodies.iter().enumerate() {
+                t.deferred(format!("body-{id}"), body.content(), Format::Literal);
             }
             let top = t.top(3, scroll);
             screen(t, top, 3)

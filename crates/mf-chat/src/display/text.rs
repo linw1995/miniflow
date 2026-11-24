@@ -51,27 +51,29 @@ struct StringRow {
     value: String,
 }
 
-impl Text {
-    pub(super) fn saved(reader: &Reader, id: &Arc<str>, argument: Option<usize>) -> Self {
-        Self(Some(Arc::new(Source::Message {
-            reader: reader.clone(),
+impl Reader {
+    pub fn message_text(&self, id: &Arc<str>, argument: Option<usize>) -> Text {
+        Text(Some(Arc::new(Source::Message {
+            reader: self.clone(),
             id: id.clone(),
             argument,
         })))
     }
 
-    pub(super) fn draft(reader: &Reader, id: i64, bytes: i64) -> Self {
+    pub fn draft_text(&self, id: i64, bytes: i64) -> Text {
         if bytes == 0 {
-            Self::default()
+            Text::default()
         } else {
-            Self(Some(Arc::new(Source::Draft {
-                reader: reader.clone(),
+            Text(Some(Arc::new(Source::Draft {
+                reader: self.clone(),
                 id,
                 bytes,
             })))
         }
     }
+}
 
+impl Text {
     pub(super) fn inline(text: String) -> Self {
         if text.is_empty() {
             Self::default()
@@ -128,11 +130,7 @@ impl Text {
     }
 }
 
-pub(super) fn read_draft(
-    conn: &mut SqliteConnection,
-    id: i64,
-    bytes: i64,
-) -> Result<String, ChatError> {
+pub fn read_draft(conn: &mut SqliteConnection, id: i64, bytes: i64) -> Result<String, ChatError> {
     let rows = diesel::sql_query(
         "SELECT value FROM preview_chunks WHERE segment_id = ? AND end_byte <= ? ORDER BY end_byte",
     )

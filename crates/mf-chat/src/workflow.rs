@@ -1232,7 +1232,7 @@ pub(super) fn run_observed_conversation(
 ) -> Result<ReconciledCompletion, ChatError> {
     automatic_compaction.validate()?;
     let ConversationPresentation {
-        preview,
+        mut preview,
         tools,
         context_windows,
     } = presentation;
@@ -1348,9 +1348,7 @@ pub(super) fn run_observed_conversation(
         .prepare(),
     )?;
     let finish = capture.clone();
-    let seal_drafts = preview
-        .as_ref()
-        .and_then(|consumer| consumer.seal_drafts.clone());
+    let seal_drafts = preview.as_mut().and_then(PreviewConsumer::take_draft_seal);
     bind_call(
         &mut registry,
         &plan,

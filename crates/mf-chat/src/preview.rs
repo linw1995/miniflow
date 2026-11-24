@@ -1,7 +1,7 @@
 use crate::{ChatError, Invocation, TextDelta, ToolCallDelta, error::*};
 use mf_runtime::{NodeEnum, NodeValue, StreamCancellation, StreamDelivery};
 use snafu::ensure;
-use std::sync::{Arc, mpsc};
+use std::sync::mpsc;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, NodeEnum)]
 #[serde(tag = "kind")]
@@ -75,7 +75,7 @@ type Consume = dyn Fn(PreviewEvent, &StreamCancellation) -> Result<(), ChatError
 
 pub struct PreviewConsumer {
     consume: Box<Consume>,
-    pub(crate) seal_drafts: Option<Arc<dyn Fn() + Send + Sync>>,
+    seal_drafts: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 pub struct PreviewReceiver(mpsc::Receiver<PreviewEvent>);
@@ -100,8 +100,12 @@ impl PreviewConsumer {
     /// Pin any display read view immediately before storage retires its drafts. This
     /// callback must not wait for subscription receipts, rendering, or provider I/O.
     pub fn with_draft_seal(mut self, seal: impl Fn() + Send + Sync + 'static) -> Self {
-        self.seal_drafts = Some(Arc::new(seal));
+        self.seal_drafts = Some(Box::new(seal));
         self
+    }
+
+    pub(crate) fn take_draft_seal(&mut self) -> Option<Box<dyn Fn() + Send + Sync>> {
+        self.seal_drafts.take()
     }
 
     pub fn send(

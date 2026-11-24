@@ -7,7 +7,8 @@ pub use drafts::{DraftWriter, PreviewCoverage, PreviewSegment, ToolCallPreview};
 #[cfg(test)]
 mod tests;
 mod text;
-pub use text::{Fragments, Text};
+use text::Fragments;
+pub use text::Text;
 
 use crate::{
     CallUsage, ChatDatabase, ChatError, ChatMessage, Invocation,
@@ -146,7 +147,7 @@ impl Header {
         let content = if bytes == 0 {
             Text::default()
         } else {
-            Text::saved(reader, &id, None)
+            reader.message_text(&id, None)
         };
         let message = match self.role.as_str() {
             "user" => Message::User(content),
@@ -164,7 +165,7 @@ impl Header {
                     .map(|(index, hint)| Tool {
                         id: hint.id,
                         name: hint.name,
-                        arguments: Text::saved(reader, &id, Some(index)),
+                        arguments: reader.message_text(&id, Some(index)),
                     })
                     .collect();
                 Message::Assistant { content, tools }

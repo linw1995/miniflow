@@ -2,20 +2,29 @@ use mf_chat::{
     ChatDatabase, Invocation,
     display::{DraftWriter, PreviewSegment},
 };
+use snafu::Snafu;
 use std::{collections::VecDeque, sync::Arc};
+
+#[derive(Debug, Snafu)]
+pub enum PreviewError {
+    #[snafu(transparent)]
+    Storage { source: mf_chat::ChatError },
+    #[snafu(display("application preview does not match the staged draft"))]
+    ReceiptMismatch,
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct LivePreview {
     pub invocation: Option<Invocation>,
     pub segments: Vec<Arc<PreviewSegment>>,
-    pub storage_error: Option<String>,
+    pub warning: Option<Arc<PreviewError>>,
     pub incomplete: bool,
     pub revision: u64,
 }
 
 // Only the runner owns a writer. Published frames and body handles are read-only.
 #[derive(Default)]
-pub(super) struct Capture {
+pub struct Capture {
     pub frame: LivePreview,
     writer: Option<DraftWriter>,
     // The application Flow delivers receipts in emission order. Keep only a handle
@@ -32,16 +41,16 @@ impl std::ops::Deref for Capture {
 
 impl Capture {
     pub fn begin(&mut self, db: &ChatDatabase, invocation: Invocation) {
-        let (writer, storage_error) = match DraftWriter::open(db, invocation.clone()) {
+        let (writer, warning) = match DraftWriter::open(db, invocation.clone()) {
             Ok(writer) => (Some(writer), None),
-            Err(error) => (None, Some(error.to_string())),
+            Err(error) => (None, Some(Arc::new(error.into()))),
         };
         let revision = self.revision.saturating_add(1);
         self.writer = writer;
         self.pending.clear();
         self.frame = LivePreview {
             invocation: Some(invocation),
-            storage_error,
+            warning,
             revision,
             ..Default::default()
         };
@@ -71,8 +80,7 @@ impl Capture {
         if &segment.model_call_id != model || segment.tool.as_ref().map(|tool| tool.index) != index
         {
             self.pending.clear();
-            self.frame.storage_error =
-                Some("application preview does not match the staged draft".into());
+            self.frame.warning = Some(Arc::new(ReceiptMismatchSnafu.build()));
             return Ok(());
         }
         let previous = self.frame.segments.iter_mut().rev().find(|old| {
@@ -87,7 +95,7 @@ impl Capture {
     }
 
     pub fn stage(&mut self, deltas: &[mf_chat::PreviewDelta]) {
-        if deltas.is_empty() || self.storage_error.is_some() {
+        if deltas.is_empty() || self.warning.is_some() {
             return;
         }
         let Some(writer) = self.writer.as_mut() else {
@@ -96,21 +104,22 @@ impl Capture {
         match writer.append(deltas) {
             Ok(segments) => self.pending.extend(segments),
             // Do not publish undurable content or fail the runner on a display error.
-            Err(error) => {
-                self.frame.storage_error = Some(error.to_string());
-                self.frame.revision = self.frame.revision.saturating_add(1);
-            }
+            Err(error) => self.warn(error),
         }
     }
 
-    pub(super) fn seal(&mut self) {
+    pub fn seal(&mut self) {
         if let Some(writer) = self.writer.take()
             && !(self.segments.is_empty() && self.pending.is_empty())
             && let Err(error) = writer.seal()
         {
-            self.frame.storage_error = Some(error.to_string());
-            self.frame.revision = self.revision.saturating_add(1);
+            self.warn(error);
         }
+    }
+
+    fn warn(&mut self, error: mf_chat::ChatError) {
+        self.frame.warning = Some(Arc::new(error.into()));
+        self.frame.revision = self.revision.saturating_add(1);
     }
 }
 
@@ -243,7 +252,10 @@ mod tests {
         db.fail_turn(invocation.clone(), "cancelled", "stopped")
             .unwrap();
         preview.apply(text(&invocation, "model", "more")).unwrap();
-        assert!(preview.storage_error.is_some());
+        let Some(PreviewError::Storage { source }) = preview.warning.as_deref() else {
+            panic!("expected a storage warning");
+        };
+        assert!(matches!(source, mf_chat::ChatError::Conflict { id } if id == &invocation.call_id));
         let revision = preview.revision;
         preview
             .apply(text(&invocation, "model", "after failure"))
@@ -251,8 +263,27 @@ mod tests {
         assert_eq!(preview.revision, revision);
         assert_eq!(preview.segments[0].text.load().unwrap(), "prefix");
         preview.begin(&db, Invocation::new("another session"));
-        assert!(preview.storage_error.is_none());
+        assert!(preview.warning.is_none());
         assert!(preview.segments.is_empty());
+    }
+
+    #[test]
+    fn a_failed_draft_open_keeps_the_database_error_in_the_published_frame() {
+        let (_root, db, invocation) = preview_turn();
+        std::fs::remove_file(db.path()).unwrap();
+        std::fs::create_dir(db.path()).unwrap();
+        let mut capture = capture(&db, &invocation);
+        capture
+            .apply(text(&invocation, "model", "not stored"))
+            .unwrap();
+        let frame = capture.frame.clone();
+        drop(capture);
+        let warning = frame.warning.as_deref().unwrap();
+        assert!(matches!(warning, PreviewError::Storage {
+            source: mf_chat::ChatError::Connect { path, .. }
+        } if path == db.path()));
+        assert!(std::error::Error::source(warning).is_some());
+        assert!(frame.segments.is_empty());
     }
 
     #[test]
@@ -284,7 +315,13 @@ mod tests {
         capture
             .deliver(call(&invocation, "first", 2, "not staged"))
             .unwrap();
-        assert!(capture.storage_error.is_some() && capture.segments.is_empty());
+        let warning = capture.warning.as_deref().unwrap();
+        assert!(matches!(warning, PreviewError::ReceiptMismatch));
+        assert_eq!(
+            warning.to_string(),
+            "application preview does not match the staged draft"
+        );
+        assert!(capture.segments.is_empty());
     }
 
     #[test]

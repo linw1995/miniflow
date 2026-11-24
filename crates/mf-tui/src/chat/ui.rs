@@ -2067,9 +2067,9 @@ impl ChatView {
                     Style::default().fg(Color::Yellow),
                 ));
             }
-            if let Some(error) = &self.preview.storage_error {
+            if let Some(error) = &self.preview.warning {
                 status.push(Line::styled(
-                    format!("[Live preview unavailable: {}]", safe(error)),
+                    format!("[Live preview unavailable: {}]", safe(&error.to_string())),
                     Style::default().fg(Color::Yellow),
                 ));
             }
@@ -3076,13 +3076,16 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(16, 1)).unwrap();
         let mut transcript = super::super::transcript::Transcript::default();
         let mut expanded = BTreeSet::new();
-        let text = display::Fragments::open()
-            .unwrap()
-            .append(&Text::default(), TOOL_RESULT_BODY)
-            .unwrap();
+        let (messages, warning) = display::stage(vec![mf_chat::ChatMessage::ToolResult {
+            tool_call_id: id.into(),
+            content: TOOL_RESULT_BODY.into(),
+            metadata: None,
+        }]);
+        assert!(warning.is_none());
+        let text = messages[0].content();
         for prefix in ["[+] Tool result", "[-] Tool result"] {
             transcript.begin(16);
-            ToolGroup::standalone_result("turn", id, (&text, TOOL_RESULT_BODY.len()), None).render(
+            ToolGroup::standalone_result("turn", id, (text, TOOL_RESULT_BODY.len()), None).render(
                 &mut transcript,
                 &expanded,
                 Some(&key),
@@ -4429,8 +4432,16 @@ mod tests {
                 .into(),
             })
             .unwrap();
+        controller
+            ._database
+            .fail_turn(invocation.clone(), "cancelled", "stopped")
+            .unwrap();
+        preview.stage(&[mf_chat::TextDelta {
+            model_call_id: "model-call".into(),
+            text: "undurable".into(),
+        }
+        .into()]);
         view.preview = preview.frame;
-        view.preview.storage_error = Some("scratch full".into());
         view.event(
             ChatEvent::Finished {
                 invocation: invocation.clone(),
@@ -4447,7 +4458,8 @@ mod tests {
         let screen = render(&view, 100, 30);
         assert!(screen.contains("partial text"));
         assert!(screen.contains("Response unfinished"));
-        assert!(screen.contains("[Live preview unavailable: scratch full]"));
+        assert!(screen.contains("[Live preview unavailable: model call"));
+        assert!(!screen.contains("undurable"));
         assert!(!screen.contains(LOADING_FRAMES));
         view.event(
             ChatEvent::Finished {
@@ -4473,7 +4485,7 @@ mod tests {
         let screen = render(&view, 100, 30);
         assert!(screen.contains("complete unsaved reply"));
         assert!(screen.contains("not saved"));
-        assert!(!screen.contains("scratch full"));
+        assert!(!screen.contains("[Live preview unavailable:"));
         assert!(!screen.contains("partial text"));
         assert!(view.retained);
         controller.close().unwrap();

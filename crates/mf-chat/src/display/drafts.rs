@@ -58,7 +58,7 @@ impl Header {
         };
         Ok(PreviewSegment {
             model_call_id: self.model_call_id,
-            text: Text::draft(reader, self.id, self.bytes),
+            text: reader.draft_text(self.id, self.bytes),
             tool,
         })
     }
@@ -176,7 +176,7 @@ fn append_chunk(
     Ok(header)
 }
 
-pub(super) fn at_page_tail(
+pub fn at_page_tail(
     conn: &mut SqliteConnection,
     reader: &Reader,
     turn: &str,

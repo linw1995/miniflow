@@ -27,7 +27,7 @@ use std::{
 
 mod preview;
 use preview::Capture;
-pub use preview::LivePreview;
+pub use preview::{LivePreview, PreviewError};
 mod transcript;
 mod ui;
 pub use ui::run_chat;
@@ -365,7 +365,7 @@ impl ChatController {
         }
         self.preview_revision
             .store(preview.revision, Ordering::Release);
-        if preview.segments.is_empty() && preview.storage_error.is_none() {
+        if preview.segments.is_empty() && preview.warning.is_none() {
             return None;
         }
         preview
