@@ -180,8 +180,18 @@ project, supply its absolute root and keep a separate chat database outside it. 
 needs to be added to the Flow.
 Use `--params.base_url` for another OpenAI-compatible endpoint supporting streamed tool calls.
 
-The coding instructions are prepended only to the model request. The Flow streams `answer` and
-`tool_call_delta` and returns only newly generated messages and usages in `append`, so the normal
+The Flow inserts a system message naming the bound workspace before its first user turn. Reopen
+that session with another `workspace_root` and the next request explicitly marks the change from
+the old root to the new one. Staying in the same workspace does not add a notice. Use the same
+canonical absolute path (e.g. `pwd -P`) to avoid treating aliases as changes. This informs the
+model; it does not pin the session, change the binding, or make earlier paths safe to reuse.
+
+The Flow stamps the first generated assistant message of each turn with `metadata.coding_workspace`.
+It uses those stamps in the retained context to reconstruct boundaries, never guesses a root for
+unmarked earlier history, and never takes the binding from model text. Paths are sent to the
+provider in these notices and are stored in SQLite metadata. The system messages themselves are
+request-only. The Flow streams `answer` and `tool_call_delta` and returns only newly generated
+messages and usages in `append`, so the normal
 chat host stores tool exchanges and can reopen them. A failing test is a tool result, not an
 automatic retry. Cancelling or retrying a turn does not roll back files. Tests execute workspace
 code, including changes the Agent just made, with your OS permissions. Use an OS sandbox for untrusted code.

@@ -1,0 +1,123 @@
+{
+  "version": "2026-11-13",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../../crates/builtin-nodes/core"
+    },
+    "code": {
+      "package": "mfn-code",
+      "path": "../../crates/builtin-nodes/code"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "messages": {
+            "type": {
+              "list": "object"
+            }
+          },
+          "workspace_root": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "id": "turns",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "messages": {
+            "list": "object"
+          },
+          "root": "string"
+        },
+        "code": {
+          "starts": "messages.transformList(i, m,\n  i > 0 && messages[i-1].role == 'user' && m.role == 'assistant' &&\n  has(m.metadata) && has(m.metadata.coding_workspace) && type(m.metadata.coding_workspace) == string,\n  {'at': i-1, 'root': string(m.metadata.coding_workspace)}\n) + [{'at': size(messages) > 0 ? size(messages)-1 : 0, 'root': root}]"
+        }
+      },
+      "inputs": {
+        "messages": {
+          "from": {
+            "node": "params",
+            "port": "messages"
+          }
+        },
+        "root": {
+          "from": {
+            "node": "params",
+            "port": "workspace_root"
+          }
+        }
+      }
+    },
+    {
+      "id": "workspaces",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "turns": {
+            "list": "object"
+          }
+        },
+        "code": {
+          "changes": "turns.transformList(i, t, i == 0 || t.root != turns[i-1].root, {\n  'at': int(t.at),\n  'notice': i == 0 ? 'Workspace root: ' + json.encode(t.root) :\n    'Workspace changed from ' + json.encode(turns[i-1].root) + ' to ' + json.encode(t.root) + '. Reinspect files here before relying on earlier tool results.'\n})"
+        }
+      },
+      "inputs": {
+        "turns": {
+          "from": {
+            "node": "turns",
+            "port": "starts"
+          }
+        }
+      }
+    },
+    {
+      "id": "request",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "messages": {
+            "list": "object"
+          },
+          "changes": {
+            "list": "object"
+          }
+        },
+        "code": {
+          "messages": "[dyn({'role':'system','content':'You are a coding assistant. Workspace notices identify the root for subsequent relative paths. Earlier unmarked history has no known workspace. Inspect the relevant files and any applicable AGENTS.md before editing. Make the smallest change that solves the request. Use bash to run the relevant project checks; read their exit codes and output, fix failures, and report what you actually verified. Wait for tool results before making decisions that depend on them.'})] +\nmessages.slice(0, int(changes[0].at)) + changes.transformList(i, c,\n  [dyn({'role':'system','content':c.notice})] +\n  messages.slice(int(c.at), i+1 < size(changes) ? int(changes[i+1].at) : size(messages))\n).flatten()"
+        }
+      },
+      "inputs": {
+        "messages": {
+          "from": {
+            "node": "params",
+            "port": "messages"
+          }
+        },
+        "changes": {
+          "from": {
+            "node": "workspaces",
+            "port": "changes"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "messages",
+      "node": "request",
+      "port": "messages"
+    }
+  ]
+}

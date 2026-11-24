@@ -163,7 +163,10 @@ fn examples() -> [(&'static str, Option<&'static str>, Value); 27] {
         (
             CODING_AGENT,
             None,
-            append_result(json!([assistant("reply")]), json!([agent_usage(0)])),
+            append_result(
+                json!([{"role":"assistant", "content":"reply", "metadata":{"coding_workspace":"$WORKSPACE"}}]),
+                json!([agent_usage(0)]),
+            ),
         ),
         (
             "chat-context-flow.json",
@@ -755,6 +758,11 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                 usage["started_at"] = 0.into();
                 assert!(usage.get("timing").is_none_or(Value::is_null));
             }
+        }
+        if name == CODING_AGENT {
+            let root = &mut actual["append"]["messages"][0]["metadata"]["coding_workspace"];
+            assert_eq!(*root, json!(temporary.path().join("chat-workspace")));
+            *root = "$WORKSPACE".into();
         }
         assert_eq!(actual, expected, "{name}: unexpected workflow output");
         if name == "chat-calculator-flow.json" {

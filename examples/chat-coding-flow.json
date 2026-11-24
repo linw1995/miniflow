@@ -20,6 +20,9 @@
     }
   },
   "flows": {
+    "request": {
+      "path": "agent-coding/request.json"
+    },
     "agent": {
       "builtin": "mfn-llm.agent"
     }
@@ -57,20 +60,18 @@
     },
     {
       "id": "request",
-      "kind": "builtin.code",
+      "kind": "workflow.call",
       "config": {
-        "language": "cel",
-        "inputs": {
-          "messages": {
-            "list": "object"
-          }
-        },
-        "code": {
-          "messages": "[dyn({'role':'system','content':'You are a coding assistant in one workspace. Use workspace-relative paths. Inspect the relevant files and any applicable AGENTS.md before editing. Make the smallest change that solves the request. Use bash to run the relevant project checks; read their exit codes and output, fix failures, and report what you actually verified. Wait for tool results before making decisions that depend on them.'})] + messages"
-        }
+        "flow": "request"
       },
       "inputs": {
-        "messages": {
+        "params.workspace_root": {
+          "from": {
+            "node": "params",
+            "port": "workspace_root"
+          }
+        },
+        "params.messages": {
           "from": {
             "node": "params",
             "port": "messages"
@@ -380,6 +381,36 @@
       }
     },
     {
+      "id": "stamp_workspace",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "messages": {
+            "list": "object"
+          },
+          "root": "string"
+        },
+        "code": {
+          "messages": "size(messages) == 0 ? messages : [messages[0] + {'metadata': (has(messages[0].metadata) ? messages[0].metadata : {}) + {'coding_workspace': root}}] + messages.slice(1, size(messages))"
+        }
+      },
+      "inputs": {
+        "messages": {
+          "from": {
+            "node": "agent",
+            "port": "messages"
+          }
+        },
+        "root": {
+          "from": {
+            "node": "params",
+            "port": "workspace_root"
+          }
+        }
+      }
+    },
+    {
       "id": "result",
       "kind": "builtin.object",
       "config": {
@@ -403,7 +434,7 @@
         },
         "messages": {
           "from": {
-            "node": "agent",
+            "node": "stamp_workspace",
             "port": "messages"
           }
         },

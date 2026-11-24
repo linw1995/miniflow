@@ -3,7 +3,7 @@ use super::{
     example_support::{CODING_AGENT, streamed_tool_calls},
     next_completion,
 };
-use mf_chat::{ChatDatabase, MessageUpdate, contract::CompletionState};
+use mf_chat::{ChatDatabase, ConversationResult, MessageUpdate, contract::CompletionState};
 use mf_tui::{
     chat::{ChatCommand, ChatController, ChatLaunch, ChatOptions},
     run::RunOptions,
@@ -23,6 +23,116 @@ fn tool_result(request: &Request, id: &str) -> Value {
         .find(|m| m["role"] == "tool" && m["tool_call_id"] == id)
         .unwrap_or_else(|| panic!("missing tool result {id}"));
     serde_json::from_str(message["content"].as_str().unwrap()).unwrap()
+}
+
+fn submit(
+    binary: &Path,
+    db: &Path,
+    id: &str,
+    workspace: &Path,
+    prompt: &str,
+) -> ConversationResult {
+    let launch = ChatLaunch::prepare(
+        binary,
+        ChatOptions {
+            database_path: db.to_owned(),
+            profile: "coding".into(),
+            run: RunOptions {
+                inputs: Some(
+                    json!({
+                        "params.model": "example-model", "params.api_key": "synthetic-key",
+                        "params.workspace_root": workspace,
+                    })
+                    .to_string(),
+                ),
+                ..Default::default()
+            },
+        },
+    )
+    .unwrap();
+    let controller = ChatController::open(launch).unwrap();
+    controller
+        .send(ChatCommand::Submit {
+            session_id: Some(id.into()),
+            prompt: prompt.into(),
+        })
+        .unwrap();
+    let resolution = next_completion(&controller);
+    controller.close().unwrap();
+    let CompletionState::Committed(completion) = resolution.state else {
+        panic!("expected a committed coding turn")
+    };
+    completion.result
+}
+
+#[test]
+fn reopened_coding_session_marks_only_workspace_transitions_before_their_user_turns() {
+    let root = tempfile::tempdir().unwrap();
+    let a = root.path().join("A");
+    let b = root.path().join("B with spaces");
+    let sequence = [&a, &a, &b, &b, &a];
+    let server = Server::start(vec![Reply::stream_text("Done."); sequence.len()]);
+    let binary = compiled(root.path(), &server, CODING_AGENT);
+    let path = root.path().join("chat.sqlite");
+    let id = ChatDatabase::open(&path)
+        .unwrap()
+        .create_session(
+            "coding",
+            Some("Keep the session policy.".into()),
+            Some("Manual title".into()),
+        )
+        .unwrap()
+        .id;
+    for dir in [&a, &b] {
+        fs::create_dir(dir).unwrap();
+    }
+    let mut expected = Vec::new();
+    for (i, workspace) in sequence.into_iter().enumerate() {
+        let prompt = format!("Inspect turn {i}.");
+        let result = submit(&binary, &path, &id, workspace, &prompt);
+        assert_eq!(result.final_text(), Some("Done."));
+        assert_eq!(result.display_messages().len(), 1);
+        let requests = server.requests();
+        let request = requests.last().unwrap();
+        let messages = super::messages(request);
+        assert!(
+            messages
+                .iter()
+                .any(|m| m["content"] == "Keep the session policy.")
+        );
+        if i == 0 || workspace != sequence[i - 1] {
+            let notice = if i == 0 {
+                format!("Workspace root: {}", json!(workspace))
+            } else {
+                format!(
+                    "Workspace changed from {} to {}. Reinspect files here before relying on earlier tool results.",
+                    json!(sequence[i - 1]),
+                    json!(workspace)
+                )
+            };
+            expected.push((json!(notice), json!(prompt)));
+        }
+        let notices: Vec<_> = messages
+            .windows(2)
+            .filter(|pair| {
+                pair[0]["role"] == "system"
+                    && pair[0]["content"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("Workspace ")
+            })
+            .map(|pair| (pair[0]["content"].clone(), pair[1]["content"].clone()))
+            .collect();
+        assert_eq!(notices, expected);
+        assert!(
+            request.body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|m| m.get("metadata").is_none())
+        );
+    }
+    assert_eq!(server.requests().len(), sequence.len());
 }
 
 #[test]
@@ -179,9 +289,19 @@ fn coding_agent_repairs_a_failing_workspace_and_reopens_its_tool_transcript() {
             assert_eq!(schema["properties"]["command"], json!({"type":"string"}));
         }
     }
+    assert!(
+        super::messages(&requests[0])
+            .iter()
+            .any(|m| m["role"] == "system"
+                && m["content"] == format!("Workspace root: {}", json!(worktree)))
+    );
     for request in &requests {
         let body = request.body.to_string();
-        assert!(!body.contains(worktree.to_str().unwrap()));
+        assert!(
+            !request.body["tools"]
+                .to_string()
+                .contains(worktree.to_str().unwrap())
+        );
         assert!(!body.contains("synthetic-coding-key"));
     }
     assert_eq!(

@@ -21,6 +21,7 @@ pub fn stage_example(root: &std::path::Path, name: &str) -> std::path::PathBuf {
         "chat-deepseek-flow.json" => &["agent-deepseek/search.json", "agent-deepseek/fetch.json"],
         CODING_AGENT => &[
             "coding-read.json",
+            "agent-coding/request.json",
             "agent-coding/mkdir.json",
             "agent-coding/ls.json",
             "agent-coding/find.json",
