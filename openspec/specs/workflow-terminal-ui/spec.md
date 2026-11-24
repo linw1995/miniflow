@@ -788,6 +788,7 @@ usage-dashboard, and system-instruction forms.
 
 - **WHEN** the user requests an earlier message page
 - **THEN** the terminal loads bounded nonoverlapping history and can return to the latest page
+- **AND** it reads saved message bodies and tool arguments on demand, evicts offscreen body documents, and can reload them without losing content or changing the audit transcript
 
 ### Requirement: Present distinct retry and cancellation actions
 
@@ -1017,8 +1018,9 @@ The TUI SHALL advance elapsed time while a local run is active. Once completion 
 ### Requirement: Display provisional streamed chat replies
 
 The chat terminal SHALL consume application previews independently of rendering and settlement.
-Presentation state SHALL be bounded and grouped by actual model-call identity. A preview MUST NOT
-imply conversation success, and unrelated internal model output MUST NOT become answer text.
+It SHALL retain all received text and tool argument fragments for the active turn, grouped by model
+call and tool index, without truncation. A preview MUST NOT imply conversation success, and
+unrelated internal model output MUST NOT become answer text.
 
 #### Scenario: Wait for title generation
 
@@ -1048,7 +1050,13 @@ The terminal SHALL reconcile live text against the final result. Successful pers
 
 - **WHEN** a Flow streams an answer prefix and then reports a failed result with no display messages
 - **THEN** the terminal keeps the prefix visible as unfinished even after loading the saved turn
-- **AND** only the authoritative result is persisted, without adding the preview to history or model context
+- **AND** the prefix remains a display-only draft, not an audit message or model input
+
+#### Scenario: Reopen after a visible prefix
+
+- **WHEN** the process is killed after showing assistant text or raw tool arguments and the user reopens the session
+- **THEN** the terminal shows the committed prefixes at that turn as unfinished, without requiring a complete tool call
+- **AND** reopening does not repeat generation or dispatch a tool
 
 #### Scenario: Retain a reply after storage failure
 

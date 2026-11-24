@@ -280,30 +280,28 @@ fn current_tokens(connection: &mut SqliteConnection, id: &str) -> Result<Option<
     }
     let mut cursor = owner.context_revision;
     loop {
-        let record = context_revisions::table
+        // Estimating usage must not deserialize a checkpoint's message snapshot.
+        let (operation, turn_id, parent) = context_revisions::table
             .find((id, cursor))
-            .select(Revision::as_select())
-            .first::<Revision>(connection)
+            .select((
+                context_revisions::operation,
+                context_revisions::turn_id,
+                context_revisions::parent_revision,
+            ))
+            .first::<(String, Option<String>, Option<i64>)>(connection)
             .optional()
             .context(DatabaseSnafu {
-                operation: "load model context revision",
+                operation: "load model context revision header",
             })?
             .context(ContextMissingSnafu {
                 session_id: id,
                 revision: cursor,
             })?;
-        ensure!(
-            record.session_id == id && record.revision == cursor,
-            InvalidSnafu {
-                field: "model context",
-                reason: "revision ownership mismatch"
-            }
-        );
-        if record.operation == "checkpoint" {
+        if operation == "checkpoint" {
             // Do not carry pre-compaction usage across a context replacement boundary.
             return Ok(None);
         }
-        let turn_id = record.turn_id.context(InvalidSnafu {
+        let turn_id = turn_id.context(InvalidSnafu {
             field: "model context",
             reason: "append revision requires a turn identifier",
         })?;
@@ -324,7 +322,7 @@ fn current_tokens(connection: &mut SqliteConnection, id: &str) -> Result<Option<
                 return Ok(Some(tokens));
             }
         }
-        let parent = record.parent_revision.context(InvalidSnafu {
+        let parent = parent.context(InvalidSnafu {
             field: "model context",
             reason: "append requires a parent revision",
         })?;

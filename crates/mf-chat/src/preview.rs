@@ -73,7 +73,10 @@ impl PreviewEvent {
 
 type Consume = dyn Fn(PreviewEvent, &StreamCancellation) -> Result<(), ChatError> + Send + Sync;
 
-pub struct PreviewConsumer(Box<Consume>);
+pub struct PreviewConsumer {
+    consume: Box<Consume>,
+    seal_drafts: Option<Box<dyn Fn() + Send + Sync>>,
+}
 
 pub struct PreviewReceiver(mpsc::Receiver<PreviewEvent>);
 
@@ -88,7 +91,21 @@ impl PreviewConsumer {
         + Sync
         + 'static,
     ) -> Self {
-        Self(Box::new(consume))
+        Self {
+            consume: Box::new(consume),
+            seal_drafts: None,
+        }
+    }
+
+    /// Pin any display read view immediately before storage retires its drafts. This
+    /// callback must not wait for subscription receipts, rendering, or provider I/O.
+    pub fn with_draft_seal(mut self, seal: impl Fn() + Send + Sync + 'static) -> Self {
+        self.seal_drafts = Some(Box::new(seal));
+        self
+    }
+
+    pub(crate) fn take_draft_seal(&mut self) -> Option<Box<dyn Fn() + Send + Sync>> {
+        self.seal_drafts.take()
     }
 
     pub fn send(
@@ -98,7 +115,7 @@ impl PreviewConsumer {
         cancellation: &StreamCancellation,
     ) -> Result<(), ChatError> {
         check_cancellation(cancellation)?;
-        (self.0)(event, cancellation)?;
+        (self.consume)(event, cancellation)?;
         receipt.acknowledge()?;
         check_cancellation(cancellation)
     }

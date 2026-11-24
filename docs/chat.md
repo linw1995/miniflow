@@ -571,14 +571,23 @@ valid JSON on its own.
 history or model context. The calculator, context-replacement, and DeepSeek examples explicitly
 select `tool_call_delta`. A chatflow can select it without exposing `answer`.
 
-Terminal preview capture runs independently of drawing and inspection. It keeps at most 32 text/tool
-entries and 128 KiB of UTF-8 data, including correlation metadata, with an explicit truncation notice
-while continuing to drain and validate. Each tool call retains at most 8 KiB of recent argument text
-within that shared budget. Older argument deltas are omitted from the provisional view, not from
-tool dispatch or persistence. The notice counts both fully and partially omitted deltas.
-The final result supplies the authoritative display transcript. If execution fails with no display
-replacement for a partial reply, the terminal keeps the preview visibly unfinished. It is not added
-to the database or model context. Older invocation events cannot alter the active turn.
+Terminal preview capture runs independently of drawing and inspection. Before publishing a frame,
+the terminal commits the available text and raw argument fragments to `preview_segments` and
+`preview_chunks` in `--chat-db`. These are ordinary tables keyed by turn, model call, and tool index,
+not a second message history. Each batch appends only new bytes. A frame addresses exact prefixes
+without copying the turn's bodies. There is no entry, byte, or argument-tail limit. If a draft write
+fails, the terminal reports it and stops extending that preview; the runner can still finish and save
+its result.
+
+If the chat process dies, reopen the same database and select the conversation with `Ctrl+S`.
+Previously displayed text and tool arguments appear under the interrupted turn as `Response
+unfinished`. Tool groups reopen collapsed and can be expanded even when their arguments are not
+valid JSON. Retrying or starting a later turn does not overwrite them. Recovery does not resume the
+model or run a tool. Drafts never enter `messages`, model context, usage, or the save-only candidate.
+A successful result replaces the whole draft; a failed result replaces the parts covered by its
+display transcript and leaves the rest unfinished. Draft cleanup and result persistence commit or
+roll back together. Protect the session database accordingly: it can now contain partial tool inputs
+and output from unsuccessful turns as well as completed conversations.
 
 ## Executable conversation backend
 
@@ -646,14 +655,19 @@ its matching call on the current page, regardless of result arrival order. A pag
 still shows the result with its tool-call ID. Grouping changes only the display, not stored order.
 Tool arguments and results are inert literal data, never prompts, Markdown images, or commands.
 A tool call group automatically expands (`[-]`) when its argument preview first arrives. An open
-group displays retained argument fragments with incremental JSON syntax highlighting. A truncated
-header shows total argument size and the group identifies omitted deltas and bytes. The display
+group displays the argument text received so far with incremental JSON syntax highlighting. The display
 does not require the fragment to parse as JSON. Each group automatically collapses (`[+]`) when the
 whole turn finishes and its authoritative transcript replaces the preview; the model may already
 be executing the next model round while the traced tool status updates. Manually expanding a
 settled group displays its complete canonical arguments. Reopening history shows groups collapsed
-and reads complete saved arguments from `messages`; delta history, fold state, and omission markers
-are not persisted. Live assistant blocks use model-call IDs and the same spacing between messages
+and reads canonical arguments from `messages` or an unfinished turn's raw prefixes from its draft;
+fold state is not persisted. A history page loads message and tool headers and turn usage,
+not message bodies. Scrolling or expanding a group loads its content from SQLite. The renderer
+keeps the documents intersecting the viewport and releases offscreen bodies, highlighting, and
+wrapped rows; returning to a group reloads it without truncation. It lays out one whole body at
+a time, so a single large visible message can still take substantial memory. Header and scroll
+metadata remain in memory. Save-only recovery retains its authoritative candidate independently.
+Live assistant blocks use model-call IDs and the same spacing between messages
 and tools as settled replies. The status on each tool header
 comes from existing snapshots and Flow or Iteration lifecycle records, matched by public call ID and
 exact runtime scope without Router-specific configuration. Native and compiled chats share the

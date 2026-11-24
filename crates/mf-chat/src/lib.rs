@@ -3,6 +3,7 @@
 mod call_events;
 mod context;
 pub mod contract;
+pub mod display;
 mod error;
 pub mod flows;
 mod host;

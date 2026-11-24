@@ -1232,7 +1232,7 @@ pub(super) fn run_observed_conversation(
 ) -> Result<ReconciledCompletion, ChatError> {
     automatic_compaction.validate()?;
     let ConversationPresentation {
-        preview,
+        mut preview,
         tools,
         context_windows,
     } = presentation;
@@ -1348,11 +1348,17 @@ pub(super) fn run_observed_conversation(
         .prepare(),
     )?;
     let finish = capture.clone();
+    let seal_drafts = preview.as_mut().and_then(PreviewConsumer::take_draft_seal);
     bind_call(
         &mut registry,
         &plan,
         "finish",
-        host_task("finish", move |inputs| finish.finish(inputs)),
+        host_task("finish", move |inputs| {
+            if let Some(seal) = &seal_drafts {
+                seal();
+            }
+            finish.finish(inputs)
+        }),
     )?;
     let flow = mf_compiler::instantiate_stream(&plan, &registry)?;
     let arguments = WorkflowArguments(
