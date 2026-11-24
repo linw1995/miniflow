@@ -21,6 +21,7 @@ mf-runtime-derive = { path = "crates/mf-runtime-derive", version = "0.1.0" }
 mf-telemetry = { path = "crates/mf-telemetry", version = "0.1.0", default-features = false }
 mf-tui = { path = "crates/mf-tui", version = "0.1.0" }
 mfn-code = { path = "crates/builtin-nodes/code", version = "0.1.0" }
+mfn-coding = { path = "crates/builtin-nodes/coding", version = "0.1.0" }
 mfn-core = { path = "crates/builtin-nodes/core", version = "0.1.0" }
 mfn-deepseek = { path = "crates/builtin-nodes/deepseek", version = "0.1.0" }
 mfn-llm = { path = "crates/builtin-nodes/llm", version = "0.1.0" }
@@ -81,6 +82,11 @@ pulldown-cmark = { version = "0.13.5", default-features = false }
 syntect = { version = "5.3.0", default-features = false }
 image = { version = "0.25.8", default-features = false }
 ratatui-image = { version = "11.1.0", default-features = false }
+
+# Workspace content search and ignore rules.
+globset = "0.4.22"
+ignore = "0.4.35"
+regex = "1.13.1"
 
 # Process control, signals, and terminal I/O.
 libc = "0.2.189"

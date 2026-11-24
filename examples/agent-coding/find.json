@@ -1,0 +1,103 @@
+{
+  "version": "2026-11-13",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../../crates/builtin-nodes/core"
+    },
+    "coding": {
+      "package": "mfn-coding",
+      "path": "../../crates/builtin-nodes/coding"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "workspace_root": {
+            "type": "string"
+          },
+          "pattern": {
+            "type": "string",
+            "secret": false
+          },
+          "path": {
+            "type": "string",
+            "secret": false,
+            "default": "."
+          },
+          "kind": {
+            "type": "string",
+            "secret": false,
+            "default": "any"
+          },
+          "max_depth": {
+            "type": "uint",
+            "secret": false,
+            "default": 64
+          },
+          "limit": {
+            "type": "uint",
+            "secret": false,
+            "default": 1000
+          }
+        }
+      }
+    },
+    {
+      "id": "find",
+      "kind": "builtin.coding.find",
+      "config": {
+        "workspace_root": {
+          "$ref": "params.workspace_root"
+        }
+      },
+      "inputs": {
+        "pattern": {
+          "from": {
+            "node": "params",
+            "port": "pattern"
+          }
+        },
+        "path": {
+          "from": {
+            "node": "params",
+            "port": "path"
+          }
+        },
+        "kind": {
+          "from": {
+            "node": "params",
+            "port": "kind"
+          }
+        },
+        "max_depth": {
+          "from": {
+            "node": "params",
+            "port": "max_depth"
+          }
+        },
+        "limit": {
+          "from": {
+            "node": "params",
+            "port": "limit"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "entries",
+      "node": "find",
+      "port": "entries"
+    },
+    {
+      "name": "truncated",
+      "node": "find",
+      "port": "truncated"
+    }
+  ]
+}

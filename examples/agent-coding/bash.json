@@ -1,0 +1,99 @@
+{
+  "version": "2026-11-13",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../../crates/builtin-nodes/core"
+    },
+    "coding": {
+      "package": "mfn-coding",
+      "path": "../../crates/builtin-nodes/coding"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "workspace_root": {
+            "type": "string"
+          },
+          "command": {
+            "type": "string",
+            "secret": false
+          },
+          "timeout": {
+            "type": {
+              "nullable": "double"
+            },
+            "secret": false,
+            "default": null
+          }
+        }
+      }
+    },
+    {
+      "id": "bash",
+      "kind": "builtin.coding.bash",
+      "config": {
+        "workspace_root": {
+          "$ref": "params.workspace_root"
+        }
+      },
+      "inputs": {
+        "command": {
+          "from": {
+            "node": "params",
+            "port": "command"
+          }
+        },
+        "timeout": {
+          "from": {
+            "node": "params",
+            "port": "timeout"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "exit_code",
+      "node": "bash",
+      "port": "exit_code",
+      "optional": true
+    },
+    {
+      "name": "signal",
+      "node": "bash",
+      "port": "signal",
+      "optional": true
+    },
+    {
+      "name": "timed_out",
+      "node": "bash",
+      "port": "timed_out"
+    },
+    {
+      "name": "stdout",
+      "node": "bash",
+      "port": "stdout"
+    },
+    {
+      "name": "stderr",
+      "node": "bash",
+      "port": "stderr"
+    },
+    {
+      "name": "stdout_truncated",
+      "node": "bash",
+      "port": "stdout_truncated"
+    },
+    {
+      "name": "stderr_truncated",
+      "node": "bash",
+      "port": "stderr_truncated"
+    }
+  ]
+}

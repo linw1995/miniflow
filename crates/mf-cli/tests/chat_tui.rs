@@ -18,6 +18,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "chat_tui/coding.rs"]
+mod coding;
+#[path = "support/examples.rs"]
+mod example_support;
 #[path = "support/terminal.rs"]
 mod terminal;
 use terminal::Screen;
@@ -141,45 +145,10 @@ fn supplied_title_workflow_runs_inside_the_application_lifecycle() {
 
 fn compiled(root: &Path, server: &Server, example: &str) -> std::path::PathBuf {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    let definition = root.join("flow.json");
-    let mut value: serde_json::Value = serde_json::from_slice(
-        &fs::read(crates.parent().unwrap().join("examples").join(example)).unwrap(),
-    )
-    .unwrap();
-    value["dependencies"]["llm"]["path"] =
-        crates.join("builtin-nodes/llm").to_str().unwrap().into();
-    value["dependencies"]["core"]["path"] =
-        crates.join("builtin-nodes/core").to_str().unwrap().into();
-    if let Some(code) = value["dependencies"].get_mut("code") {
-        code["path"] = crates.join("builtin-nodes/code").to_str().unwrap().into();
-    }
-    if example == "chat-context-flow.json" {
-        let examples = crates.parent().unwrap().join("examples");
-        let mut conversation: serde_json::Value =
-            serde_json::from_slice(&fs::read(examples.join("chat-calculator-flow.json")).unwrap())
-                .unwrap();
-        conversation["dependencies"] = value["dependencies"].clone();
-        fs::write(
-            root.join("chat-calculator-flow.json"),
-            serde_json::to_vec(&conversation).unwrap(),
-        )
-        .unwrap();
-        fs::create_dir(root.join("agent-calculator")).unwrap();
-        for entry in fs::read_dir(examples.join("agent-calculator")).unwrap() {
-            let source = entry.unwrap().path();
-            let mut tool: serde_json::Value =
-                serde_json::from_slice(&fs::read(&source).unwrap()).unwrap();
-            for (alias, dependency) in tool["dependencies"].as_object_mut().unwrap() {
-                dependency["path"] = value["dependencies"][alias]["path"].clone();
-            }
-            fs::write(
-                root.join("agent-calculator")
-                    .join(source.file_name().unwrap()),
-                serde_json::to_vec(&tool).unwrap(),
-            )
-            .unwrap();
-        }
-    }
+    let sources = tempfile::tempdir_in(root).unwrap();
+    let definition = example_support::stage_example(sources.path(), example);
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&definition).unwrap()).unwrap();
     let parameters = &mut value["nodes"][0]["config"]["parameters"];
     parameters["model"]["default"] = "wrong-default-model".into();
     parameters["base_url"]["default"] = server.base_url.clone().into();
@@ -200,12 +169,7 @@ fn compiled(root: &Path, server: &Server, example: &str) -> std::path::PathBuf {
         &RunnerOptions { telemetry: true },
     )
     .unwrap();
-    fs::remove_file(&definition).unwrap();
     fs::remove_dir_all(build).unwrap();
-    if example == "chat-context-flow.json" {
-        fs::remove_file(root.join("chat-calculator-flow.json")).unwrap();
-        fs::remove_dir_all(root.join("agent-calculator")).unwrap();
-    }
     binary
 }
 

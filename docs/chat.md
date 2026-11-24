@@ -369,6 +369,11 @@ Search and Fetch nodes also make the nested execution PiPs easier to observe tha
 short local operations. See [configured Flow tools](workflows.md#configured-flow-tools) for setup,
 provider charges, and latency limitations.
 
+The [coding Agent](../examples/chat-coding-flow.json) exposes `ls`, `find`, `grep`, `read`, `edit`,
+`mkdir`, `write`, and `bash`. Each shell command starts in the caller-bound workspace, but is not
+confined to it. The runner uses one worker so batched file changes and tests run in call order.
+See the [runnable demo and trust boundary](coding-tools.md#run-the-coding-agent).
+
 The Agent accumulates assistant call batches, ordered parallel tool results, and the terminal
 assistant without echoing the admitted request. As long as the model requests tools, the Agent
 continues without a fixed round limit. Cancellation and the workflow step budget still apply.

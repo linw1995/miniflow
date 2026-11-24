@@ -1,0 +1,478 @@
+{
+  "version": "2026-11-13",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../crates/builtin-nodes/core"
+    },
+    "code": {
+      "package": "mfn-code",
+      "path": "../crates/builtin-nodes/code"
+    },
+    "llm": {
+      "package": "mfn-llm",
+      "path": "../crates/builtin-nodes/llm"
+    }
+  },
+  "execution": {
+    "limits": {
+      "workers": 1
+    }
+  },
+  "flows": {
+    "agent": {
+      "builtin": "mfn-llm.agent"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "messages": {
+            "type": {
+              "list": "object"
+            }
+          },
+          "workspace_root": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string",
+            "default": "your-model",
+            "secret": false
+          },
+          "base_url": {
+            "type": "string",
+            "default": "https://api.openai.com/v1",
+            "secret": false
+          },
+          "api_key": {
+            "type": "string",
+            "env": "OPENAI_API_KEY"
+          }
+        }
+      }
+    },
+    {
+      "id": "request",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "messages": {
+            "list": "object"
+          }
+        },
+        "code": {
+          "messages": "[dyn({'role':'system','content':'You are a coding assistant in one workspace. Use workspace-relative paths. Inspect the relevant files and any applicable AGENTS.md before editing. Make the smallest change that solves the request. Use bash to run the relevant project checks; read their exit codes and output, fix failures, and report what you actually verified. Wait for tool results before making decisions that depend on them.'})] + messages"
+        }
+      },
+      "inputs": {
+        "messages": {
+          "from": {
+            "node": "params",
+            "port": "messages"
+          }
+        }
+      }
+    },
+    {
+      "id": "read",
+      "kind": "builtin.constant",
+      "config": {
+        "type": "flow",
+        "value": {
+          "path": "coding-read.json"
+        },
+        "inputs": {
+          "workspace_root": {
+            "$ref": "params.workspace_root"
+          }
+        }
+      }
+    },
+    {
+      "id": "edit",
+      "kind": "builtin.constant",
+      "config": {
+        "type": "flow",
+        "value": {
+          "path": "agent-coding/edit.json"
+        },
+        "inputs": {
+          "workspace_root": {
+            "$ref": "params.workspace_root"
+          }
+        }
+      }
+    },
+    {
+      "id": "write",
+      "kind": "builtin.constant",
+      "config": {
+        "type": "flow",
+        "value": {
+          "path": "agent-coding/write.json"
+        },
+        "inputs": {
+          "workspace_root": {
+            "$ref": "params.workspace_root"
+          }
+        }
+      }
+    },
+    {
+      "id": "bash",
+      "kind": "builtin.constant",
+      "config": {
+        "type": "flow",
+        "value": {
+          "path": "agent-coding/bash.json"
+        },
+        "inputs": {
+          "workspace_root": {
+            "$ref": "params.workspace_root"
+          }
+        }
+      }
+    },
+    {
+      "id": "grep",
+      "kind": "builtin.constant",
+      "config": {
+        "type": "flow",
+        "value": {
+          "path": "agent-coding/grep.json"
+        },
+        "inputs": {
+          "workspace_root": {
+            "$ref": "params.workspace_root"
+          }
+        }
+      }
+    },
+    {
+      "id": "find",
+      "kind": "builtin.constant",
+      "config": {
+        "type": "flow",
+        "value": {
+          "path": "agent-coding/find.json"
+        },
+        "inputs": {
+          "workspace_root": {
+            "$ref": "params.workspace_root"
+          }
+        }
+      }
+    },
+    {
+      "id": "ls",
+      "kind": "builtin.constant",
+      "config": {
+        "type": "flow",
+        "value": {
+          "path": "agent-coding/ls.json"
+        },
+        "inputs": {
+          "workspace_root": {
+            "$ref": "params.workspace_root"
+          }
+        }
+      }
+    },
+    {
+      "id": "mkdir",
+      "kind": "builtin.constant",
+      "config": {
+        "type": "flow",
+        "value": {
+          "path": "agent-coding/mkdir.json"
+        },
+        "inputs": {
+          "workspace_root": {
+            "$ref": "params.workspace_root"
+          }
+        }
+      }
+    },
+    {
+      "id": "tool_properties",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "mkdir_interface": "object",
+          "ls_interface": "object",
+          "find_interface": "object",
+          "grep_interface": "object",
+          "read_interface": "object",
+          "edit_interface": "object",
+          "write_interface": "object",
+          "bash_interface": "object"
+        },
+        "code": {
+          "value": "{\n  'ls': {'interface': ls_interface, 'description': 'List immediate nonignored files and directories under path (default .), including dotfiles. Returns workspace-relative paths and kinds in name order.'},\n  'find': {'interface': find_interface, 'description': 'Find files or directories by glob pattern under path (default .). Use *.rs for basenames or src/**/*.rs for scoped paths. kind is any, file, or directory; max_depth=1 selects immediate children.'},\n  'grep': {'interface': grep_interface, 'description': 'Search UTF-8 lines by regex pattern or literal text (literal=true). Optional path is a file or directory; defaults to the workspace root. Returns path, one-based line and text. Narrow the search if truncated.'},\n  'mkdir': {'interface': mkdir_interface, 'description': 'Create one new directory at path. Its parent must exist; an existing target is an error.'},\n  'read': {'interface': read_interface, 'description': 'Read a UTF-8 file by relative path. start_line is one-based; limit is at most 2000 lines. Continue at next_line if present.'},\n  'edit': {'interface': edit_interface, 'description': 'Edit an existing file by relative path. Supply edits as a list of objects with string fields old_text and new_text. Each old_text must match exactly once in the original file; matches may not overlap. All replacements apply together.'},\n  'write': {'interface': write_interface, 'description': 'Create a new UTF-8 file at a relative path with the supplied content. The parent directory must exist. Does not overwrite; use edit for existing files.'},\n  'bash': {'interface': bash_interface, 'description': 'Execute shell command text in the workspace. Each call starts a new non-interactive shell. Pipes, redirections, and multiple commands are supported. Optional timeout is in seconds. Inspect exit_code, timed_out, stdout and stderr.'}\n}"
+        }
+      },
+      "inputs": {
+        "mkdir_interface": {
+          "from": {
+            "node": "mkdir",
+            "port": "properties"
+          }
+        },
+        "ls_interface": {
+          "from": {
+            "node": "ls",
+            "port": "properties"
+          }
+        },
+        "find_interface": {
+          "from": {
+            "node": "find",
+            "port": "properties"
+          }
+        },
+        "grep_interface": {
+          "from": {
+            "node": "grep",
+            "port": "properties"
+          }
+        },
+        "read_interface": {
+          "from": {
+            "node": "read",
+            "port": "properties"
+          }
+        },
+        "edit_interface": {
+          "from": {
+            "node": "edit",
+            "port": "properties"
+          }
+        },
+        "write_interface": {
+          "from": {
+            "node": "write",
+            "port": "properties"
+          }
+        },
+        "bash_interface": {
+          "from": {
+            "node": "bash",
+            "port": "properties"
+          }
+        }
+      }
+    },
+    {
+      "id": "tools",
+      "kind": "builtin.object",
+      "config": {
+        "fields": {
+          "mkdir": "flow",
+          "ls": "flow",
+          "find": "flow",
+          "grep": "flow",
+          "read": "flow",
+          "edit": "flow",
+          "write": "flow",
+          "bash": "flow"
+        }
+      },
+      "inputs": {
+        "mkdir": {
+          "from": {
+            "node": "mkdir",
+            "port": "value"
+          }
+        },
+        "ls": {
+          "from": {
+            "node": "ls",
+            "port": "value"
+          }
+        },
+        "find": {
+          "from": {
+            "node": "find",
+            "port": "value"
+          }
+        },
+        "grep": {
+          "from": {
+            "node": "grep",
+            "port": "value"
+          }
+        },
+        "read": {
+          "from": {
+            "node": "read",
+            "port": "value"
+          }
+        },
+        "edit": {
+          "from": {
+            "node": "edit",
+            "port": "value"
+          }
+        },
+        "write": {
+          "from": {
+            "node": "write",
+            "port": "value"
+          }
+        },
+        "bash": {
+          "from": {
+            "node": "bash",
+            "port": "value"
+          }
+        }
+      }
+    },
+    {
+      "id": "agent",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "agent"
+      },
+      "inputs": {
+        "params.tools": {
+          "from": {
+            "node": "tools",
+            "port": "value"
+          }
+        },
+        "params.tool_properties": {
+          "from": {
+            "node": "tool_properties",
+            "port": "value"
+          }
+        },
+        "params.messages": {
+          "from": {
+            "node": "request",
+            "port": "messages"
+          }
+        },
+        "params.model": {
+          "from": {
+            "node": "params",
+            "port": "model"
+          }
+        },
+        "params.base_url": {
+          "from": {
+            "node": "params",
+            "port": "base_url"
+          }
+        },
+        "params.api_key": {
+          "from": {
+            "node": "params",
+            "port": "api_key"
+          }
+        }
+      }
+    },
+    {
+      "id": "result",
+      "kind": "builtin.object",
+      "config": {
+        "fields": {
+          "status": "string",
+          "messages": {
+            "list": "object"
+          },
+          "usages": {
+            "list": "object"
+          },
+          "error": "string"
+        }
+      },
+      "inputs": {
+        "status": {
+          "from": {
+            "node": "agent",
+            "port": "status"
+          }
+        },
+        "messages": {
+          "from": {
+            "node": "agent",
+            "port": "messages"
+          }
+        },
+        "usages": {
+          "from": {
+            "node": "agent",
+            "port": "usages"
+          }
+        },
+        "error": {
+          "from": {
+            "node": "agent",
+            "port": "error"
+          }
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "params",
+      "to_node": "mkdir"
+    },
+    {
+      "from_node": "params",
+      "to_node": "ls"
+    },
+    {
+      "from_node": "params",
+      "to_node": "find"
+    },
+    {
+      "from_node": "params",
+      "to_node": "grep"
+    },
+    {
+      "from_node": "params",
+      "to_node": "read"
+    },
+    {
+      "from_node": "params",
+      "to_node": "edit"
+    },
+    {
+      "from_node": "params",
+      "to_node": "write"
+    },
+    {
+      "from_node": "params",
+      "to_node": "bash"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "tool_call_delta",
+      "node": "agent",
+      "port": "tool_call_delta",
+      "optional": true
+    },
+    {
+      "name": "answer",
+      "node": "agent",
+      "port": "answer",
+      "optional": true
+    },
+    {
+      "name": "append",
+      "node": "result",
+      "port": "value"
+    }
+  ]
+}

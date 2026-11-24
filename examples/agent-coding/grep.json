@@ -1,0 +1,103 @@
+{
+  "version": "2026-11-13",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../../crates/builtin-nodes/core"
+    },
+    "coding": {
+      "package": "mfn-coding",
+      "path": "../../crates/builtin-nodes/coding"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "workspace_root": {
+            "type": "string"
+          },
+          "pattern": {
+            "type": "string",
+            "secret": false
+          },
+          "path": {
+            "type": "string",
+            "secret": false,
+            "default": "."
+          },
+          "literal": {
+            "type": "bool",
+            "secret": false,
+            "default": false
+          },
+          "ignore_case": {
+            "type": "bool",
+            "secret": false,
+            "default": false
+          },
+          "limit": {
+            "type": "uint",
+            "secret": false,
+            "default": 100
+          }
+        }
+      }
+    },
+    {
+      "id": "grep",
+      "kind": "builtin.coding.grep",
+      "config": {
+        "workspace_root": {
+          "$ref": "params.workspace_root"
+        }
+      },
+      "inputs": {
+        "pattern": {
+          "from": {
+            "node": "params",
+            "port": "pattern"
+          }
+        },
+        "path": {
+          "from": {
+            "node": "params",
+            "port": "path"
+          }
+        },
+        "literal": {
+          "from": {
+            "node": "params",
+            "port": "literal"
+          }
+        },
+        "ignore_case": {
+          "from": {
+            "node": "params",
+            "port": "ignore_case"
+          }
+        },
+        "limit": {
+          "from": {
+            "node": "params",
+            "port": "limit"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "matches",
+      "node": "grep",
+      "port": "matches"
+    },
+    {
+      "name": "truncated",
+      "node": "grep",
+      "port": "truncated"
+    }
+  ]
+}
