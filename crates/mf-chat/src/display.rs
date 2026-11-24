@@ -262,7 +262,13 @@ pub fn stage(messages: Vec<ChatMessage>) -> (Vec<Message>, Option<ChatError>) {
     if messages.is_empty() {
         return (Vec::new(), None);
     }
-    let mut store = Fragments::open();
+    stage_with(messages, Fragments::open())
+}
+
+fn stage_with(
+    messages: Vec<ChatMessage>,
+    mut store: Result<Fragments, ChatError>,
+) -> (Vec<Message>, Option<ChatError>) {
     let mut text = |value: String| {
         if let Ok(db) = &store {
             match db.append(&Text::default(), &value) {

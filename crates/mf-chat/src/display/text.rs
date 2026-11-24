@@ -210,6 +210,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn failed_scratch_append_keeps_earlier_handles_and_later_messages_readable() {
+        use super::super::{Message, stage_with};
+        let store = Fragments::open().unwrap();
+        store
+            .0
+            .lock()
+            .unwrap()
+            .batch_execute(
+                "CREATE TRIGGER fail_append BEFORE INSERT ON fragments WHEN NEW.value = 'question'
+             BEGIN SELECT RAISE(ABORT, 'scratch full'); END;",
+            )
+            .unwrap();
+        let messages = serde_json::from_value(serde_json::json!([
+            {"role":"system", "content":"instruction"},
+            {"role":"user", "content":"question"},
+            {"role":"assistant", "content":"", "tool_calls":[{"id":"id", "name":"lookup", "arguments":{"q":"query"}}]},
+            {"role":"tool", "tool_call_id":"id", "content":"result"}
+        ])).unwrap();
+        let (staged, error) = stage_with(messages, Ok(store));
+        assert!(matches!(
+            error,
+            Some(ChatError::Database {
+                operation: "append temporary transcript fragment",
+                ..
+            })
+        ));
+        let bodies: Vec<_> = staged.iter().map(|m| m.content().load().unwrap()).collect();
+        assert_eq!(bodies, ["instruction", "question", "", "result"]);
+        let Message::Assistant { tools, .. } = &staged[2] else {
+            panic!("expected assistant")
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&tools[0].arguments.load().unwrap()).unwrap(),
+            serde_json::json!({"q":"query"})
+        );
+    }
+
+    #[test]
+    fn an_incomplete_fragment_chain_never_returns_a_partial_body() {
+        let store = Fragments::open().unwrap();
+        let head = store.append(&Text::default(), "one").unwrap();
+        let tail = store.append(&head, "two").unwrap();
+        store
+            .0
+            .lock()
+            .unwrap()
+            .batch_execute("DELETE FROM fragments WHERE parent IS NULL")
+            .unwrap();
+        assert!(matches!(
+            tail.load(),
+            Err(ChatError::Invalid {
+                field: "temporary transcript",
+                reason: "incomplete fragment chain"
+            })
+        ));
+    }
+
+    #[test]
     fn snapshots_read_exact_branches_and_release_the_database_with_the_last_handle() {
         let db = Fragments::open().unwrap();
         let lifetime = Arc::downgrade(&db.0);

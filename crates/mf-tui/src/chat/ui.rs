@@ -4436,6 +4436,7 @@ mod tests {
                 .into(),
             })
             .unwrap();
+        view.preview.storage_error = Some("scratch full".into());
         view.event(
             ChatEvent::Finished {
                 invocation: invocation.clone(),
@@ -4452,6 +4453,7 @@ mod tests {
         let screen = render(&view, 100, 30);
         assert!(screen.contains("partial text"));
         assert!(screen.contains("Response unfinished"));
+        assert!(screen.contains("[Live preview unavailable: scratch full]"));
         assert!(!screen.contains(LOADING_FRAMES));
         view.event(
             ChatEvent::Finished {
@@ -4477,6 +4479,7 @@ mod tests {
         let screen = render(&view, 100, 30);
         assert!(screen.contains("complete unsaved reply"));
         assert!(screen.contains("not saved"));
+        assert!(!screen.contains("scratch full"));
         assert!(!screen.contains("partial text"));
         assert!(view.retained);
         controller.close().unwrap();
