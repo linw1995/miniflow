@@ -1,0 +1,329 @@
+{
+  "version": "2026-11-13",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../../crates/builtin-nodes/core"
+    },
+    "code": {
+      "package": "mfn-code",
+      "path": "../../crates/builtin-nodes/code"
+    },
+    "coding": {
+      "package": "mfn-coding",
+      "path": "../../crates/builtin-nodes/coding"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "directory": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "id": "names",
+      "kind": "builtin.constant",
+      "config": {
+        "value": "for name in AGENTS.override.md AGENTS.md AGENTS.MD CLAUDE.md CLAUDE.MD; do\n  if [ -e \"$name\" ] || [ -L \"$name\" ]; then printf '%s' \"$name\"; break; fi\ndone"
+      }
+    },
+    {
+      "id": "choose",
+      "kind": "builtin.coding.bash",
+      "config": {
+        "workspace_root": {
+          "$ref": "params.directory"
+        },
+        "shell": {
+          "path": "/bin/sh"
+        }
+      },
+      "inputs": {
+        "command": {
+          "from": {
+            "node": "names",
+            "port": "value"
+          }
+        }
+      }
+    },
+    {
+      "id": "checked",
+      "kind": "builtin.assert",
+      "config": {
+        "condition": {
+          "source": {
+            "output": "choose.exit_code",
+            "path": ""
+          },
+          "operator": "eq",
+          "value": 0
+        },
+        "message": "Could not select a project instruction file"
+      }
+    },
+    {
+      "id": "selected",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "found",
+            "condition": {
+              "source": {
+                "output": "choose.stdout",
+                "path": ""
+              },
+              "operator": "ne",
+              "value": ""
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "pages",
+      "kind": "loop.run",
+      "config": {
+        "inputs": {
+          "root": "string",
+          "path": "string"
+        },
+        "variables": [
+          {
+            "name": "line",
+            "type": "uint",
+            "initial": 1
+          },
+          {
+            "name": "text",
+            "type": "string",
+            "initial": ""
+          },
+          {
+            "name": "done",
+            "type": "bool",
+            "initial": false
+          }
+        ],
+        "until": {
+          "variable": "done",
+          "operator": "eq",
+          "value": true
+        },
+        "body": {
+          "nodes": [
+            {
+              "id": "read",
+              "kind": "builtin.coding.read",
+              "config": {
+                "workspace_root": {
+                  "$ref": "%loop.root"
+                }
+              },
+              "inputs": {
+                "path": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "path"
+                  }
+                },
+                "start_line": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "line"
+                  }
+                }
+              }
+            },
+            {
+              "id": "append",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "text": "string",
+                  "page": "string"
+                },
+                "code": {
+                  "text": "text + page"
+                }
+              },
+              "inputs": {
+                "text": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "text"
+                  }
+                },
+                "page": {
+                  "from": {
+                    "node": "read",
+                    "port": "content"
+                  }
+                }
+              }
+            },
+            {
+              "id": "cursor",
+              "kind": "builtin.if_else",
+              "config": {
+                "branches": [
+                  {
+                    "id": "end",
+                    "condition": {
+                      "source": {
+                        "output": "read.next_line",
+                        "path": ""
+                      },
+                      "operator": "not_exists"
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "edges": [
+            {
+              "from_node": "read",
+              "to_node": "cursor"
+            }
+          ],
+          "outputs": [
+            {
+              "name": "line",
+              "node": "read",
+              "port": "next_line",
+              "optional": true
+            },
+            {
+              "name": "text",
+              "node": "append",
+              "port": "text"
+            },
+            {
+              "name": "done",
+              "node": "cursor",
+              "port": "end",
+              "optional": true
+            }
+          ]
+        }
+      },
+      "inputs": {
+        "root": {
+          "from": {
+            "node": "params",
+            "port": "directory"
+          }
+        },
+        "path": {
+          "from": {
+            "node": "choose",
+            "port": "stdout"
+          }
+        }
+      }
+    },
+    {
+      "id": "prompt",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "dir": "string",
+          "name": "string",
+          "text": "string"
+        },
+        "code": {
+          "messages": "text.trim() == '' ? [] : [dyn({'role':'system','content':'Instructions from ' + json.encode(dir + (dir.endsWith('/') ? '' : '/') + name) + ':\\n' + text})]"
+        }
+      },
+      "inputs": {
+        "dir": {
+          "from": {
+            "node": "params",
+            "port": "directory"
+          }
+        },
+        "name": {
+          "from": {
+            "node": "choose",
+            "port": "stdout"
+          }
+        },
+        "text": {
+          "from": {
+            "node": "pages",
+            "port": "text"
+          }
+        }
+      }
+    },
+    {
+      "id": "none",
+      "kind": "builtin.constant",
+      "config": {
+        "type": {
+          "list": "object"
+        },
+        "value": []
+      }
+    },
+    {
+      "id": "result",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "none",
+              "port": "value"
+            },
+            {
+              "node": "prompt",
+              "port": "messages"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "params",
+      "to_node": "choose"
+    },
+    {
+      "from_node": "choose",
+      "to_node": "checked"
+    },
+    {
+      "from_node": "checked",
+      "to_node": "selected"
+    },
+    {
+      "from_node": "selected",
+      "from_output": "found",
+      "to_node": "pages"
+    },
+    {
+      "from_node": "selected",
+      "from_output": "else",
+      "to_node": "none"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "messages",
+      "node": "result",
+      "port": "value"
+    }
+  ]
+}

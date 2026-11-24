@@ -20,6 +20,9 @@
     }
   },
   "flows": {
+    "instructions": {
+      "path": "agent-coding/instructions.json"
+    },
     "request": {
       "path": "agent-coding/request.json"
     },
@@ -41,6 +44,18 @@
           "workspace_root": {
             "type": "string"
           },
+          "load_instructions": {
+            "type": "bool",
+            "default": true
+          },
+          "user_instruction_dir": {
+            "type": "string",
+            "default": ""
+          },
+          "instruction_boundary": {
+            "type": "string",
+            "default": ""
+          },
           "model": {
             "type": "string",
             "default": "your-model",
@@ -59,12 +74,51 @@
       }
     },
     {
+      "id": "instructions",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "instructions"
+      },
+      "inputs": {
+        "params.workspace_root": {
+          "from": {
+            "node": "params",
+            "port": "workspace_root"
+          }
+        },
+        "params.enabled": {
+          "from": {
+            "node": "params",
+            "port": "load_instructions"
+          }
+        },
+        "params.user_dir": {
+          "from": {
+            "node": "params",
+            "port": "user_instruction_dir"
+          }
+        },
+        "params.boundary": {
+          "from": {
+            "node": "params",
+            "port": "instruction_boundary"
+          }
+        }
+      }
+    },
+    {
       "id": "request",
       "kind": "workflow.call",
       "config": {
         "flow": "request"
       },
       "inputs": {
+        "params.instructions": {
+          "from": {
+            "node": "instructions",
+            "port": "messages"
+          }
+        },
         "params.workspace_root": {
           "from": {
             "node": "params",

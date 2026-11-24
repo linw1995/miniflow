@@ -191,7 +191,32 @@ It uses those stamps in the retained context to reconstruct boundaries, never gu
 unmarked earlier history, and never takes the binding from model text. Paths are sent to the
 provider in these notices and are stored in SQLite metadata. The system messages themselves are
 request-only. The Flow streams `answer` and `tool_call_delta` and returns only newly generated
-messages and usages in `append`, so the normal
-chat host stores tool exchanges and can reopen them. A failing test is a tool result, not an
+messages and usages in `append`, so the normal chat host stores tool exchanges and can reopen them.
+A failing test is a tool result, not an
 automatic retry. Cancelling or retrying a turn does not roll back files. Tests execute workspace
 code, including changes the Agent just made, with your OS permissions. Use an OS sandbox for untrusted code.
+
+### Project instructions
+
+Before calling the Agent, the [instructions Flow](../examples/agent-coding/instructions.json)
+loads rules from the bound workspace. To include a user policy, pass `--params.user_instruction_dir`
+with its absolute directory. To also inherit ancestor rules, pass `--params.instruction_boundary`
+with a trusted ancestor's canonical absolute path: discovery then walks from that directory down to
+the workspace, without visiting siblings. Outside that boundary only the user directory (if set)
+and the workspace apply. By default no parent or home directory is searched. Directories are
+applied once in user-to-project order. Use `--params.load_instructions false` to disable automatic
+loading. These are host inputs, not model tool arguments; no Pi installation or settings are used.
+
+In each directory the first existing name wins: `AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`,
+`CLAUDE.md`, `CLAUDE.MD`. The [directory Flow](../examples/agent-coding/instruction-directory.json)
+uses a fixed `/bin/sh` existence probe rather than enumerating a directory or consulting `.gitignore`.
+Only the selected basename goes to `builtin.coding.read`, which pages to completion under its normal
+file, line and link checks. A missing file contributes nothing; an empty override masks the local
+fallback. An unreadable or unsafe selected file fails the turn before any model or tool request,
+rather than quietly running without its instructions.
+
+Each submission reads fresh files and places one system message per nonblank file after the active
+workspace notice. Tool rounds reuse that request prefix. A workspace switch replaces the active
+rule set; old rule bodies are neither reread from history nor added to `append` or SQLite as
+instructions. The provider receives the paths and contents, so only enable sources you trust and
+intend to share. More specific subdirectory rules are not globally injected.

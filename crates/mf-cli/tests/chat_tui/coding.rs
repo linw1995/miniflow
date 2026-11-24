@@ -29,22 +29,18 @@ fn submit(
     binary: &Path,
     db: &Path,
     id: &str,
-    workspace: &Path,
+    mut inputs: Value,
     prompt: &str,
 ) -> ConversationResult {
+    inputs["params.model"] = "example-model".into();
+    inputs["params.api_key"] = "synthetic-key".into();
     let launch = ChatLaunch::prepare(
         binary,
         ChatOptions {
             database_path: db.to_owned(),
             profile: "coding".into(),
             run: RunOptions {
-                inputs: Some(
-                    json!({
-                        "params.model": "example-model", "params.api_key": "synthetic-key",
-                        "params.workspace_root": workspace,
-                    })
-                    .to_string(),
-                ),
+                inputs: Some(inputs.to_string()),
                 ..Default::default()
             },
         },
@@ -89,7 +85,13 @@ fn reopened_coding_session_marks_only_workspace_transitions_before_their_user_tu
     let mut expected = Vec::new();
     for (i, workspace) in sequence.into_iter().enumerate() {
         let prompt = format!("Inspect turn {i}.");
-        let result = submit(&binary, &path, &id, workspace, &prompt);
+        let result = submit(
+            &binary,
+            &path,
+            &id,
+            json!({"params.workspace_root": workspace}),
+            &prompt,
+        );
         assert_eq!(result.final_text(), Some("Done."));
         assert_eq!(result.display_messages().len(), 1);
         let requests = server.requests();
@@ -133,6 +135,133 @@ fn reopened_coding_session_marks_only_workspace_transitions_before_their_user_tu
         );
     }
     assert_eq!(server.requests().len(), sequence.len());
+}
+
+#[test]
+fn coding_rules_follow_the_active_workspace_without_entering_the_saved_transcript() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().join("projects");
+    let team = base.join("team");
+    let a = team.join("A");
+    let b = team.join("B");
+    let outside = root.path().join("projects-other/worktree");
+    let user = root.path().join("personal policy");
+    for dir in [&a, &b, &user, &outside, &a.join("nested")] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    let rule = |dir: &Path, name: &str, content: &str| {
+        let path = dir.join(name);
+        fs::write(&path, content).unwrap();
+        path
+    };
+    let personal = rule(&user, "AGENTS.md", "Personal rules");
+    let shared = rule(&base, "AGENTS.md", "Shared rules");
+    let group = rule(&team, "AGENTS.md", "Team rules");
+    let original =
+        "Use the project conventions.\n".repeat(2_100) + "Final rule on the last page.\n";
+    let local_a = rule(&a, "AGENTS.override.md", &original);
+    rule(&a, "AGENTS.md", "Shadowed project rules");
+    rule(&a, ".gitignore", "AGENTS*\n");
+    rule(
+        &a.join("nested"),
+        "AGENTS.md",
+        "Nested rules do not apply at the root",
+    );
+    rule(root.path(), "AGENTS.md", "Outside the boundary");
+    rule(
+        outside.parent().unwrap(),
+        "AGENTS.md",
+        "Not a path-component prefix",
+    );
+    let local_b = rule(&b, "CLAUDE.md", "Rules for B");
+    let server = Server::start(vec![Reply::stream_text("Done."); 7]);
+    let binary = compiled(root.path(), &server, CODING_AGENT);
+    let db = root.path().join("chat.sqlite");
+    let id = ChatDatabase::open(&db)
+        .unwrap()
+        .create_session("coding", None, Some("Manual title".into()))
+        .unwrap()
+        .id;
+    let policy = json!({"params.user_instruction_dir": user, "params.instruction_boundary": base});
+    let check = |workspace: &Path, mut inputs: Value, expected: &[&Path]| {
+        inputs["params.workspace_root"] = json!(workspace);
+        assert_eq!(
+            submit(&binary, &db, &id, inputs, "Check the current rules.").final_text(),
+            Some("Done.")
+        );
+        let requests = server.requests();
+        let messages = super::messages(requests.last().unwrap());
+        let active = messages
+            .iter()
+            .rposition(|m| {
+                m["role"] == "system" && m["content"].as_str().unwrap().starts_with("Workspace ")
+            })
+            .unwrap();
+        let prompts: Vec<_> = expected.iter().map(|p| json!({"role":"system", "content":format!("Instructions from {}:\n{}", json!(p), fs::read_to_string(p).unwrap())})).collect();
+        assert!(
+            messages[active + 1..].starts_with(&prompts),
+            "incorrect instruction order or content for {}",
+            workspace.display()
+        );
+        assert_eq!(messages[active + 1 + prompts.len()]["role"], "user");
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|m| m["role"] == "system"
+                    && m["content"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("Instructions from "))
+                .count(),
+            prompts.len()
+        );
+    };
+    check(&a, json!({}), &[&local_a]);
+    check(&a, policy.clone(), &[&personal, &shared, &group, &local_a]);
+    check(&b, policy.clone(), &[&personal, &shared, &group, &local_b]);
+    fs::write(&local_b, "Updated rules for B").unwrap();
+    check(
+        &b,
+        json!({"params.user_instruction_dir": b, "params.instruction_boundary": base}),
+        &[&shared, &group, &local_b],
+    );
+    rule(&b, "AGENTS.override.md", " \n");
+    check(&b, json!({}), &[]);
+    check(&outside, policy, &[&personal]);
+    let unsafe_rule = outside.join("AGENTS.md");
+    std::os::unix::fs::symlink(&local_a, &unsafe_rule).unwrap();
+    check(
+        &outside,
+        json!({"params.load_instructions":false, "params.user_instruction_dir":root.path().join("absent")}),
+        &[],
+    );
+    let error = std::process::Command::new(&binary).args(["--inputs", &json!({
+        "params.workspace_root": outside, "params.messages":[{"role":"user","content":"Reject unsafe rules"}],
+        "params.model":"example-model", "params.api_key":"synthetic-key"
+    }).to_string()]).output().unwrap();
+    assert!(!error.status.success());
+    let stderr = String::from_utf8_lossy(&error.stderr);
+    assert!(
+        stderr.contains("regular file with exactly one hard link"),
+        "{stderr}"
+    );
+    assert_eq!(server.requests().len(), 7);
+    let database = ChatDatabase::open(&db).unwrap();
+    let context = database.model_context(&id).unwrap().messages;
+    let audit: Vec<_> = database
+        .messages(&id, 32, None)
+        .unwrap()
+        .messages
+        .into_iter()
+        .map(|r| r.message.payload)
+        .collect();
+    assert_eq!(audit, context);
+    assert_eq!(audit.len(), 14);
+    assert!(
+        audit
+            .iter()
+            .all(|m| !matches!(m, mfn_llm::ChatMessage::System { .. }))
+    );
 }
 
 #[test]

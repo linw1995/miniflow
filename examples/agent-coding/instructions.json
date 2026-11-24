@@ -1,0 +1,307 @@
+{
+  "version": "2026-11-13",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../../crates/builtin-nodes/core"
+    },
+    "code": {
+      "package": "mfn-code",
+      "path": "../../crates/builtin-nodes/code"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "workspace_root": {
+            "type": "string"
+          },
+          "user_dir": {
+            "type": "string"
+          },
+          "boundary": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "bool"
+          }
+        }
+      }
+    },
+    {
+      "id": "ancestors",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "root": "string",
+          "base": "string"
+        },
+        "code": {
+          "dirs": "base == '' || !(base == '/' || root.startsWith(base + '/')) ? [] : cel.bind(parts, root.split('/'),\n  !parts.slice(1, size(parts)).all(p, p != '' && p != '.' && p != '..') ? [] :\n  (base == '/' ? ['/'] : []) + parts.transformList(i, p, i > 0 && i+1 < size(parts), parts.slice(0, i+1).join('/')).filter(d, base == '/' || d == base || d.startsWith(base + '/'))\n)"
+        }
+      },
+      "inputs": {
+        "root": {
+          "from": {
+            "node": "params",
+            "port": "workspace_root"
+          }
+        },
+        "base": {
+          "from": {
+            "node": "params",
+            "port": "boundary"
+          }
+        }
+      }
+    },
+    {
+      "id": "sources",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "user_dir": "string",
+          "root": "string",
+          "parents": {
+            "list": "string"
+          }
+        },
+        "code": {
+          "dirs": "(user_dir != '' && user_dir != root && !(user_dir in parents) ? [user_dir] : []) + parents + [root]"
+        }
+      },
+      "inputs": {
+        "user_dir": {
+          "from": {
+            "node": "params",
+            "port": "user_dir"
+          }
+        },
+        "root": {
+          "from": {
+            "node": "params",
+            "port": "workspace_root"
+          }
+        },
+        "parents": {
+          "from": {
+            "node": "ancestors",
+            "port": "dirs"
+          }
+        }
+      }
+    },
+    {
+      "id": "policy",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "load",
+            "condition": {
+              "source": {
+                "output": "params.enabled",
+                "path": ""
+              },
+              "operator": "eq",
+              "value": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "folders",
+      "kind": "loop.run",
+      "config": {
+        "inputs": {
+          "dirs": {
+            "list": "string"
+          }
+        },
+        "variables": [
+          {
+            "name": "messages",
+            "type": {
+              "list": "object"
+            },
+            "initial": []
+          },
+          {
+            "name": "done",
+            "type": "bool",
+            "initial": false
+          }
+        ],
+        "until": {
+          "variable": "done",
+          "operator": "eq",
+          "value": true
+        },
+        "body": {
+          "flows": {
+            "directory": {
+              "path": "instruction-directory.json"
+            }
+          },
+          "nodes": [
+            {
+              "id": "directory",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "dirs": {
+                    "list": "string"
+                  },
+                  "i": "int"
+                },
+                "code": {
+                  "path": "dirs[i]",
+                  "last": "i+1 == size(dirs)"
+                }
+              },
+              "inputs": {
+                "dirs": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "dirs"
+                  }
+                },
+                "i": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "index"
+                  }
+                }
+              }
+            },
+            {
+              "id": "load",
+              "kind": "workflow.call",
+              "config": {
+                "flow": "directory"
+              },
+              "inputs": {
+                "params.directory": {
+                  "from": {
+                    "node": "directory",
+                    "port": "path"
+                  }
+                }
+              }
+            },
+            {
+              "id": "collect",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "previous": {
+                    "list": "object"
+                  },
+                  "added": {
+                    "list": "object"
+                  }
+                },
+                "code": {
+                  "messages": "previous + added"
+                }
+              },
+              "inputs": {
+                "previous": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "messages"
+                  }
+                },
+                "added": {
+                  "from": {
+                    "node": "load",
+                    "port": "messages"
+                  }
+                }
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "name": "messages",
+              "node": "collect",
+              "port": "messages"
+            },
+            {
+              "name": "done",
+              "node": "directory",
+              "port": "last"
+            }
+          ]
+        }
+      },
+      "inputs": {
+        "dirs": {
+          "from": {
+            "node": "sources",
+            "port": "dirs"
+          }
+        }
+      }
+    },
+    {
+      "id": "none",
+      "kind": "builtin.constant",
+      "config": {
+        "type": {
+          "list": "object"
+        },
+        "value": []
+      }
+    },
+    {
+      "id": "result",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "none",
+              "port": "value"
+            },
+            {
+              "node": "folders",
+              "port": "messages"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "params",
+      "to_node": "policy"
+    },
+    {
+      "from_node": "policy",
+      "from_output": "load",
+      "to_node": "folders"
+    },
+    {
+      "from_node": "policy",
+      "from_output": "else",
+      "to_node": "none"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "messages",
+      "node": "result",
+      "port": "value"
+    }
+  ]
+}
