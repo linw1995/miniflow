@@ -8,8 +8,8 @@ use mf_chat::contract::{
     ChatContract, CompletionState, ConversationExit, ReconciledCompletion, TurnExit,
 };
 use mf_chat::{
-    ChatDatabase, Invocation, MessagePage, ModelInfo, ModelSelection, ModelSelectionCancellation,
-    Session, SessionPage, UncommittedCompletion,
+    ChatDatabase, Invocation, ModelInfo, ModelSelection, ModelSelectionCancellation, Session,
+    SessionPage, UncommittedCompletion, display,
 };
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
@@ -140,7 +140,7 @@ pub enum ChatEvent {
     Sessions(SessionPage),
     Loaded {
         session: Session,
-        page: MessagePage,
+        page: display::Page,
         context_tokens: Option<u64>,
     },
     Models(Result<Vec<ModelInfo>, String>),
@@ -322,7 +322,14 @@ impl ChatController {
             *self.deferred.lock().unwrap() = event;
             return Some(preview);
         }
-        if matches!(event, Some(ChatEvent::Finished { .. })) {
+        if let Some(ChatEvent::Finished { invocation, .. }) = &event {
+            let mut preview = self.preview.lock().unwrap();
+            if preview.invocation.as_ref() == Some(invocation) {
+                // The view already received the last preview, including any unfinished reply.
+                let revision = preview.revision;
+                *preview = LivePreview::default();
+                preview.revision = revision;
+            }
             *self.presented_invocation.lock().unwrap() = None;
             self.presented_compacting.store(false, Ordering::Release);
         }
@@ -357,7 +364,7 @@ impl ChatController {
         }
         self.preview_revision
             .store(preview.revision, Ordering::Release);
-        if preview.segments.is_empty() && !preview.omitted {
+        if preview.segments.is_empty() && preview.storage_error.is_none() {
             return None;
         }
         preview
@@ -498,8 +505,8 @@ impl Controller {
                 let session = self.database.session(&session_id)?;
                 let end = before.unwrap_or(session.next_sequence);
                 let after = (end > PAGE_SIZE as i64).then_some(end - PAGE_SIZE as i64 - 1);
-                let mut page = self.database.messages(&session_id, PAGE_SIZE, after)?;
-                page.messages.retain(|record| record.message.sequence < end);
+                let mut page = self.database.display_page(&session_id, PAGE_SIZE, after)?;
+                page.messages.retain(|record| record.sequence < end);
                 let context_tokens = self.database.context_tokens(&session.id)?;
                 self.emit(ChatEvent::Loaded {
                     session,
@@ -645,7 +652,7 @@ impl Controller {
                         .expect("cancellation was recorded")
                         .into());
                 }
-                // Consume and compact independently of terminal refresh or inspection.
+                // Capture independently of terminal refresh or inspection.
                 preview.lock().unwrap().apply(event)
             })
         });

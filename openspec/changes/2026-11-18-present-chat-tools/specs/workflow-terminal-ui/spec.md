@@ -17,13 +17,12 @@ Chat SHALL group arguments and results by call. Groups SHALL automatically expan
 - **THEN** the text receives incremental JSON syntax highlighting
 - **AND** incomplete or malformed fragments preserve their exact retained text without validation, reformatting, or Markdown interpretation
 
-#### Scenario: Omit historical argument deltas
+#### Scenario: Show a long argument as it arrives
 
-- **WHEN** a call's argument preview exceeds 8 KiB or the shared preview budget requires eviction
-- **THEN** the expanded group retains a recent UTF-8 tail and identifies omitted deltas and bytes
-- **AND** the expanded header identifies the total size and truncation
-- **AND** canonical arguments after settlement or SQLite reload have no display tail limit or invented delta counts
-- **AND** complete authoritative arguments remain persisted and available to dispatch, while delta history and omission markers are not persisted
+- **WHEN** a tool receives more than 8 KiB of argument fragments before its identity is known
+- **THEN** the expanded group displays the entire argument received so far, including its prefix
+- **AND** a later identity-only hint updates the group without replacing the argument text
+- **AND** settlement and SQLite reload use canonical arguments, not provisional fragments
 
 #### Scenario: Pair parallel calls and results
 
@@ -55,10 +54,18 @@ Chat SHALL group arguments and results by call. Groups SHALL automatically expan
 - **AND** if no preview can be matched by ID, the observation is shown in a tool call group without guessed arguments
 - **AND** model argument fragments alone do not establish an execution state
 
-#### Scenario: Bound live preview data
+#### Scenario: Continue previewing a long turn
 
-- **WHEN** argument previews exceed the count or byte budget
-- **THEN** retained preview data remains bounded and valid UTF-8, recent tool argument deltas replace older display history, omitted data is indicated, and consumption and final settlement continue
+- **WHEN** a turn streams many text and tool groups or large fragments while the terminal is not drawing
+- **THEN** all received fragments remain available under their respective groups in first-seen order
+- **AND** new groups continue to appear until the authoritative result replaces the preview
+- **AND** revisiting an evicted body reloads that snapshot's complete prefix without writing it to session history
+
+#### Scenario: Browse a large saved tool exchange
+
+- **WHEN** the terminal opens a page containing offscreen messages and collapsed calls
+- **THEN** its index contains call identities and turn facts without loading the bodies or arguments into the view
+- **AND** expanding or revisiting a group displays the corresponding SQLite content without changing focus or stored order
 
 ## MODIFIED Requirements
 

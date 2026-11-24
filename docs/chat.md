@@ -570,11 +570,13 @@ valid JSON on its own.
 history or model context. The calculator, context-replacement, and DeepSeek examples explicitly
 select `tool_call_delta`. A chatflow can select it without exposing `answer`.
 
-Terminal preview capture runs independently of drawing and inspection. It keeps at most 32 text/tool
-entries and 128 KiB of UTF-8 data, including correlation metadata, with an explicit truncation notice
-while continuing to drain and validate. Each tool call retains at most 8 KiB of recent argument text
-within that shared budget. Older argument deltas are omitted from the provisional view, not from
-tool dispatch or persistence. The notice counts both fully and partially omitted deltas.
+Terminal preview capture runs independently of drawing and inspection. For the active turn it
+retains every received text and tool-argument fragment, grouped by model call and tool index, with
+no entry, byte, or argument-tail limit. The terminal appends fragments to a private, temporary
+SQLite database. A preview snapshot holds references to exact prefixes, not copies of the turn's
+text. The last reference releases the temporary database, including after a failed turn is
+replaced or dismissed. Previews never supply tool arguments, audit messages, or model context.
+If the temporary store fails, the terminal reports a preview error without stopping the turn.
 The final result supplies the authoritative display transcript. If execution fails with no display
 replacement for a partial reply, the terminal keeps the preview visibly unfinished. It is not added
 to the database or model context. Older invocation events cannot alter the active turn.
@@ -645,14 +647,19 @@ its matching call on the current page, regardless of result arrival order. A pag
 still shows the result with its tool-call ID. Grouping changes only the display, not stored order.
 Tool arguments and results are inert literal data, never prompts, Markdown images, or commands.
 A tool call group automatically expands (`[-]`) when its argument preview first arrives. An open
-group displays retained argument fragments with incremental JSON syntax highlighting. A truncated
-header shows total argument size and the group identifies omitted deltas and bytes. The display
+group displays the argument text received so far with incremental JSON syntax highlighting. The display
 does not require the fragment to parse as JSON. Each group automatically collapses (`[+]`) when the
 whole turn finishes and its authoritative transcript replaces the preview; the model may already
 be executing the next model round while the traced tool status updates. Manually expanding a
 settled group displays its complete canonical arguments. Reopening history shows groups collapsed
-and reads complete saved arguments from `messages`; delta history, fold state, and omission markers
-are not persisted. Live assistant blocks use model-call IDs and the same spacing between messages
+and reads complete saved arguments from `messages`; provisional fragments and fold state are not
+written to the session database. A history page loads message and tool headers and turn usage,
+not message bodies. Scrolling or expanding a group loads its content from SQLite. The renderer
+keeps the documents intersecting the viewport and releases offscreen bodies, highlighting, and
+wrapped rows; returning to a group reloads it without truncation. It lays out one whole body at
+a time, so a single large visible message can still take substantial memory. Header and scroll
+metadata remain in memory. Save-only recovery retains its authoritative candidate independently.
+Live assistant blocks use model-call IDs and the same spacing between messages
 and tools as settled replies. The status on each tool header
 comes from existing snapshots and Flow or Iteration lifecycle records, matched by public call ID and
 exact runtime scope without Router-specific configuration. Native and compiled chats share the

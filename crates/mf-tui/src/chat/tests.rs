@@ -360,8 +360,11 @@ fn history_pages_start_at_the_tail_and_do_not_overlap_across_failed_turns() {
     let ChatEvent::Loaded { page, .. } = next(&controller) else {
         panic!("expected tail")
     };
-    assert_eq!(page.messages.last().unwrap().message.content(), "prompt-59");
-    let first = page.messages[0].message.sequence;
+    let display::Message::User(text) = &page.messages.last().unwrap().message else {
+        panic!("expected a prompt");
+    };
+    assert_eq!(text.load().unwrap(), "prompt-59");
+    let first = page.messages[0].sequence;
     assert!(first > 0);
     controller
         .send(ChatCommand::Load {
@@ -373,11 +376,7 @@ fn history_pages_start_at_the_tail_and_do_not_overlap_across_failed_turns() {
         panic!("expected earlier history")
     };
     assert!(!page.messages.is_empty());
-    assert!(
-        page.messages
-            .iter()
-            .all(|record| record.message.sequence < first)
-    );
+    assert!(page.messages.iter().all(|record| record.sequence < first));
     controller.close().unwrap();
 }
 
@@ -464,6 +463,9 @@ fn event_backpressure_does_not_prevent_cancellation_or_shutdown_before_launch() 
     }
 }
 
+const FLOOD_RECORDS: usize = 128;
+const FLOOD_CHUNK_BYTES: usize = 2048;
+
 fn live_launch(directory: &Path, mode: &str) -> (ChatLaunch, std::path::PathBuf) {
     let mut manifest = live_manifest();
     let gate = directory.join("release");
@@ -479,17 +481,14 @@ fn live_launch(directory: &Path, mode: &str) -> (ChatLaunch, std::path::PathBuf)
         prefix,
         {"append":{"status":"succeeded","messages":[{"role":"assistant","content":"canonical"}],"usages":[]}}
     ]);
-    // Exceed preview and queue limits without turning delivery checks into a throughput benchmark.
-    let flood_chunk_bytes = 2048;
-    let flood_records = (super::preview::MAX_PREVIEW_BYTES * 2).div_ceil(flood_chunk_bytes);
     let script = format!(
         r#"#!/usr/bin/env python3
 import json, os, sys, time
 records = json.loads({records:?})
 mode = {mode:?}
 if mode == 'flood':
-    records[0]['answer']['text'] = 'x' * {flood_chunk_bytes}
-    records = [records[0].copy() for _ in range({flood_records})] + records[-1:]
+    records[0]['answer']['text'] = 'x' * {FLOOD_CHUNK_BYTES}
+    records = [records[0].copy() for _ in range({FLOOD_RECORDS})] + records[-1:]
 if mode == 'empty':
     records = records[-1:]
 replacement = {{'replace_context': {{'status': 'succeeded', 'context_messages': [], 'display_messages': [{{'role': 'assistant', 'content': 'Other answer'}}], 'usages': []}}}}
@@ -536,7 +535,7 @@ fn executable_live_previews_arrive_before_authoritative_settlement() {
                     preview,
                 } => {
                     assert_eq!(preview.segments.len(), 1);
-                    assert_eq!(preview.segments[0].text, expected_fragment);
+                    assert_eq!(preview.segments[0].text.load().unwrap(), expected_fragment);
                     assert_eq!(
                         preview.segments[0].tool.is_some(),
                         mode == "gated_tool_call"
@@ -726,7 +725,7 @@ fn preview_selections_require_native_streaming_execution() {
 }
 
 #[test]
-fn paused_rendering_keeps_capture_draining_with_bounded_previews() {
+fn paused_rendering_delivers_the_full_preview_before_authoritative_settlement() {
     let root = tempfile::tempdir().unwrap();
     let (launch, _) = live_launch(root.path(), "flood");
     let controller = ChatController::open(launch).unwrap();
@@ -744,23 +743,23 @@ fn paused_rendering_keeps_capture_draining_with_bounded_previews() {
         );
         thread::sleep(Duration::from_millis(5));
     }
-    let preview = controller.preview.lock().unwrap().clone();
-    assert_eq!(preview.segments.len(), 1);
-    assert_eq!(
-        preview.segments[0].text.len() + preview.segments[0].model_call_id.len(),
-        super::preview::MAX_PREVIEW_BYTES
-    );
-    assert!(preview.omitted);
     let mut saw_preview = false;
     loop {
         match next(&controller) {
-            ChatEvent::Preview { .. } => saw_preview = true,
+            ChatEvent::Preview { preview, .. } => {
+                assert_eq!(preview.segments.len(), 1);
+                let text = preview.segments[0].text.load().unwrap();
+                assert_eq!(text.len(), FLOOD_RECORDS * FLOOD_CHUNK_BYTES);
+                assert!(text.bytes().all(|byte| byte == b'x'));
+                saw_preview = true;
+            }
             ChatEvent::Finished { resolution, .. } => {
                 assert!(saw_preview);
-                assert!(matches!(
-                    resolution.unwrap().state,
-                    CompletionState::Committed(_)
-                ));
+                let CompletionState::Committed(completion) = resolution.unwrap().state else {
+                    panic!("expected saved final");
+                };
+                assert_eq!(completion.result.final_text(), Some("canonical"));
+                assert!(controller.preview.lock().unwrap().segments.is_empty());
                 break;
             }
             _ => {}

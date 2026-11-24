@@ -64,15 +64,17 @@ fn supplied_title_workflow_runs_inside_the_application_lifecycle() {
             })
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
+        let mut last_preview = None;
         loop {
             assert!(Instant::now() < deadline, "conversation did not finish");
             match controller.try_event() {
                 Some(ChatEvent::Submitted { session, .. }) => session_id = Some(session.id),
-                Some(ChatEvent::Preview { preview, .. }) => {
-                    assert!(preview.segments.len() <= 32);
-                }
+                Some(ChatEvent::Preview { preview, .. }) => last_preview = Some(preview),
                 Some(ChatEvent::Observing(_)) | None => thread::sleep(Duration::from_millis(10)),
                 Some(ChatEvent::Finished { resolution, .. }) => {
+                    let preview = last_preview.expect("answer streamed before settlement");
+                    assert_eq!(preview.segments.len(), 1);
+                    assert_eq!(preview.segments[0].text.load().unwrap(), expected);
                     let resolution = resolution.unwrap();
                     assert!(
                         resolution.diagnostics.is_empty(),
@@ -321,7 +323,7 @@ fn compiled_context_replacement_keeps_tool_audit_and_save_only_retries_after_reo
                             segment.tool.as_ref().is_some_and(|tool| {
                                 tool.id.as_deref() == Some("first")
                                     && tool.name.as_deref() == Some("calculator")
-                            }) && segment.text.contains("\"operation\"")
+                            }) && segment.text.load().unwrap().contains("\"operation\"")
                         });
                     }
                     Some(ChatEvent::Finished { .. }) => panic!("settled before observation"),

@@ -788,6 +788,7 @@ usage-dashboard, and system-instruction forms.
 
 - **WHEN** the user requests an earlier message page
 - **THEN** the terminal loads bounded nonoverlapping history and can return to the latest page
+- **AND** it reads saved message bodies and tool arguments on demand, evicts offscreen body documents, and can reload them without losing content or changing the audit transcript
 
 ### Requirement: Present distinct retry and cancellation actions
 
@@ -1017,8 +1018,9 @@ The TUI SHALL advance elapsed time while a local run is active. Once completion 
 ### Requirement: Display provisional streamed chat replies
 
 The chat terminal SHALL consume application previews independently of rendering and settlement.
-Presentation state SHALL be bounded and grouped by actual model-call identity. A preview MUST NOT
-imply conversation success, and unrelated internal model output MUST NOT become answer text.
+It SHALL retain all received text and tool argument fragments for the active turn, grouped by model
+call and tool index, without truncation. A preview MUST NOT imply conversation success, and
+unrelated internal model output MUST NOT become answer text.
 
 #### Scenario: Wait for title generation
 

@@ -270,6 +270,26 @@ fn list(input: ListSessionsInputs) -> Result<SessionPageOutputs, ChatError> {
     })
 }
 
+pub fn page_usages(
+    connection: &mut SqliteConnection,
+    session_id: &str,
+    turn_ids: Vec<&str>,
+) -> Result<std::collections::BTreeMap<String, Vec<crate::CallUsage>>, ChatError> {
+    let calls = model_calls::table
+        .filter(model_calls::session_id.eq(session_id))
+        .filter(model_calls::turn_id.eq_any(turn_ids))
+        .filter(model_calls::purpose.eq("conversation"))
+        .select((model_calls::turn_id, model_calls::usages))
+        .load::<(Option<String>, storage::StoredJson<Vec<crate::CallUsage>>)>(connection)
+        .context(DatabaseSnafu {
+            operation: "load message call facts",
+        })?;
+    Ok(calls
+        .into_iter()
+        .filter_map(|(id, calls)| Some((id?, Option::from(calls)?)))
+        .collect())
+}
+
 fn message_page(input: MessagesInputs) -> Result<MessagePageOutputs, ChatError> {
     validate_page(input.limit)?;
     let mut connection = storage::connect(Path::new(&input.database_path))?;
@@ -293,26 +313,19 @@ fn message_page(input: MessagesInputs) -> Result<MessagePageOutputs, ChatError> 
         } else {
             None
         };
-        let turn_ids: Vec<_> = rows.iter().map(|(message, _)| &message.turn_id).collect();
-        let calls = model_calls::table
-            .filter(model_calls::session_id.eq(&input.session_id))
-            .filter(model_calls::turn_id.eq_any(turn_ids))
-            .filter(model_calls::purpose.eq("conversation"))
-            .select((model_calls::turn_id, model_calls::usages))
-            .load::<(Option<String>, storage::StoredJson<Vec<crate::CallUsage>>)>(connection)
-            .context(DatabaseSnafu {
-                operation: "load message call facts",
-            })?;
-        let mut usages: std::collections::BTreeMap<_, _> = calls
-            .into_iter()
-            .filter_map(|(turn_id, usages)| turn_id.map(|id| (id, Option::from(usages))))
-            .collect();
+        let mut usages = page_usages(
+            connection,
+            &input.session_id,
+            rows.iter()
+                .map(|(message, _)| message.turn_id.as_str())
+                .collect(),
+        )?;
         Ok(MessagePageOutputs {
             page: MessagePage {
                 messages: rows
                     .into_iter()
                     .map(|(message, turn_state)| MessageRecord {
-                        usages: usages.remove(&message.turn_id).flatten(),
+                        usages: usages.remove(&message.turn_id),
                         message,
                         turn_state,
                     })

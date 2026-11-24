@@ -47,9 +47,11 @@ current history page, results appear under their matching calls within the same 
 batch. A result-only page keeps the ID and the same fold key. Grouping does not reorder stored
 messages. Raw argument previews and canonical arguments share incremental JSON syntax highlighting.
 Incomplete or malformed fragments keep their exact text without waiting for JSON validation.
-Each call retains up to 8 KiB of recent argument text within the existing shared preview budget;
-older deltas are omitted with delta and byte counts. The tail limit applies only to live previews.
-Manually expanded canonical arguments and SQLite history display their complete saved values.
-Neither provisional delta history, fold state, nor omission markers are persisted. Full arguments
+The terminal retains all received text and tool arguments for the active turn, with no entry or
+byte cap. A private temporary SQLite store backs immutable streamed prefixes; it is not part of
+the session database. Committed replies and history pages index headers and read canonical fields
+on demand. The renderer keeps scroll anchors and measured heights but evicts offscreen body
+documents and their wrapping/highlighting caches. Returning to a body loads its full text again.
+Neither provisional fragments nor fold state enter durable history. Full arguments
 remain in the authoritative messages and in actual dispatch. Arguments and results remain literal;
 assistant text keeps Markdown rendering.
