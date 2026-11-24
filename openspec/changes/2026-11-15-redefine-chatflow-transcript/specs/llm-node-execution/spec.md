@@ -53,9 +53,9 @@ parallel storage DTO.
 
 The Agent SHALL preserve supplied messages and return only generated assistant/tool additions.
 Its append policy MUST NOT restrict enclosing Flow context replacement. Each assistant, including
-the final answer, SHALL appear once; parallel tool results SHALL follow call order. Captured failures
-and iteration limits SHALL return available messages/usages with failed status, not an invented
-assistant or echoed input prefix.
+the final answer, SHALL appear once; parallel tool results SHALL follow call order. The Agent SHALL
+continue while the model requests tools, without an Agent-specific round limit. Captured failures
+SHALL return available messages/usages with failed status, not an invented assistant or echoed input prefix.
 
 #### Scenario: Return one tool round and a final answer
 
@@ -75,10 +75,10 @@ assistant or echoed input prefix.
 - **THEN** the Agent returns failed status with those rounds and every collected usage
 - **AND** it does not add an empty placeholder for the failed model response
 
-#### Scenario: Reach the Agent iteration limit
+#### Scenario: Continue a long tool exchange
 
-- **WHEN** the bounded loop ends without a completed assistant answer
-- **THEN** the Agent returns a failed result with its available transcript and accounting rather than claiming success
+- **WHEN** the model requests tools for nine consecutive rounds and then returns a final answer
+- **THEN** the Agent returns success with all nine exchanges, the final assistant, and usage for all ten calls
 
 ### Requirement: Preserve generic Agent composition boundaries
 

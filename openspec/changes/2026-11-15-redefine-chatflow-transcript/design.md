@@ -382,8 +382,8 @@ save-only recovery. Already committed success still wins over later conflicting 
 
 The generic built-in Agent consumes a complete request and returns only generated assistant/tool
 additions, including its final assistant. Tool catalog projection stays outside its Loop, and ordered
-tool results survive parallel dispatch. Captured failures and iteration limits return available
-rounds/usages without inventing an assistant or claiming success.
+tool results survive parallel dispatch. The Agent continues while the model requests tools. Captured
+model failures return available rounds/usages without inventing an assistant or claiming success.
 
 An ordinary chatflow exports an incremental result object as append without an unused compact branch.
 If the generic Agent exposes separate status/messages/usages ports, one ordinary object node can

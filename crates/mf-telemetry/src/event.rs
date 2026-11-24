@@ -391,8 +391,14 @@ impl Event {
                         *outcome == Outcome::Succeeded && summary.pass_count.get() > 0,
                         "Loop summary requires a successful node and positive pass count",
                     )?;
+                    let limit = match summary.reason {
+                        LoopStopReason::Maximum => usize::from(crate::MAX_LOOP_ITERATIONS),
+                        LoopStopReason::Condition | LoopStopReason::Exit => {
+                            crate::MAX_SCHEDULED_STEPS
+                        }
+                    };
                     require(
-                        summary.pass_count.get() <= i64::from(crate::MAX_LOOP_ITERATIONS),
+                        summary.pass_count.get() <= limit as i64,
                         "Loop pass count exceeds limit",
                     )?;
                 }
@@ -484,7 +490,7 @@ pub fn validate_path(path: &[LoopPathEntry]) -> Result<(), ContractError> {
         }
         require(
             !entry.node_id().trim().is_empty()
-                && entry.index().get() < i64::from(crate::MAX_LOOP_ITERATIONS),
+                && entry.index().get() < crate::MAX_SCHEDULED_STEPS as i64,
             "invalid Loop path entry",
         )?;
     }

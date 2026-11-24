@@ -1025,6 +1025,23 @@ fn invalid_body_update_retains_typed_sources_and_marks_the_pass_failed() {
 }
 
 #[test]
+fn condition_only_loop_has_no_implicit_maximum_but_still_shares_the_step_budget() {
+    let mut value = definition();
+    let config = &mut value["nodes"][1]["config"];
+    config.as_object_mut().unwrap().remove("max_iterations");
+    let target = mf_runtime::MAX_LOOP_ITERATIONS + 1;
+    config["until"]["value"] = json!(target);
+    assert_eq!(
+        run_in_memory(value.clone()).unwrap(),
+        json!({"count": target})
+    );
+
+    value["nodes"][1]["config"]["until"]["value"] = json!(mf_runtime::MAX_SCHEDULED_STEPS);
+    let error = run_in_memory(value).unwrap_err();
+    assert!(error.contains("scheduled-step budget"), "{error}");
+}
+
+#[test]
 fn stops_at_maximum_and_immediate_exit() {
     let mut value = definition();
     value["nodes"][1]["config"]["until"] = Value::Null;

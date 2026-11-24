@@ -755,8 +755,9 @@ fn later_model_failure_retains_completed_rounds_without_a_placeholder() {
 }
 
 #[test]
-fn native_agent_loop_stops_after_eight_tool_turns() {
-    let replies = (0..8)
+fn native_agent_continues_through_nine_tool_rounds_to_the_final_answer() {
+    const TOOL_ROUNDS: usize = 9;
+    let replies = (0..TOOL_ROUNDS)
         .map(|round| {
             tool_reply(
                 json!([call(
@@ -767,20 +768,13 @@ fn native_agent_loop_stops_after_eight_tool_turns() {
                 false,
             )
         })
+        .chain([Reply::text("Finished")])
         .collect();
     let server = Server::start(replies);
     let (output, recording) = memory(configured_agent(calculator_tools()), inputs(&server));
-    assert_eq!(output["status"], "failed");
-    assert!(
-        output["error"]
-            .as_str()
-            .unwrap()
-            .contains("8-iteration limit"),
-        "{output}"
-    );
-    assert_eq!(output["usages"].as_array().unwrap().len(), 8);
+    assert_success(&output, "Finished", TOOL_ROUNDS + 1);
     let generated = output["messages"].as_array().unwrap();
-    assert_eq!(generated.len(), 16);
+    assert_eq!(generated.len(), 2 * TOOL_ROUNDS + 1);
     for (round, exchange) in generated.as_chunks::<2>().0.iter().enumerate() {
         assert_eq!(exchange[0]["role"], "assistant");
         assert_eq!(exchange[0]["tool_calls"][0]["id"], format!("round-{round}"));
@@ -790,7 +784,7 @@ fn native_agent_loop_stops_after_eight_tool_turns() {
         );
     }
     let requests = server.requests();
-    assert_eq!(requests.len(), 8);
+    assert_eq!(requests.len(), TOOL_ROUNDS + 1);
     for (round, request) in requests.iter().enumerate() {
         assert_eq!(request.body["tools"], requests[0].body["tools"]);
         assert_eq!(

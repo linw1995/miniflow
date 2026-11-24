@@ -26,7 +26,7 @@ pub fn agent_turn_definition() -> Result<WorkflowDefinition, DefinitionParseErro
     WorkflowDefinition::from_json(include_str!(concat!(env!("OUT_DIR"), "/agent-turn.json")))
 }
 
-/// Run the bounded Agent with the fixed `params.tools` object map.
+/// Continue model requests with the fixed `params.tools` map while replies request tools.
 /// Adding or replacing tools never changes this definition, its ports, or its body.
 pub fn agent_definition() -> Result<WorkflowDefinition, DefinitionParseError> {
     WorkflowDefinition::from_json(include_str!(concat!(env!("OUT_DIR"), "/agent.json")))
@@ -65,6 +65,7 @@ mod tests {
             .iter()
             .find(|node| node.id.as_str() == "repeat")
             .unwrap();
+        assert!(repeat.config.get("max_iterations").is_none());
         let loop_inputs = repeat.config["inputs"].as_object().unwrap();
         assert_eq!(loop_inputs.len(), 7);
         assert_eq!(loop_inputs["prefix"], json!({"list":"object"}));
