@@ -144,6 +144,30 @@ fn loop_pass_wire_records_use_the_current_schema_and_reject_retired_formats() {
 }
 
 #[test]
+fn condition_only_loop_observations_are_bounded_by_scheduled_work() {
+    use mf_telemetry::event::{LoopStopReason, LoopSummary, validate_path};
+    let budget = mf_telemetry::MAX_SCHEDULED_STEPS as i64;
+    for (passes, accepted) in [(budget, true), (budget + 1, false)] {
+        let path = [LoopPathEntry::Loop {
+            loop_id: "repeat".into(),
+            index: Count::try_from(passes - 1).unwrap(),
+        }];
+        assert_eq!(validate_path(&path).is_ok(), accepted);
+        for reason in [LoopStopReason::Condition, LoopStopReason::Exit] {
+            let mut event = record("success").decode().unwrap().event;
+            let Event::NodeFinished { loop_summary, .. } = &mut event else {
+                unreachable!()
+            };
+            *loop_summary = Some(LoopSummary {
+                pass_count: Count::try_from(passes).unwrap(),
+                reason,
+            });
+            assert_eq!(event.validate().is_ok(), accepted);
+        }
+    }
+}
+
+#[test]
 fn descriptions_validate_cluster_metadata_and_version() {
     let mut value = json!({
         "version": "2026-10-23",

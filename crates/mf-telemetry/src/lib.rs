@@ -30,7 +30,10 @@ pub use event::FlowOrigin;
 /// Combined static nesting bound for ordinary calls and Loop scopes.
 pub const MAX_SCOPE_DEPTH: usize = 20;
 pub const MAX_LOOP_DEPTH: usize = 4;
+/// Largest explicitly configured Loop maximum, not a default pass limit.
 pub const MAX_LOOP_ITERATIONS: u16 = 1000;
+/// Shared per-run step budget, which also bounds observable Loop pass counts.
+pub const MAX_SCHEDULED_STEPS: usize = 10_000;
 
 #[derive(Debug, Snafu)]
 pub enum ContractError {

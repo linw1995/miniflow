@@ -431,7 +431,7 @@ fn typed_builtin_configs_accept_the_same_direct_body_field() {
         WorkflowDefinitionVersion::V2026_10_25
     );
     let loop_config: LoopDefinition = serde_json::from_value(nodes.remove(0).config).unwrap();
-    assert_eq!(loop_config.max_iterations, 3);
+    assert_eq!(loop_config.max_iterations, Some(3));
     assert!(loop_config.body.nodes.is_empty());
     let iteration: IterationConfig = serde_json::from_value(nodes.remove(0).config).unwrap();
     assert_eq!(iteration.body.outputs[0].name, "result");

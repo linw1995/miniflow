@@ -370,10 +370,11 @@ short local operations. See [configured Flow tools](workflows.md#configured-flow
 provider charges, and latency limitations.
 
 The Agent accumulates assistant call batches, ordered parallel tool results, and the terminal
-assistant without echoing the admitted request. Captured failures and iteration limits retain
-completed rounds and usages. `answer` remains an optional stream of assistant text, including tool
-preambles; it does not carry a live tool lifecycle protocol. Catalog projection runs once before the
-first model call. See [configured Flow tools](workflows.md#configured-flow-tools).
+assistant without echoing the admitted request. As long as the model requests tools, the Agent
+continues without a fixed round limit. Cancellation and the workflow step budget still apply.
+Captured model failures retain completed rounds and usages. `answer` remains an optional stream of
+assistant text, including tool preambles; it does not carry a live tool lifecycle protocol. Catalog
+projection runs once before the first model call. See [configured Flow tools](workflows.md#configured-flow-tools).
 
 Checked tool-operation failures, such as a DeepSeek Fetch HTTP 404, are returned to the model as tool
 results rather than interrupting the whole Agent. The failed exchange remains in the transcript;

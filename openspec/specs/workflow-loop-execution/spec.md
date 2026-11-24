@@ -2,19 +2,19 @@
 
 ## Purpose
 
-Execute bounded, stateful workflow loops over validated DAG bodies, with typed variables, deterministic termination, and consistent behavior in memory and compiled runners.
+Execute stateful workflow loops over validated DAG bodies, with typed variables, explicit termination criteria, and consistent behavior in memory and compiled runners.
 
 ## Requirements
 
-### Requirement: Declare bounded Loop containers
+### Requirement: Declare Loop termination criteria
 
-`mfn-core` SHALL register `workflow.loop`. The system SHALL accept Loop containers only in the `2026-09-29` workflow definition version. A Loop
-SHALL declare a nonempty typed variable set, a body DAG, and a maximum pass count from 1 through
-1000. These settings SHALL reside in ordinary node `config`; `config.body` SHALL be a complete Flow
+`mfn-core` SHALL register `loop.run`. Loop containers require the `2026-09-29` workflow definition version or later. A Loop
+SHALL declare a nonempty typed variable set, a body DAG, and at least one of `until` or `max_iterations`.
+An explicit maximum SHALL be from 1 through 1000. These settings SHALL reside in ordinary node `config`; `config.body` SHALL be a complete Flow
 definition with its own version and dependencies, not a partial body or a top-level `loop` field.
 Each variable SHALL be a required Loop input and required Loop output of the declared type.
 The body SHALL have a synthetic `%loop` source exposing current variable values and a zero-based
-`index`. A Loop container SHALL resolve a `workflow.loop` declaration from the selected node
+`index`. A Loop container SHALL resolve a `loop.run` declaration from the selected node
 packages; the compiler SHALL bind the engine-prepared body to that registered implementation.
 The node package SHALL own the sequential driver, state progression, termination conditions, and
 completion summary. Assignment
@@ -33,7 +33,7 @@ plugin registrations. Earlier definition versions SHALL retain their existing be
 
 #### Scenario: Reject a missing Loop declaration
 
-- **WHEN** the selected node bundle does not register `workflow.loop`
+- **WHEN** the selected node bundle does not register `loop.run`
 - **THEN** build validation fails before installation and identifies the missing kind
 
 ### Requirement: Validate every loop body as a local DAG
@@ -100,6 +100,11 @@ the workflow without publishing partial Loop outputs.
 
 - **WHEN** a Loop condition becomes true after its third complete pass
 - **THEN** the body runs exactly three times and downstream nodes receive the final variables
+
+#### Scenario: Stop on a condition without a maximum
+
+- **WHEN** a Loop declares only `until` and the condition first becomes true after 1001 complete passes within the workflow step budget
+- **THEN** it completes after 1001 passes and reports `condition`, without applying an implicit maximum
 
 #### Scenario: Stop at the maximum
 

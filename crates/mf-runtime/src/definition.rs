@@ -363,7 +363,7 @@ pub const LOOP_SOURCE_ID: &str = "%loop";
 pub const ROOT_SOURCE_ID: &str = "%root";
 pub const MAX_LOOP_ITERATIONS: u16 = mf_telemetry::MAX_LOOP_ITERATIONS;
 pub const MAX_LOOP_DEPTH: usize = mf_telemetry::MAX_LOOP_DEPTH;
-pub const MAX_SCHEDULED_STEPS: usize = 10_000;
+pub const MAX_SCHEDULED_STEPS: usize = mf_telemetry::MAX_SCHEDULED_STEPS;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -372,7 +372,8 @@ pub struct LoopDefinition {
     pub stream_outputs: BTreeMap<String, OutputReferenceDefinition>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub inputs: BTreeMap<String, crate::ValueType>,
-    pub max_iterations: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_iterations: Option<u16>,
     pub variables: Vec<LoopVariableDefinition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until: Option<LoopConditionDefinition>,

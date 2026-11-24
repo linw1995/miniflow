@@ -22,7 +22,8 @@ pub const KIND: &str = mf_runtime::LOOP_KIND;
 #[serde(deny_unknown_fields)]
 struct Config {
     body: PreparedSubgraph,
-    max_iterations: u16,
+    #[serde(default)]
+    max_iterations: Option<u16>,
     #[serde(default)]
     inputs: BTreeMap<String, ValueType>,
     variables: Vec<LoopVariableDefinition>,
@@ -43,6 +44,8 @@ fn plain(_config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
 pub enum LoopBuildError {
     #[snafu(display("Loop stream names must be nonblank and distinct from variables and inputs"))]
     InvalidStreamName,
+    #[snafu(display("Loop requires max_iterations or until"))]
+    MissingTermination,
     #[snafu(display("max_iterations must be in 1..=1000"))]
     InvalidMaximum,
     #[snafu(display("invalid Loop variables: {source}"))]
@@ -105,16 +108,20 @@ struct LoopTypes {
 
 /// Validate the owning node's options against the prepared stream boundary.
 fn validate_options<'a>(
-    max_iterations: u16,
+    max_iterations: Option<u16>,
     variables: &[LoopVariableDefinition],
     inputs: BTreeMap<String, ValueType>,
     until: Option<&LoopConditionDefinition>,
     stream_names: impl IntoIterator<Item = &'a str>,
 ) -> Result<LoopTypes, LoopBuildError> {
-    ensure!(
-        (1..=mf_runtime::MAX_LOOP_ITERATIONS).contains(&max_iterations),
-        InvalidMaximumSnafu
-    );
+    if let Some(maximum) = max_iterations {
+        ensure!(
+            (1..=mf_runtime::MAX_LOOP_ITERATIONS).contains(&maximum),
+            InvalidMaximumSnafu
+        );
+    } else {
+        ensure!(until.is_some(), MissingTerminationSnafu);
+    }
     let state = loop_variable_types(variables).context(VariablesSnafu)?;
     for name in inputs.keys() {
         ensure!(
@@ -406,7 +413,7 @@ mod tests {
             let node = LoopNode {
                 id: "repeat".into(),
                 scope_key: prepared.scope_key("repeat", "body"),
-                max_iterations: 1,
+                max_iterations: Some(1),
                 until: None,
                 types,
                 inputs: BTreeMap::new(),
@@ -639,7 +646,52 @@ mod tests {
     }
 
     #[test]
+    fn condition_only_loop_does_not_start_another_pass_after_cancellation() {
+        let mut config = config();
+        config.as_object_mut().unwrap().remove("max_iterations");
+        config["until"] = json!({"variable":"x", "operator":"eq", "value":1});
+        let prepared = PreparedSubgraph::new(body().nodes, Vec::new(), |state| {
+            assert_eq!(state.invocation_path()[0].index(), Count::ZERO);
+            state
+                .cancellation()
+                .cancel(mf_runtime::StreamError::InputFailure {
+                    message: "cancelled".into(),
+                });
+            Ok(Outputs::new())
+        });
+        let node = factory(
+            "repeat",
+            config,
+            BTreeMap::from([("body".into(), prepared)]),
+        )
+        .unwrap()
+        .execution
+        .into_task_node()
+        .unwrap();
+        let error = node
+            .execute(
+                Inputs::from([("x".into(), 0.into())]),
+                &mut ExecutionContext::default(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(error.source().unwrap().downcast_ref::<mf_runtime::StreamError>(),
+            Some(mf_runtime::StreamError::InputFailure { message }) if message == "cancelled")
+        );
+    }
+
+    #[test]
     fn loop_factory_enforces_maximum_variables_and_stream_names() {
+        let mut missing_termination = config();
+        missing_termination
+            .as_object_mut()
+            .unwrap()
+            .remove("max_iterations");
+        let error = build_error(missing_termination, body());
+        assert!(matches!(
+            business_error(&error),
+            LoopBuildError::MissingTermination
+        ));
         for maximum in [0, mf_runtime::MAX_LOOP_ITERATIONS + 1] {
             let mut config = config();
             config["max_iterations"] = json!(maximum);
@@ -814,7 +866,7 @@ fn structural_error(message: impl Into<String>) -> NodeExecutionError {
 struct LoopNode {
     id: String,
     scope_key: String,
-    max_iterations: u16,
+    max_iterations: Option<u16>,
     until: Option<LoopConditionDefinition>,
     types: BTreeMap<String, ValueType>,
     inputs: BTreeMap<String, ValueType>,
@@ -939,9 +991,14 @@ impl SubgraphNode for LoopNode {
             return Err(structural_error(format!("unexpected Loop input `{name}`")));
         }
         let mut stream = SubgraphStream::new(self.id.as_str(), ctx, sink);
+        let maximum = self.max_iterations.map(usize::from);
+        let cancellation = ctx.cancellation();
         let mut pass_count = 0;
-        let mut reason = LoopStopReason::Maximum;
-        for index in 0..usize::from(self.max_iterations) {
+        let reason = loop {
+            if let Some(error) = cancellation.failure() {
+                return Err(error.into());
+            }
+            let index = pass_count;
             let scope = ExecutionScope::new(
                 &self.scope_key,
                 self.body
@@ -997,19 +1054,20 @@ impl SubgraphNode for LoopNode {
                     index,
                 })?;
             variables = updated;
-            pass_count = index + 1;
+            pass_count += 1;
             if exited {
-                reason = LoopStopReason::Exit;
-                break;
+                break LoopStopReason::Exit;
             }
             variables.extend(updates);
             if let Some(condition) = &self.until
                 && condition_matches(condition, &variables)?
             {
-                reason = LoopStopReason::Condition;
-                break;
+                break LoopStopReason::Condition;
             }
-        }
+            if maximum == Some(pass_count) {
+                break LoopStopReason::Maximum;
+            }
+        };
         let mut outputs = Outputs::new();
         for name in self.types.keys() {
             let value = variables

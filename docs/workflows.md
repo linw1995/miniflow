@@ -548,7 +548,8 @@ dispatch remains terminal-only; native dynamic Calls and existing observed-item 
 unchanged.
 
 The Agent accepts complete `params.messages` as a read-only Loop prefix and calls `mfn-llm.tool-catalog`
-once outside its eight-pass native Loop. The Loop carries only the generated suffix. The
+once before the first request. The Loop carries only the generated suffix and continues while the
+model requests tools, without a fixed round limit. The
 [request Flow](../crates/builtin-nodes/llm/workflows/agent-request.json) forwards the prefix unchanged
 when the suffix is empty, avoiding CEL conversion of the request history on the first model request.
 After a completed tool round, it joins the prefix and the generated messages with CEL, while the
@@ -557,8 +558,9 @@ and `mfn-llm.tool-uses` for tool-call batches. The latter uses native parallel I
 tool results. Generated assistant call batches precede their tool results, and the terminal assistant
 is included in the exported `messages` additions. Request history is not echoed.
 Completion also returns `status`, final `text`, `usages`, and `error`, while `answer` streams assistant
-text, including tool-call preambles. Captured provider failures and exhaustion retain completed rounds
-and their usages with failed status; an unresolved batch is permitted only at the end of a failed prefix.
+text, including tool-call preambles. Captured provider failures retain completed rounds and their
+usages with failed status; an unresolved batch is permitted only at the end of a failed prefix.
+Cancellation and the [workflow step budget](#structured-loop) still apply.
 The same Agent handles empty, single-tool, and multi-tool collections. For no tools, supply empty
 `tools` and `tool_properties` objects with `builtin.object` and `fields: {}`; there is no separate
 empty-Agent definition.
@@ -803,7 +805,7 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 | `mfn-core` | [`builtin.assert`](#assertions) | Required structured `condition` and static failure `message` | None; reads explicit upstream outputs from context | None; false fails execution |
 | `mfn-core` | `builtin.iteration` | Body graph, mode, and item error policy | Required `items`: array or object | `results`: collected array |
 | `mfn-core` | [`builtin.batch`](#batch-collection) | Positive `max_items` and `max_wait_ms`; streaming mode | Required `item`: `T` | `items`: whole ordered `List(T)` batches |
-| `mfn-core` | [`loop.run`](#structured-loop) | `config`: required `max_iterations`, `variables`, and full Flow `body`; optional `until` | One required initial-value input per variable | One required final-value output per variable |
+| `mfn-core` | [`loop.run`](#structured-loop) | `variables`, full Flow `body`, and at least one of `until` or `max_iterations` | One initial-value input per variable (required without `initial`) | One required final-value output per variable |
 | `mfn-code` | `builtin.code` | Required `language`, `inputs`, and `code` | Required ports named and typed by `inputs` | Required ports named by `code`, with inferred types |
 | `mfn-deepseek` | [`builtin.deepseek.search`](#deepseek-web-search-and-fetch) | Endpoint, credential reference, and deadline | Required `query`; optional search controls | `results`: complete structured search results |
 | `mfn-deepseek` | [`builtin.deepseek.fetch`](#deepseek-web-search-and-fetch) | Endpoint, credential reference, and deadline | Required `url` | `title` and Markdown `content` |
@@ -1576,8 +1578,8 @@ The compiler replaces the Loop declaration with an engine-prepared executor. `wo
 register. The outer graph and every Loop body remain acyclic. The engine repeats a body's fixed
 execution order instead of adding a graph back edge.
 
-A Loop node's `config` has required `max_iterations`, a nonempty `variables` list, optional read-only
-`inputs`, an optional `until` condition, and a `body` using the same Flow definition grammar. Its
+A Loop node's `config` requires a nonempty `variables` list, a `body` using the same Flow definition
+grammar, and at least one of `until` or `max_iterations`. Read-only `inputs` are optional. The body's
 `version` may inherit the root, and empty `dependencies` may be omitted. The old top-level `loop`
 field is not supported. Each variable creates a Loop input and a required Loop output for its final
 value; the input is optional when the variable declares an `initial` literal. Loop returns its
@@ -1682,7 +1684,8 @@ the entire Loop, including all its output ports, without running a pass. Body fa
 exhaustion fails the workflow without publishing partial Loop outputs; completed plugin side effects
 are not rolled back.
 
-`max_iterations` must be between 1 and 1000. Loops can nest four levels deep. A workflow run is
+Without `max_iterations`, the Loop has no pass limit of its own. An explicit `max_iterations` must
+be between 1 and 1000. Loops can nest four levels deep. A workflow run is
 limited to 10,000 scheduled steps across all scopes, including skipped and structural steps.
 Exceeding that budget fails before the over-budget step runs. Loop errors identify the scope and
 pass index when execution has begun. This feature follows Dify's
