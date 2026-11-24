@@ -1,4 +1,4 @@
-//! Reloadable transcript bodies. Temporary data is never part of the session database.
+//! Reloadable transcript bodies for saved messages, durable drafts, and unsaved results.
 
 use super::Reader;
 use crate::{ChatError, error::*};
@@ -37,6 +37,11 @@ enum Source {
         id: i64,
         bytes: usize,
     },
+    Draft {
+        reader: Reader,
+        id: i64,
+        bytes: i64,
+    },
     Inline(String),
 }
 
@@ -55,6 +60,18 @@ impl Text {
         })))
     }
 
+    pub(super) fn draft(reader: &Reader, id: i64, bytes: i64) -> Self {
+        if bytes == 0 {
+            Self::default()
+        } else {
+            Self(Some(Arc::new(Source::Draft {
+                reader: reader.clone(),
+                id,
+                bytes,
+            })))
+        }
+    }
+
     pub(super) fn inline(text: String) -> Self {
         if text.is_empty() {
             Self::default()
@@ -71,6 +88,9 @@ impl Text {
         match self.0.as_deref() {
             None => Ok(String::new()),
             Some(Source::Inline(text)) => Ok(text.clone()),
+            Some(Source::Draft { reader, id, bytes }) => {
+                read_draft(&mut reader.0.lock().unwrap(), *id, *bytes)
+            }
             Some(Source::Fragment { store, id, bytes }) => store.read(*id, *bytes),
             Some(Source::Message {
                 reader,
@@ -106,6 +126,39 @@ impl Text {
             }
         }
     }
+}
+
+pub(super) fn read_draft(
+    conn: &mut SqliteConnection,
+    id: i64,
+    bytes: i64,
+) -> Result<String, ChatError> {
+    let rows = diesel::sql_query(
+        "SELECT value FROM preview_chunks WHERE segment_id = ? AND end_byte <= ? ORDER BY end_byte",
+    )
+    .bind::<sql_types::BigInt, _>(id)
+    .bind::<sql_types::BigInt, _>(bytes)
+    .load_iter::<StringRow, diesel::connection::DefaultLoadingMode>(conn)
+    .context(DatabaseSnafu {
+        operation: "read turn preview",
+    })?;
+    let mut text = String::new();
+    for row in rows {
+        text.push_str(
+            &row.context(DatabaseSnafu {
+                operation: "read turn preview fragment",
+            })?
+            .value,
+        );
+    }
+    ensure!(
+        text.len() as i64 == bytes,
+        InvalidSnafu {
+            field: "turn preview",
+            reason: "incomplete prefix"
+        }
+    );
+    Ok(text)
 }
 
 /// A private, file-backed SQLite database. SQLite deletes it on close; the last

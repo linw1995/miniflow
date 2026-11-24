@@ -1348,11 +1348,19 @@ pub(super) fn run_observed_conversation(
         .prepare(),
     )?;
     let finish = capture.clone();
+    let seal_drafts = preview
+        .as_ref()
+        .and_then(|consumer| consumer.seal_drafts.clone());
     bind_call(
         &mut registry,
         &plan,
         "finish",
-        host_task("finish", move |inputs| finish.finish(inputs)),
+        host_task("finish", move |inputs| {
+            if let Some(seal) = &seal_drafts {
+                seal();
+            }
+            finish.finish(inputs)
+        }),
     )?;
     let flow = mf_compiler::instantiate_stream(&plan, &registry)?;
     let arguments = WorkflowArguments(

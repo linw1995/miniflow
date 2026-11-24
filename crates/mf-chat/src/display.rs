@@ -1,4 +1,8 @@
-//! Read-only presentation indexes. Audit and model-context APIs still return full messages.
+//! Reloadable display indexes; drafts are separate from audit and model-context messages.
+
+mod drafts;
+pub(crate) use drafts::settle as settle_drafts;
+pub use drafts::{DraftWriter, PreviewCoverage, PreviewSegment, ToolCallPreview};
 
 #[cfg(test)]
 mod tests;
@@ -58,6 +62,7 @@ pub struct Record {
     pub sequence: i64,
     pub message: Message,
     pub turn_state: String,
+    pub unfinished: Vec<Arc<PreviewSegment>>,
     pub usages: Option<Vec<CallUsage>>,
 }
 
@@ -183,6 +188,7 @@ impl Header {
         Ok(Record {
             id,
             sequence: self.sequence,
+            unfinished: Vec::new(),
             usages: None,
             turn_id: self.turn_id,
             turn_state: self.state,
@@ -216,14 +222,24 @@ impl ChatDatabase {
                 id,
                 headers.iter().map(|h| h.turn_id.as_str()).collect(),
             )?;
-            let messages = headers
+            let mut messages = headers
                 .into_iter()
                 .map(|h| {
                     let mut record = h.into_record(&reader)?;
                     record.usages = usages.remove(&record.turn_id);
                     Ok(record)
                 })
-                .collect::<Result<_, ChatError>>()?;
+                .collect::<Result<Vec<_>, ChatError>>()?;
+            for records in messages.chunk_by_mut(|a, b| a.turn_id == b.turn_id) {
+                let tail = records.last_mut().expect("nonempty turn group");
+                if matches!(
+                    tail.turn_state.as_str(),
+                    "interrupted" | "failed" | "cancelled"
+                ) {
+                    tail.unfinished =
+                        drafts::at_page_tail(conn, &reader, &tail.turn_id, tail.sequence)?;
+                }
+            }
             Ok(Page { messages })
         })
     }

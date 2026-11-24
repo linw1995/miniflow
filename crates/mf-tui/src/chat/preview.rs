@@ -1,112 +1,124 @@
 use mf_chat::{
-    Invocation, PreviewDelta, PreviewEvent,
-    display::{Fragments, Text},
+    ChatDatabase, Invocation,
+    display::{DraftWriter, PreviewSegment},
 };
-use std::sync::Arc;
-
-#[derive(Clone, Debug)]
-pub struct PreviewSegment {
-    pub model_call_id: String,
-    pub text: Text,
-    pub tool: Option<ToolCallPreview>,
-}
-
-#[derive(Clone, Debug)]
-pub struct ToolCallPreview {
-    pub index: u64,
-    pub id: Option<String>,
-    pub name: Option<String>,
-}
+use std::{collections::VecDeque, sync::Arc};
 
 #[derive(Clone, Debug, Default)]
 pub struct LivePreview {
     pub invocation: Option<Invocation>,
     pub segments: Vec<Arc<PreviewSegment>>,
     pub storage_error: Option<String>,
-    fragments: Option<Fragments>,
     pub incomplete: bool,
     pub revision: u64,
 }
 
-impl LivePreview {
-    pub fn begin(&mut self, invocation: Invocation) {
+// Only the runner owns a writer. Published frames and body handles are read-only.
+#[derive(Default)]
+pub(super) struct Capture {
+    pub frame: LivePreview,
+    writer: Option<DraftWriter>,
+    // The application Flow delivers receipts in emission order. Keep only a handle
+    // per in-flight record, not another copy of its payload.
+    pending: VecDeque<PreviewSegment>,
+}
+
+impl std::ops::Deref for Capture {
+    type Target = LivePreview;
+    fn deref(&self) -> &Self::Target {
+        &self.frame
+    }
+}
+
+impl Capture {
+    pub fn begin(&mut self, db: &ChatDatabase, invocation: Invocation) {
+        let (writer, storage_error) = match DraftWriter::open(db, invocation.clone()) {
+            Ok(writer) => (Some(writer), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
         let revision = self.revision.saturating_add(1);
-        *self = Self {
+        self.writer = writer;
+        self.pending.clear();
+        self.frame = LivePreview {
             invocation: Some(invocation),
+            storage_error,
             revision,
             ..Default::default()
         };
     }
 
-    pub fn apply(&mut self, event: PreviewEvent) -> Result<(), mf_chat::ChatError> {
+    #[cfg(test)]
+    pub fn apply(&mut self, event: mf_chat::PreviewEvent) -> Result<(), mf_chat::ChatError> {
+        if self.invocation.as_ref() == Some(&event.invocation) {
+            self.stage(std::slice::from_ref(&event.delta));
+        }
+        self.deliver(event)
+    }
+
+    pub fn deliver(&mut self, event: mf_chat::PreviewEvent) -> Result<(), mf_chat::ChatError> {
         if self.invocation.as_ref() != Some(&event.invocation) {
             return Ok(());
         }
         event.validate()?;
-        if self.storage_error.is_some() {
+        let (model, index) = match &event.delta {
+            mf_chat::PreviewDelta::Text { delta } => (&delta.model_call_id, None),
+            mf_chat::PreviewDelta::ToolCall { delta } => (&delta.model_call_id, Some(delta.index)),
+        };
+        let Some(segment) = self.pending.pop_front() else {
+            return Ok(());
+        };
+        self.frame.revision = self.revision.saturating_add(1);
+        if &segment.model_call_id != model || segment.tool.as_ref().map(|tool| tool.index) != index
+        {
+            self.pending.clear();
+            self.frame.storage_error =
+                Some("application preview does not match the staged draft".into());
             return Ok(());
         }
-        self.revision = self.revision.saturating_add(1);
-        let (model_call_id, fragment, tool_index, tool_id, tool_name) = match event.delta {
-            PreviewDelta::Text { delta } => (delta.model_call_id, delta.text, None, None, None),
-            PreviewDelta::ToolCall { delta } => (
-                delta.model_call_id,
-                delta.arguments,
-                Some(delta.index),
-                delta.id,
-                delta.name,
-            ),
-        };
-        let id = tool_id.filter(|hint| !hint.trim().is_empty());
-        let name = tool_name.filter(|hint| !hint.trim().is_empty());
-        let previous = self.segments.iter_mut().rev().find(|segment| {
-            segment.model_call_id == model_call_id
-                && segment.tool.as_ref().map(|tool| tool.index) == tool_index
+        let previous = self.frame.segments.iter_mut().rev().find(|old| {
+            &old.model_call_id == model && old.tool.as_ref().map(|tool| tool.index) == index
         });
-        let mut text = previous
-            .as_ref()
-            .map_or_else(Text::default, |segment| segment.text.clone());
-        if !fragment.is_empty() {
-            let appended = match &self.fragments {
-                Some(store) => store.append(&text, &fragment),
-                None => Fragments::open()
-                    .and_then(|store| self.fragments.insert(store).append(&text, &fragment)),
-            };
-            match appended {
-                Ok(next) => text = next,
-                Err(error) => {
-                    // A terminal storage failure must not fail model delivery or settlement.
-                    self.storage_error = Some(error.to_string());
-                    return Ok(());
-                }
-            }
-        }
-        if let Some(segment) = previous {
-            let segment = Arc::make_mut(segment);
-            segment.text = text;
-            if let Some(tool) = &mut segment.tool {
-                if id.is_some() {
-                    tool.id = id;
-                }
-                if name.is_some() {
-                    tool.name = name;
-                }
-            }
+        if let Some(previous) = previous {
+            *previous = Arc::new(segment);
         } else {
-            self.segments.push(Arc::new(PreviewSegment {
-                model_call_id,
-                text,
-                tool: tool_index.map(|index| ToolCallPreview { index, id, name }),
-            }));
+            self.frame.segments.push(Arc::new(segment));
         }
         Ok(())
+    }
+
+    pub fn stage(&mut self, deltas: &[mf_chat::PreviewDelta]) {
+        if deltas.is_empty() || self.storage_error.is_some() {
+            return;
+        }
+        let Some(writer) = self.writer.as_mut() else {
+            return;
+        };
+        match writer.append(deltas) {
+            Ok(segments) => self.pending.extend(segments),
+            // Do not publish undurable content or fail the runner on a display error.
+            Err(error) => {
+                self.frame.storage_error = Some(error.to_string());
+                self.frame.revision = self.frame.revision.saturating_add(1);
+            }
+        }
+    }
+
+    pub(super) fn seal(&mut self) {
+        if let Some(writer) = self.writer.take()
+            && !(self.segments.is_empty() && self.pending.is_empty())
+            && let Err(error) = writer.seal()
+        {
+            self.frame.storage_error = Some(error.to_string());
+            self.frame.revision = self.revision.saturating_add(1);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::tests::{capture, preview_turn};
     use super::*;
-    use mf_chat::{TextDelta, ToolCallDelta};
+    use mf_chat::{PreviewDelta, PreviewEvent, TextDelta, ToolCallDelta};
 
     fn event(invocation: &Invocation, delta: impl Into<PreviewDelta>) -> PreviewEvent {
         PreviewEvent {
@@ -140,9 +152,8 @@ mod tests {
 
     #[test]
     fn previews_are_grouped_by_model_call_and_ignore_other_turns() {
-        let invocation = Invocation::new("session");
-        let mut preview = LivePreview::default();
-        preview.begin(invocation.clone());
+        let (_root, db, invocation) = preview_turn();
+        let mut preview = capture(&db, &invocation);
         for (model, fragment) in [("first", "one"), ("second", "two"), ("first", "-tail")] {
             preview.apply(text(&invocation, model, fragment)).unwrap();
         }
@@ -156,9 +167,8 @@ mod tests {
 
     #[test]
     fn interleaved_tool_arguments_keep_their_raw_text_and_model_part_identity() {
-        let invocation = Invocation::new("session");
-        let mut preview = LivePreview::default();
-        preview.begin(invocation.clone());
+        let (_root, db, invocation) = preview_turn();
+        let mut preview = capture(&db, &invocation);
         for event in [
             text(&invocation, "first", "Preamble"),
             event(
@@ -194,9 +204,8 @@ mod tests {
 
     #[test]
     fn long_turns_keep_every_segment_and_complete_utf8_payloads() {
-        let invocation = Invocation::new("session");
-        let mut preview = LivePreview::default();
-        preview.begin(invocation.clone());
+        let (_root, db, invocation) = preview_turn();
+        let mut preview = capture(&db, &invocation);
         let answer = "é".repeat(70 * 1024);
         let argument = "ü".repeat(5 * 1024);
         preview.apply(text(&invocation, "model", &answer)).unwrap();
@@ -227,13 +236,12 @@ mod tests {
     }
 
     #[test]
-    fn scratch_write_failure_is_visible_but_does_not_reject_delivery() {
-        let invocation = Invocation::new("session");
-        let mut preview = LivePreview::default();
-        preview.begin(invocation.clone());
+    fn a_rejected_draft_write_is_visible_but_does_not_reject_delivery() {
+        let (_root, db, invocation) = preview_turn();
+        let mut preview = capture(&db, &invocation);
         preview.apply(text(&invocation, "model", "prefix")).unwrap();
-        // A different scratch database cannot extend this immutable prefix.
-        preview.fragments = Some(Fragments::open().unwrap());
+        db.fail_turn(invocation.clone(), "cancelled", "stopped")
+            .unwrap();
         preview.apply(text(&invocation, "model", "more")).unwrap();
         assert!(preview.storage_error.is_some());
         let revision = preview.revision;
@@ -242,16 +250,47 @@ mod tests {
             .unwrap();
         assert_eq!(preview.revision, revision);
         assert_eq!(preview.segments[0].text.load().unwrap(), "prefix");
-        preview.begin(Invocation::new("another session"));
+        preview.begin(&db, Invocation::new("another session"));
         assert!(preview.storage_error.is_none());
         assert!(preview.segments.is_empty());
     }
 
     #[test]
+    fn only_matching_application_receipts_publish_staged_handles_even_after_settlement() {
+        let (_root, db, invocation) = preview_turn();
+        let mut capture = capture(&db, &invocation);
+        let a = text(&invocation, "model", "A");
+        let b = call(&invocation, "model", 0, "B");
+        capture.stage(&[a.delta.clone(), b.delta.clone()]);
+        capture
+            .deliver(text(&Invocation::new("other"), "model", "A"))
+            .unwrap();
+        assert!(capture.frame.segments.is_empty());
+        capture.seal();
+        db.complete_turn(invocation, mf_chat::ConversationResult::assistant("final"))
+            .unwrap();
+        capture.deliver(a).unwrap();
+        assert_eq!(capture.frame.segments.len(), 1);
+        assert_eq!(capture.frame.segments[0].text.load().unwrap(), "A");
+        capture.deliver(b).unwrap();
+        assert_eq!(capture.frame.segments[1].text.load().unwrap(), "B");
+    }
+
+    #[test]
+    fn inconsistent_receipts_never_publish_another_parts_body() {
+        let (_root, db, invocation) = preview_turn();
+        let mut capture = capture(&db, &invocation);
+        capture.stage(&[call(&invocation, "first", 1, "other").delta]);
+        capture
+            .deliver(call(&invocation, "first", 2, "not staged"))
+            .unwrap();
+        assert!(capture.storage_error.is_some() && capture.segments.is_empty());
+    }
+
+    #[test]
     fn long_identities_and_late_hints_do_not_drop_or_merge_calls() {
-        let invocation = Invocation::new("session");
-        let mut preview = LivePreview::default();
-        preview.begin(invocation.clone());
+        let (_root, db, invocation) = preview_turn();
+        let mut preview = capture(&db, &invocation);
         let prefix = "m".repeat(256);
         let model = format!("{prefix}-first");
         let other = format!("{prefix}-second");

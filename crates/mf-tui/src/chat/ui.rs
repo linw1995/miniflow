@@ -7,7 +7,7 @@ use crossterm::{
     },
     execute,
 };
-use mf_chat::display::{Message as DisplayMessage, Text};
+use mf_chat::display::{Message as DisplayMessage, PreviewSegment, Text};
 use ratatui::{
     Terminal, TerminalOptions, Viewport,
     backend::CrosstermBackend,
@@ -274,11 +274,10 @@ impl<'a> ToolGroup<'a> {
     }
 }
 
-fn unique_preview_ids(preview: &LivePreview) -> BTreeSet<&str> {
+fn unique_preview_ids(segments: &[Arc<PreviewSegment>]) -> BTreeSet<&str> {
     let mut unique = BTreeSet::new();
     let mut repeated = BTreeSet::new();
-    for id in preview
-        .segments
+    for id in segments
         .iter()
         .filter_map(|segment| segment.tool.as_ref()?.id.as_deref())
     {
@@ -303,13 +302,13 @@ struct LiveMessages<'a> {
 
 fn live_messages<'a>(
     turn: &str,
-    preview: &'a LivePreview,
+    segments: &'a [Arc<PreviewSegment>],
     executions: &'a BTreeMap<String, mf_chat::ToolExecution>,
 ) -> LiveMessages<'a> {
-    let unique = unique_preview_ids(preview);
+    let unique = unique_preview_ids(segments);
     let mut messages = Vec::new();
     let mut positions = BTreeMap::new();
-    for segment in &preview.segments {
+    for segment in segments {
         // Preserve first appearance even when segments from different calls are interleaved.
         let model_call_id = segment.model_call_id.as_str();
         let position = *positions.entry(model_call_id).or_insert_with(|| {
@@ -687,7 +686,6 @@ struct PresentedResult {
     messages: Vec<DisplayMessage>,
     usages: Vec<mf_chat::CallUsage>,
     status: Option<String>,
-    saved: bool,
 }
 
 impl PresentedResult {
@@ -988,21 +986,19 @@ impl ChatView {
                     // Keep presenting the in-flight turn until the page that carries it
                     // arrives, so previews and authoritative messages swap in one frame.
                     let settled = !self.running
-                        && self.active.as_ref().is_some_and(|(invocation, _)| {
-                            page.messages
-                                .iter()
-                                .any(|record| record.turn_id == invocation.turn_id)
+                        && !self.retained
+                        && self.latest_invocation.as_ref().is_some_and(|invocation| {
+                            page.messages.iter().any(|record| {
+                                record.turn_id == invocation.turn_id
+                                    && record.turn_state != "running"
+                            })
                         });
                     self.session = Some(session);
                     self.page = Some(page);
                     self.context_tokens = context_tokens;
                     if settled {
                         self.active = None;
-                    }
-                    if !self.running
-                        && self.active.is_none()
-                        && self.reply.as_ref().is_some_and(|reply| reply.saved)
-                    {
+                        self.preview = LivePreview::default();
                         self.reply = None;
                     }
                     self.scroll.set(0);
@@ -1341,38 +1337,10 @@ impl ChatView {
             self.preview = LivePreview::default();
         } else if !result.display_messages().is_empty() {
             // Keep the failed call's unfinished output alongside completed audit messages.
-            let failed: BTreeSet<_> = result
-                .usages
-                .iter()
-                .filter(|usage| usage.error.is_some())
-                .map(|usage| usage.call_id.as_str())
-                .collect();
-            let mut texts = BTreeSet::new();
-            let mut ids = BTreeSet::new();
-            for message in result.display_messages() {
-                if let mf_chat::ChatMessage::Assistant {
-                    content,
-                    tool_calls,
-                    ..
-                } = message
-                {
-                    texts.insert(content.as_str());
-                    ids.extend(tool_calls.iter().flatten().map(|call| call.id.as_str()));
-                }
-            }
-            self.preview.segments.retain(|segment| {
-                failed.contains(segment.model_call_id.as_str())
-                    && match &segment.tool {
-                        Some(tool) => tool.id.as_deref().is_none_or(|id| !ids.contains(id)),
-                        None => {
-                            texts.is_empty()
-                                || !segment
-                                    .text
-                                    .load()
-                                    .is_ok_and(|preview| texts.contains(preview.as_str()))
-                        }
-                    }
-            });
+            let coverage = display::PreviewCoverage::new(&result);
+            self.preview
+                .segments
+                .retain(|segment| !coverage.covers(segment));
             if self.preview.segments.is_empty() {
                 self.preview = LivePreview::default();
             }
@@ -1394,7 +1362,6 @@ impl ChatView {
             messages,
             usages: result.usages,
             status,
-            saved,
         });
     }
 
@@ -1403,7 +1370,7 @@ impl ChatView {
             return;
         };
         let turn = &invocation.turn_id;
-        let current_ids = unique_preview_ids(&preview);
+        let current_ids = unique_preview_ids(&preview.segments);
         self.expanded_tools
             .extend(
                 preview
@@ -1433,7 +1400,7 @@ impl ChatView {
             self.preview = preview;
             return;
         }
-        let previous_ids = unique_preview_ids(&self.preview);
+        let previous_ids = unique_preview_ids(&self.preview.segments);
         let mut remapped = BTreeMap::new();
         // Snapshots of a running turn append segments in first-seen order.
         for (previous, next) in self.preview.segments.iter().zip(&preview.segments) {
@@ -1503,6 +1470,15 @@ impl ChatView {
             for group in message_groups(records.iter().map(|record| &record.message)) {
                 keys.extend(group.tool_ids().map(|id| tool_key(turn, id)));
             }
+            let no_executions = BTreeMap::new();
+            let drafts = &records.last().unwrap().unfinished;
+            keys.extend(
+                live_messages(turn, drafts, &no_executions)
+                    .messages
+                    .into_iter()
+                    .flat_map(|message| message.tools)
+                    .map(|tool| tool.key),
+            );
         }
         let turn = self
             .latest_invocation
@@ -1522,7 +1498,7 @@ impl ChatView {
             let LiveMessages {
                 messages,
                 unmatched,
-            } = live_messages(turn, &self.preview, &executions);
+            } = live_messages(turn, &self.preview.segments, &executions);
             keys.extend(
                 messages
                     .into_iter()
@@ -1923,6 +1899,26 @@ impl ChatView {
                 );
             }
             let mut metadata = vec![];
+            let drafts = &records.last().unwrap().unfinished;
+            if !drafts.is_empty() {
+                for message in live_messages(turn, drafts, &no_executions).messages {
+                    let key = format!("turn:{turn}:unfinished:{}", message.model_call_id);
+                    group_gap(&mut transcript, &key);
+                    render_assistant(
+                        &mut transcript,
+                        &key,
+                        message.text,
+                        message.tools,
+                        None,
+                        &self.expanded_tools,
+                        self.focused_tool.as_deref(),
+                    );
+                }
+                metadata.push(Line::styled(
+                    "Response unfinished",
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
             let turn_usages = records.iter().find_map(|record| record.usages.as_deref());
             if let Some(usages) = turn_usages {
                 let calls = crate::performance::conversation_calls(usages);
@@ -2018,7 +2014,7 @@ impl ChatView {
             let LiveMessages {
                 messages,
                 unmatched,
-            } = live_messages(turn, &self.preview, executions);
+            } = live_messages(turn, &self.preview.segments, executions);
             let count = messages.len();
             if count == 0 && loading && !compacting {
                 transcript.plain(
@@ -2195,6 +2191,7 @@ impl ChatView {
 
 #[cfg(test)]
 mod tests {
+    use super::super::tests::{admitted, capture, preview_turn};
     use super::*;
     use crate::run::LocalRun;
     use ratatui::backend::TestBackend;
@@ -2309,9 +2306,9 @@ mod tests {
         let mut view = ChatView::new(launch.runner.description()).unwrap();
         view.show_execution = false;
         view.running = true;
-        let invocation = Invocation::new("session");
+        let (_dir, db, invocation) = preview_turn();
         view.latest_invocation = Some(invocation.clone());
-        view.preview.begin(invocation.clone());
+        let mut preview = capture(&db, &invocation);
         let text = |model: &str, text: &str| -> mf_chat::PreviewDelta {
             mf_chat::TextDelta {
                 text: text.into(),
@@ -2337,13 +2334,14 @@ mod tests {
             text("z", "Checking"),
             text("final", "Final answer"),
         ] {
-            view.preview
+            preview
                 .apply(mf_chat::PreviewEvent {
                     invocation: invocation.clone(),
                     delta,
                 })
                 .unwrap();
         }
+        view.preview = preview.frame;
         let layout = [
             "Assistant",
             "Checking",
@@ -2405,7 +2403,7 @@ mod tests {
     fn many_key_deltas_keep_their_full_text_and_scroll_anchor_after_late_identity() {
         let root = tempfile::tempdir().unwrap();
         let launch = super::super::tests::launch(root.path());
-        let invocation = Invocation::new("session");
+        let (_dir, db, invocation) = preview_turn();
         let delta = |arguments: String, id: Option<String>| mf_chat::PreviewEvent {
             invocation: invocation.clone(),
             delta: mf_chat::ToolCallDelta {
@@ -2417,8 +2415,7 @@ mod tests {
             }
             .into(),
         };
-        let mut anonymous = LivePreview::default();
-        anonymous.begin(invocation.clone());
+        let mut anonymous = capture(&db, &invocation);
         anonymous.apply(delta("{\n".into(), None)).unwrap();
         for index in 0..420 {
             anonymous
@@ -2434,8 +2431,8 @@ mod tests {
         let retained = anonymous.segments[0].text.load().unwrap();
         assert!(retained.starts_with("{\n  \"key_0000\""));
         assert!(retained.contains("key_0419") && retained.ends_with("  \"last\": true\n}"));
-        let mut identified = anonymous.clone();
-        identified
+        let first_frame = anonymous.frame.clone();
+        anonymous
             .apply(delta(String::new(), Some("known".into())))
             .unwrap();
         let turn = &invocation.turn_id;
@@ -2445,12 +2442,12 @@ mod tests {
         view.show_execution = false;
         view.running = true;
         view.latest_invocation = Some(invocation.clone());
-        view.preview = anonymous;
+        view.preview = first_frame;
         view.expanded_tools.insert(old.clone());
         render(&view, 100, 22);
         assert!(view.transcript.get_mut().focus(&format!("{old}:arguments")));
         view.scroll.set(1);
-        view.replace_preview(identified);
+        view.replace_preview(anonymous.frame.clone());
         let screen = render(&view, 100, 22);
         assert!(
             screen.lines().nth(2).unwrap().contains("key_0000"),
@@ -2459,9 +2456,10 @@ mod tests {
         assert_eq!(view.expanded_tools, BTreeSet::from([new.clone()]));
         view.focused_tool = Some(new.clone());
         view.toggle_tool();
-        let mut more = view.preview.clone();
-        more.apply(delta("\nstream-tail".into(), None)).unwrap();
-        view.replace_preview(more);
+        anonymous
+            .apply(delta("\nstream-tail".into(), None))
+            .unwrap();
+        view.replace_preview(anonymous.frame);
         assert!(!view.expanded_tools.contains(&new));
         assert!(!render(&view, 100, 22).contains("stream-tail"));
         view.toggle_tool();
@@ -2501,8 +2499,7 @@ mod tests {
             &controller,
         );
         let key = tool_key(&begun.invocation.turn_id, "long");
-        let mut preview = LivePreview::default();
-        preview.begin(begun.invocation.clone());
+        let mut preview = capture(&controller._database, &begun.invocation);
         for (index, arguments) in [
             "{\"query\":\"OLD_PREFIX",
             &"b".repeat(9000),
@@ -2528,7 +2525,7 @@ mod tests {
         view.event(
             ChatEvent::Preview {
                 invocation: begun.invocation.clone(),
-                preview,
+                preview: preview.frame,
             },
             &controller,
         );
@@ -2665,8 +2662,7 @@ mod tests {
                 },
                 &controller,
             );
-            let mut preview = LivePreview::default();
-            preview.begin(begun.invocation.clone());
+            let mut preview = capture(&controller._database, &begun.invocation);
             preview
                 .apply(mf_chat::PreviewEvent {
                     invocation: begun.invocation.clone(),
@@ -2706,7 +2702,7 @@ mod tests {
                 view.event(
                     ChatEvent::Preview {
                         invocation: begun.invocation.clone(),
-                        preview: preview.clone(),
+                        preview: preview.frame.clone(),
                     },
                     &controller,
                 );
@@ -3149,8 +3145,7 @@ mod tests {
             },
             &controller,
         );
-        let mut preview = LivePreview::default();
-        preview.begin(begun.invocation.clone());
+        let mut preview = capture(&controller._database, &begun.invocation);
         preview
             .apply(mf_chat::PreviewEvent {
                 invocation: begun.invocation.clone(),
@@ -3164,7 +3159,7 @@ mod tests {
         view.event(
             ChatEvent::Preview {
                 invocation: begun.invocation,
-                preview,
+                preview: preview.frame,
             },
             &controller,
         );
@@ -3484,10 +3479,9 @@ mod tests {
 
     #[test]
     fn parallel_previews_do_not_share_folds_or_status_on_conflicting_id_hints() {
-        let invocation = Invocation::new("session");
+        let (_dir, db, invocation) = preview_turn();
         let turn = &invocation.turn_id;
-        let mut preview = LivePreview::default();
-        preview.begin(invocation.clone());
+        let mut preview = capture(&db, &invocation);
         for (index, id) in [(0, "duplicate"), (1, "duplicate"), (2, "known")] {
             preview
                 .apply(mf_chat::PreviewEvent {
@@ -3519,7 +3513,7 @@ mod tests {
         let LiveMessages {
             messages,
             unmatched,
-        } = live_messages(turn, &preview, &executions);
+        } = live_messages(turn, &preview.segments, &executions);
         let [message] = messages.as_slice() else {
             panic!("expected one preview batch");
         };
@@ -3562,9 +3556,9 @@ mod tests {
         view.observation = Some(observation);
         view.show_execution = false;
         view.running = true;
-        let invocation = Invocation::new("session");
-        view.preview.begin(invocation.clone());
-        view.preview
+        let (_dir, db, invocation) = preview_turn();
+        let mut preview = capture(&db, &invocation);
+        preview
             .apply(mf_chat::PreviewEvent {
                 invocation,
                 delta: mf_chat::ToolCallDelta {
@@ -3577,6 +3571,7 @@ mod tests {
                 .into(),
             })
             .unwrap();
+        view.preview = preview.frame;
         let screen = render(&view, 100, 25);
         assert!(screen.contains("Tool call search [matched]") && !screen.contains("[Running]"));
 
@@ -4179,7 +4174,7 @@ mod tests {
             ._database
             .create_session("default", None, None)
             .unwrap();
-        let invocation = Invocation::new(&session.id);
+        let invocation = admitted(&controller._database, &session.id, "hello");
         view.pending = Some(None);
         assert!(render(&view, 100, 30).contains(LOADING_FRAMES));
         view.event(
@@ -4190,9 +4185,8 @@ mod tests {
             },
             &controller,
         );
-        let mut preview = LivePreview::default();
         assert!(render(&view, 100, 30).contains(LOADING_FRAMES));
-        preview.begin(invocation.clone());
+        let mut preview = capture(&controller._database, &invocation);
         preview
             .apply(mf_chat::PreviewEvent {
                 invocation: invocation.clone(),
@@ -4216,7 +4210,7 @@ mod tests {
         view.event(
             ChatEvent::Preview {
                 invocation: invocation.clone(),
-                preview: preview.clone(),
+                preview: preview.frame.clone(),
             },
             &controller,
         );
@@ -4273,7 +4267,7 @@ mod tests {
         view.event(
             ChatEvent::Preview {
                 invocation: invocation.clone(),
-                preview,
+                preview: preview.frame,
             },
             &controller,
         );
@@ -4315,8 +4309,7 @@ mod tests {
             },
             &controller,
         );
-        let mut preview = LivePreview::default();
-        preview.begin(invocation.clone());
+        let mut preview = capture(&controller._database, &invocation);
         preview
             .apply(mf_chat::PreviewEvent {
                 invocation: invocation.clone(),
@@ -4330,7 +4323,7 @@ mod tests {
         view.event(
             ChatEvent::Preview {
                 invocation: invocation.clone(),
-                preview,
+                preview: preview.frame,
             },
             &controller,
         );
@@ -4416,7 +4409,7 @@ mod tests {
             ._database
             .create_session("default", None, None)
             .unwrap();
-        let invocation = Invocation::new(&session.id);
+        let invocation = admitted(&controller._database, &session.id, "hello");
         view.event(
             ChatEvent::Submitted {
                 session,
@@ -4425,8 +4418,8 @@ mod tests {
             },
             &controller,
         );
-        view.preview.begin(invocation.clone());
-        view.preview
+        let mut preview = capture(&controller._database, &invocation);
+        preview
             .apply(mf_chat::PreviewEvent {
                 invocation: invocation.clone(),
                 delta: mf_chat::TextDelta {
@@ -4436,6 +4429,7 @@ mod tests {
                 .into(),
             })
             .unwrap();
+        view.preview = preview.frame;
         view.preview.storage_error = Some("scratch full".into());
         view.event(
             ChatEvent::Finished {
@@ -4490,14 +4484,14 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let launch = super::super::tests::launch(root.path());
         let mut view = ChatView::new(launch.runner.description()).unwrap();
-        let invocation = Invocation::new("session");
-        view.preview.begin(invocation.clone());
+        let (_dir, db, invocation) = preview_turn();
+        let mut preview = capture(&db, &invocation);
         for (call_id, text) in [
             ("first", "first provisional"),
             ("recorded", "recorded partial"),
             ("missing", "unrecorded partial"),
         ] {
-            view.preview
+            preview
                 .apply(mf_chat::PreviewEvent {
                     invocation: invocation.clone(),
                     delta: mf_chat::TextDelta {
@@ -4509,7 +4503,7 @@ mod tests {
                 .unwrap();
         }
         for (index, id) in ["recorded-tool", "pending-tool"].into_iter().enumerate() {
-            view.preview
+            preview
                 .apply(mf_chat::PreviewEvent {
                     invocation: invocation.clone(),
                     delta: mf_chat::ToolCallDelta {
@@ -4540,6 +4534,7 @@ mod tests {
         ]))
         .unwrap();
         reply.validate().unwrap();
+        view.preview = preview.frame;
         view.preview.incomplete = true;
         view.present_result(reply, true, None);
         let [partial, pending] = view.preview.segments.as_slice() else {
@@ -4586,8 +4581,8 @@ mod tests {
             },
             &controller,
         );
-        view.preview.begin(invocation.clone());
-        view.preview
+        let mut preview = capture(&controller._database, &invocation);
+        preview
             .apply(mf_chat::PreviewEvent {
                 invocation: invocation.clone(),
                 delta: mf_chat::TextDelta {
@@ -4597,6 +4592,7 @@ mod tests {
                 .into(),
             })
             .unwrap();
+        view.preview = preview.frame;
 
         // Stale invocation compaction events must be ignored.
         view.event(

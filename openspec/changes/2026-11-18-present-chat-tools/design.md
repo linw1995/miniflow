@@ -48,10 +48,19 @@ batch. A result-only page keeps the ID and the same fold key. Grouping does not 
 messages. Raw argument previews and canonical arguments share incremental JSON syntax highlighting.
 Incomplete or malformed fragments keep their exact text without waiting for JSON validation.
 The terminal retains all received text and tool arguments for the active turn, with no entry or
-byte cap. A private temporary SQLite store backs immutable streamed prefixes; it is not part of
-the session database. Committed replies and history pages index headers and read canonical fields
-on demand. The renderer keeps scroll anchors and measured heights but evicts offscreen body
-documents and their wrapping/highlighting caches. Returning to a body loads its full text again.
-Neither provisional fragments nor fold state enter durable history. Full arguments
+byte cap. The terminal captures validated runner deltas before the invocation returns: ordinary
+subscription receipts can arrive after settlement. It commits each available batch to the session
+database before publishing the frame. Separate turn-scoped segment headers and ordered chunks
+preserve immutable prefixes, late identity hints, and first-seen order. The terminal publishes
+these committed prefixes only upon receiving their corresponding application Flow deliveries; runner
+output never bypasses the graph to reach the view. A read view pinned just before settlement keeps
+the final frame readable without holding a transaction during provider I/O. An interrupted turn reopens with
+its drafts, independently of later turns. Settlement deletes replaced segments in the same
+transaction as the authoritative result; write rollback leaves both unchanged. The private scratch
+database stages only complete unsaved reply bodies for display, not streamed drafts.
+Committed replies and history pages index headers and read canonical fields on demand. The renderer
+keeps scroll anchors and measured heights but evicts offscreen body documents and their
+wrapping/highlighting caches. Returning to a body loads its full text again. Neither drafts nor fold
+state enter audit messages or model context. Full arguments
 remain in the authoritative messages and in actual dispatch. Arguments and results remain literal;
 assistant text keeps Markdown rendering.

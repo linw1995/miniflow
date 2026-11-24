@@ -549,6 +549,7 @@ pub fn complete(input: CompleteTurnInputs) -> Result<CompletionOutputs, ChatErro
                     operation: "append display message",
                 })?;
         }
+        crate::display::settle_drafts(connection, &turn.id, &input.response)?;
         save_response(
             connection,
             &call.id,

@@ -26,6 +26,7 @@ use std::{
 };
 
 mod preview;
+use preview::Capture;
 pub use preview::LivePreview;
 mod transcript;
 mod ui;
@@ -186,7 +187,7 @@ pub struct ChatController {
     commands: SyncSender<ChatCommand>,
     events: Receiver<ChatEvent>,
     deferred: Mutex<Option<ChatEvent>>,
-    preview: Arc<Mutex<LivePreview>>,
+    preview: Arc<Mutex<Capture>>,
     preview_revision: AtomicU64,
     compacting: Arc<Mutex<(Option<Invocation>, bool)>>,
     presented_compacting: AtomicBool,
@@ -223,7 +224,7 @@ impl ChatController {
         let closed = Arc::new(AtomicBool::new(false));
         let busy = Arc::new(AtomicBool::new(false));
         let cancel = Arc::new(AtomicBool::new(false));
-        let preview = Arc::new(Mutex::new(LivePreview::default()));
+        let preview = Arc::new(Mutex::new(Capture::default()));
         let compacting = Arc::new(Mutex::new((None, false)));
         let controller = Controller {
             launch: Arc::new(launch),
@@ -327,8 +328,8 @@ impl ChatController {
             if preview.invocation.as_ref() == Some(invocation) {
                 // The view already received the last preview, including any unfinished reply.
                 let revision = preview.revision;
-                *preview = LivePreview::default();
-                preview.revision = revision;
+                *preview = Capture::default();
+                preview.frame.revision = revision;
             }
             *self.presented_invocation.lock().unwrap() = None;
             self.presented_compacting.store(false, Ordering::Release);
@@ -355,7 +356,7 @@ impl ChatController {
 
     fn updated_preview(&self) -> Option<ChatEvent> {
         let expected = self.presented_invocation.lock().unwrap().clone();
-        let preview = self.preview.lock().unwrap();
+        let preview = self.preview.try_lock().ok()?;
         if expected.is_none() || preview.invocation != expected {
             return None;
         }
@@ -372,7 +373,7 @@ impl ChatController {
             .as_ref()
             .map(|invocation| ChatEvent::Preview {
                 invocation: invocation.clone(),
-                preview: preview.clone(),
+                preview: preview.frame.clone(),
             })
     }
     pub fn close(mut self) -> Result<(), ChatRunError> {
@@ -414,7 +415,7 @@ struct Controller {
     busy: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
     retained: Option<Retained>,
-    preview: Arc<Mutex<LivePreview>>,
+    preview: Arc<Mutex<Capture>>,
     compacting: Arc<Mutex<(Option<Invocation>, bool)>>,
 }
 
@@ -597,7 +598,10 @@ impl Controller {
         )?;
         let invocation = Invocation::new(&session.id);
         if self.launch.contract.has_previews() {
-            self.preview.lock().unwrap().begin(invocation.clone());
+            self.preview
+                .lock()
+                .unwrap()
+                .begin(&self.database, invocation.clone());
         }
         let captured = Arc::new(Mutex::new(None));
         let cancellation = mf_runtime::StreamCancellation::default();
@@ -609,6 +613,7 @@ impl Controller {
             output: self.output.clone(),
             closed: Arc::clone(&self.closed),
             cancel: Arc::clone(&self.cancel),
+            preview: Arc::clone(&self.preview),
             captured: Arc::clone(&captured),
         };
         let request = mf_chat::nodes::BeginTurnInputs {
@@ -632,29 +637,26 @@ impl Controller {
             result_alternatives: Some(self.launch.contract.alternatives),
         };
         let preview_consumer = self.launch.contract.has_previews().then(|| {
-            let outer_cancellation = cancellation.clone();
-            let preview = self.preview.clone();
+            let capture = self.preview.clone();
+            let seal = self.preview.clone();
+            let outer = cancellation.clone();
             let closed = self.closed.clone();
             let cancel = self.cancel.clone();
             mf_chat::PreviewConsumer::new(move |event, cancellation| {
-                if let Some(error) = cancellation.failure() {
-                    return Err(error.into());
-                }
                 if cancel.load(Ordering::Acquire) || closed.load(Ordering::Acquire) {
-                    outer_cancellation.cancel(
+                    outer.cancel(
                         mf_runtime::StreamExecutionSnafu {
                             message: "chat request cancelled",
                         }
                         .build(),
                     );
-                    return Err(outer_cancellation
-                        .failure()
-                        .expect("cancellation was recorded")
-                        .into());
                 }
-                // Capture independently of terminal refresh or inspection.
-                preview.lock().unwrap().apply(event)
+                if let Some(error) = outer.failure().or_else(|| cancellation.failure()) {
+                    return Err(error.into());
+                }
+                capture.lock().unwrap().deliver(event)
             })
+            .with_draft_seal(move || seal.lock().unwrap().seal())
         });
         *self.compacting.lock().unwrap() = (Some(invocation.clone()), false);
         let host_calls = Mutex::new(mf_chat::CallEventCollector::default());
@@ -680,6 +682,17 @@ impl Controller {
             preview_consumer,
             self.model_selection.context_windows(),
         );
+        // A captured result may need save-only recovery without visiting the finish node.
+        if matches!(
+            &resolution,
+            Err(_)
+                | Ok(ReconciledCompletion {
+                    state: CompletionState::Uncommitted(_),
+                    ..
+                })
+        ) {
+            self.preview.lock().unwrap().seal();
+        }
         *self.compacting.lock().unwrap() = (None, false);
         let outcome = captured
             .lock()
@@ -776,6 +789,7 @@ struct ExternalBackend {
     output: SyncSender<ChatEvent>,
     closed: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
+    preview: Arc<Mutex<Capture>>,
     captured: Arc<Mutex<Option<LocalOutcome>>>,
 }
 
@@ -898,7 +912,7 @@ impl ExternalBackend {
             verbose: self.launch.options.run.verbose,
             snapshots: true,
         }
-        .run(
+        .run_batches(
             context.cancellation(),
             |observation| {
                 emit(
@@ -907,13 +921,39 @@ impl ExternalBackend {
                     ChatEvent::Observing(observation),
                 )
             },
-            |record| {
-                if let Some(delta) = decoder.accept(record)?
-                    && let Some(consume) = preview.as_mut()
-                {
-                    consume(delta)?;
+            |records| {
+                // Stage only validated output; the view publishes a handle only on its
+                // corresponding application Flow receipt, which may arrive after settlement.
+                let mut batch = Vec::new();
+                let mut forward =
+                    |batch: &mut Vec<mf_chat::PreviewDelta>| -> Result<(), mf_chat::ChatError> {
+                        if batch.is_empty() {
+                            return Ok(());
+                        }
+                        if let Some(consume) = preview.as_mut() {
+                            self.preview.lock().unwrap().stage(batch);
+                            for delta in batch.drain(..) {
+                                consume(delta)?;
+                            }
+                        } else {
+                            batch.clear();
+                        }
+                        Ok(())
+                    };
+                for record in records {
+                    match decoder.accept(record) {
+                        Ok(Some(delta)) => batch.push(delta),
+                        Ok(None) => continue,
+                        Err(error) => {
+                            forward(&mut batch)?;
+                            return Err(error);
+                        }
+                    }
+                    if batch.len() == 32 {
+                        forward(&mut batch)?;
+                    }
                 }
-                Ok(())
+                forward(&mut batch)
             },
             || {
                 let cancelled =

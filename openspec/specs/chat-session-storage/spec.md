@@ -145,6 +145,22 @@ Failure and cancellation SHALL finalize running turns and calls without adding a
 - **WHEN** failure or cancellation finalization reaches a turn whose completion is already committed
 - **THEN** the saved success and its call facts remain unchanged
 
+### Requirement: Preserve displayed drafts across interruption
+
+The terminal SHALL commit stream prefixes to turn-scoped display storage before showing them. Drafts MUST NOT become audit messages, model context, usage facts, or executable tool calls.
+
+#### Scenario: Reopen and retry an interrupted turn
+
+- **WHEN** a chat owner exits after displaying text or tool arguments and a later owner retries the turn
+- **THEN** the original turn retains its unfinished prefixes in first-seen order
+- **AND** the new turn has independent storage and its request contains no draft data
+
+#### Scenario: Replace drafts atomically
+
+- **WHEN** a terminal result is saved
+- **THEN** the same transaction deletes the drafts it replaces, retaining unrepresented parts of an unsuccessful turn
+- **AND** if the transaction rolls back, neither the result nor draft cleanup takes effect
+
 ### Requirement: Coordinate host ownership before recovery
 
 One database SHALL have at most one active owning chat host. Ownership SHALL be acquired before migrations or abandoned-work recovery and held until active work is joined. An overlapping owner MUST fail explicitly without modifying another host's active turns.

@@ -892,6 +892,153 @@ fn application_exit(
     }
 }
 
+struct ChatTerminal {
+    child: std::process::Child,
+    master: fs::File,
+    screen: Screen,
+}
+
+impl ChatTerminal {
+    fn open(binary: &Path, database: &Path) -> Self {
+        let size = Winsize {
+            ws_row: 40,
+            ws_col: 160,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let pty = openpty(Some(&size), None).unwrap();
+        let flags = FdFlag::from_bits_truncate(fcntl(&pty.master, FcntlArg::F_GETFD).unwrap());
+        fcntl(&pty.master, FcntlArg::F_SETFD(flags | FdFlag::FD_CLOEXEC)).unwrap();
+        let child = Command::new(env!("CARGO_BIN_EXE_mf"))
+            .args(["run", "--chat", "--chat-db"])
+            .arg(database)
+            .arg(binary)
+            .args(["--params.model", "fixture-model"])
+            .stdin(Stdio::from(pty.slave.try_clone().unwrap()))
+            .stderr(Stdio::from(pty.slave))
+            .stdout(Stdio::null())
+            .env_clear()
+            .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|value| ("LLVM_PROFILE_FILE", value)))
+            .env("MF_CHAT_TUI_KEY", "synthetic-key")
+            .env("NO_PROXY", "127.0.0.1,localhost")
+            .spawn()
+            .unwrap();
+        let master = fs::File::from(pty.master);
+        fcntl(&master, FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).unwrap();
+        Self {
+            child,
+            master,
+            screen: Screen::new(160, 40),
+        }
+    }
+
+    fn wait_for(&mut self, labels: &[&str]) -> String {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let mut bytes = [0; 16384];
+            if let Ok(n) = self.master.read(&mut bytes) {
+                self.screen.feed(&bytes[..n]);
+            }
+            let text = self.screen.text();
+            if labels.iter().all(|label| text.contains(label)) {
+                return text;
+            }
+            assert!(
+                Instant::now() < deadline && self.child.try_wait().unwrap().is_none(),
+                "waiting for {labels:?}: {text}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn send(&mut self, keys: &[u8]) {
+        self.master.write_all(keys).unwrap();
+    }
+
+    fn quit(&mut self) {
+        self.send(b"\x11");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while self.child.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "chat did not quit");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(self.child.wait().unwrap().success());
+    }
+}
+
+impl Drop for ChatTerminal {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+fn killed_chat_reopens_the_visible_text_and_partial_arguments_without_replaying_them() {
+    use std::{
+        os::unix::process::ExitStatusExt,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
+    let mut reply = Reply::stream_text("Before interruption");
+    let text = reply.body.split_once("\n\n").unwrap().0;
+    let arguments = r#"{"operation":"unfinished-value"#;
+    let chunk = serde_json::json!({"id":"mock-response","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"pending","type":"function","function":{"name":"calculator","arguments":arguments}}]},"finish_reason":null}]});
+    let prefix = format!("{text}\n\ndata: {chunk}\n\n");
+    let tail = "data: {";
+    reply.body = format!("{prefix}{tail}");
+    reply.fragments = Some(vec![prefix.into_bytes(), tail.as_bytes().to_vec()]);
+    let release = Arc::new(AtomicBool::new(false));
+    reply.release_after_prefix = Some(release.clone());
+    let server = Server::start(vec![reply]);
+    let root = tempfile::tempdir().unwrap();
+    let binary = compiled(root.path(), &server, "chat-context-flow.json");
+    let path = root.path().join("chat.sqlite");
+    {
+        let mut live = ChatTerminal::open(&binary, &path);
+        live.wait_for(&["What would you like"]);
+        live.send(b"Crash probe\x1b\r");
+        live.wait_for(&[
+            "Before interruption",
+            "[-] Tool call calculator [pending]",
+            arguments,
+        ]);
+        live.child.kill().unwrap();
+        assert_eq!(
+            live.child.wait().unwrap().signal(),
+            Some(nix::libc::SIGKILL)
+        );
+    }
+    release.store(true, Ordering::Release);
+    let mut reopened = ChatTerminal::open(&binary, &path);
+    reopened.wait_for(&["New chat"]);
+    reopened.send(b"\x13");
+    reopened.wait_for(&["Switch chat", "Crash probe"]);
+    reopened.send(b"\r");
+    let screen = reopened.wait_for(&[
+        "Before interruption",
+        "[+] Tool call calculator [pending]",
+        "Response unfinished",
+        "[interrupted; model context unchanged]",
+    ]);
+    assert!(!screen.contains(arguments));
+    reopened.send(b"\x14");
+    let screen = reopened.wait_for(&[arguments]);
+    assert_eq!(screen.matches("Before interruption").count(), 1);
+    assert!(!screen.contains("Tool result"));
+    reopened.quit();
+    let db = ChatDatabase::open(path).unwrap();
+    let session = &db.list_sessions(false, 10, None).unwrap().sessions[0];
+    assert_eq!(
+        db.messages(&session.id, 10, None).unwrap().messages.len(),
+        1
+    );
+    assert!(db.model_context(&session.id).unwrap().messages.is_empty());
+    assert_eq!(server.requests().len(), 1);
+}
+
 #[test]
 fn terminal_shows_live_text_and_keeps_it_after_a_captured_stream_failure() {
     use std::sync::{
@@ -911,77 +1058,17 @@ fn terminal_shows_live_text_and_keeps_it_after_a_captured_stream_failure() {
     let root = tempfile::tempdir().unwrap();
     let binary = compiled(root.path(), &server, "chat-title-flow.json");
     let database = root.path().join("chat.sqlite");
-    let pty = openpty(
-        Some(&Winsize {
-            ws_row: 28,
-            ws_col: 120,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        }),
-        None,
-    )
-    .unwrap();
-    let flags = FdFlag::from_bits_truncate(fcntl(&pty.master, FcntlArg::F_GETFD).unwrap());
-    fcntl(&pty.master, FcntlArg::F_SETFD(flags | FdFlag::FD_CLOEXEC)).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_mf"))
-        .args(["run", "--chat", "--chat-db"])
-        .arg(&database)
-        .arg(binary)
-        .args(["--params.model", "fixture-model"])
-        .stdin(Stdio::from(pty.slave.try_clone().unwrap()))
-        .stderr(Stdio::from(pty.slave))
-        .stdout(Stdio::null())
-        .env_clear()
-        .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|value| ("LLVM_PROFILE_FILE", value)))
-        .env("NO_PROXY", "127.0.0.1,localhost")
-        .spawn()
-        .unwrap();
-    let mut master = fs::File::from(pty.master);
-    fcntl(&master, FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).unwrap();
-    let mut screen = Screen::new(120, 28);
-    let mut stage = 0;
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        let mut bytes = [0; 8192];
-        if let Ok(n) = master.read(&mut bytes)
-            && n > 0
-        {
-            screen.feed(&bytes[..n]);
-            let text = screen.text();
-            match stage {
-                0 if text.contains("What would you like") => {
-                    master.write_all(b"Stream failure probe\x1b\r").unwrap();
-                    stage += 1;
-                }
-                1 if text.contains("visible live prefix") => {
-                    release.store(true, Ordering::Release);
-                    stage += 1;
-                }
-                2 if text.contains("[failed; model context unchanged]")
-                    && text.contains("visible live prefix")
-                    && text.contains("Response unfinished") =>
-                {
-                    master.write_all(b"\x11").unwrap();
-                    stage += 1;
-                }
-                _ => {}
-            }
-        }
-        if let Some(status) = child.try_wait().unwrap() {
-            assert!(
-                status.success() && stage == 3,
-                "{status} at stage {stage}: {}",
-                screen.text()
-            );
-            break;
-        }
-        if Instant::now() > deadline {
-            child.kill().unwrap();
-            child.wait().unwrap();
-            panic!("chat stalled at stage {stage}: {}", screen.text());
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
+    let mut terminal = ChatTerminal::open(&binary, &database);
+    terminal.wait_for(&["What would you like"]);
+    terminal.send(b"Stream failure probe\x1b\r");
+    terminal.wait_for(&["visible live prefix"]);
+    release.store(true, Ordering::Release);
+    terminal.wait_for(&[
+        "[failed; model context unchanged]",
+        "visible live prefix",
+        "Response unfinished",
+    ]);
+    terminal.quit();
     let database = ChatDatabase::open(database).unwrap();
     let session = database
         .list_sessions(false, 50, None)

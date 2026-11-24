@@ -1050,7 +1050,13 @@ The terminal SHALL reconcile live text against the final result. Successful pers
 
 - **WHEN** a Flow streams an answer prefix and then reports a failed result with no display messages
 - **THEN** the terminal keeps the prefix visible as unfinished even after loading the saved turn
-- **AND** only the authoritative result is persisted, without adding the preview to history or model context
+- **AND** the prefix remains a display-only draft, not an audit message or model input
+
+#### Scenario: Reopen after a visible prefix
+
+- **WHEN** the process is killed after showing assistant text or raw tool arguments and the user reopens the session
+- **THEN** the terminal shows the committed prefixes at that turn as unfinished, without requiring a complete tool call
+- **AND** reopening does not repeat generation or dispatch a tool
 
 #### Scenario: Retain a reply after storage failure
 

@@ -64,6 +64,34 @@ fn launch_runner(
     }
 }
 
+pub fn capture(db: &ChatDatabase, invocation: &Invocation) -> Capture {
+    let mut capture = Capture::default();
+    capture.begin(db, invocation.clone());
+    capture
+}
+
+pub fn admitted(db: &ChatDatabase, session: &str, prompt: &str) -> Invocation {
+    db.begin_turn(
+        session,
+        prompt,
+        mf_chat::ModelIdentity {
+            profile: "default".into(),
+            model: None,
+        },
+        None,
+    )
+    .unwrap()
+    .invocation
+}
+
+pub fn preview_turn() -> (tempfile::TempDir, ChatDatabase, Invocation) {
+    let root = tempfile::tempdir().unwrap();
+    let db = ChatDatabase::open(root.path().join("chat.sqlite")).unwrap();
+    let session = db.create_session("default", None, None).unwrap();
+    let invocation = admitted(&db, &session.id, "question");
+    (root, db, invocation)
+}
+
 pub fn launch(directory: &Path) -> ChatLaunch {
     launch_runner(
         directory,

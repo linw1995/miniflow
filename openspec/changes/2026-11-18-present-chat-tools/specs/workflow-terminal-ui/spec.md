@@ -22,7 +22,7 @@ Chat SHALL group arguments and results by call. Groups SHALL automatically expan
 - **WHEN** a tool receives more than 8 KiB of argument fragments before its identity is known
 - **THEN** the expanded group displays the entire argument received so far, including its prefix
 - **AND** a later identity-only hint updates the group without replacing the argument text
-- **AND** settlement and SQLite reload use canonical arguments, not provisional fragments
+- **AND** successful settlement and SQLite reload use canonical arguments, not provisional fragments
 
 #### Scenario: Pair parallel calls and results
 
@@ -60,6 +60,12 @@ Chat SHALL group arguments and results by call. Groups SHALL automatically expan
 - **THEN** all received fragments remain available under their respective groups in first-seen order
 - **AND** new groups continue to appear until the authoritative result replaces the preview
 - **AND** revisiting an evicted body reloads that snapshot's complete prefix without writing it to session history
+
+#### Scenario: Reopen an unfinished tool call
+
+- **WHEN** a process exits after displaying an unfinished call and the user reopens the conversation
+- **THEN** the draft is marked unfinished and its collapsed group can expand to the same literal arguments
+- **AND** reopening does not request another model response or execute the call
 
 #### Scenario: Browse a large saved tool exchange
 

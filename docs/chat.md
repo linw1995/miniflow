@@ -570,16 +570,23 @@ valid JSON on its own.
 history or model context. The calculator, context-replacement, and DeepSeek examples explicitly
 select `tool_call_delta`. A chatflow can select it without exposing `answer`.
 
-Terminal preview capture runs independently of drawing and inspection. For the active turn it
-retains every received text and tool-argument fragment, grouped by model call and tool index, with
-no entry, byte, or argument-tail limit. The terminal appends fragments to a private, temporary
-SQLite database. A preview snapshot holds references to exact prefixes, not copies of the turn's
-text. The last reference releases the temporary database, including after a failed turn is
-replaced or dismissed. Previews never supply tool arguments, audit messages, or model context.
-If the temporary store fails, the terminal reports a preview error without stopping the turn.
-The final result supplies the authoritative display transcript. If execution fails with no display
-replacement for a partial reply, the terminal keeps the preview visibly unfinished. It is not added
-to the database or model context. Older invocation events cannot alter the active turn.
+Terminal preview capture runs independently of drawing and inspection. Before publishing a frame,
+the terminal commits the available text and raw argument fragments to `preview_segments` and
+`preview_chunks` in `--chat-db`. These are ordinary tables keyed by turn, model call, and tool index,
+not a second message history. Each batch appends only new bytes. A frame addresses exact prefixes
+without copying the turn's bodies. There is no entry, byte, or argument-tail limit. If a draft write
+fails, the terminal reports it and stops extending that preview; the runner can still finish and save
+its result.
+
+If the chat process dies, reopen the same database and select the conversation with `Ctrl+S`.
+Previously displayed text and tool arguments appear under the interrupted turn as `Response
+unfinished`. Tool groups reopen collapsed and can be expanded even when their arguments are not
+valid JSON. Retrying or starting a later turn does not overwrite them. Recovery does not resume the
+model or run a tool. Drafts never enter `messages`, model context, usage, or the save-only candidate.
+A successful result replaces the whole draft; a failed result replaces the parts covered by its
+display transcript and leaves the rest unfinished. Draft cleanup and result persistence commit or
+roll back together. Protect the session database accordingly: it can now contain partial tool inputs
+and output from unsuccessful turns as well as completed conversations.
 
 ## Executable conversation backend
 
@@ -652,8 +659,8 @@ does not require the fragment to parse as JSON. Each group automatically collaps
 whole turn finishes and its authoritative transcript replaces the preview; the model may already
 be executing the next model round while the traced tool status updates. Manually expanding a
 settled group displays its complete canonical arguments. Reopening history shows groups collapsed
-and reads complete saved arguments from `messages`; provisional fragments and fold state are not
-written to the session database. A history page loads message and tool headers and turn usage,
+and reads canonical arguments from `messages` or an unfinished turn's raw prefixes from its draft;
+fold state is not persisted. A history page loads message and tool headers and turn usage,
 not message bodies. Scrolling or expanding a group loads its content from SQLite. The renderer
 keeps the documents intersecting the viewport and releases offscreen bodies, highlighting, and
 wrapped rows; returning to a group reloads it without truncation. It lays out one whole body at

@@ -129,6 +129,27 @@ impl RunnerInvocation<'_> {
         cancellation: StreamCancellation,
         observe: impl FnOnce(LocalObservation),
         mut consume: impl FnMut(NodeValues) -> Result<(), E>,
+        should_cancel: impl FnMut() -> bool,
+    ) -> Result<RunnerCompletion<E>, RunnerError> {
+        self.run_batches(
+            cancellation,
+            observe,
+            |records| {
+                for record in records {
+                    consume(record)?;
+                }
+                Ok(())
+            },
+            should_cancel,
+        )
+    }
+
+    /// Consume available records in wire order without waiting for another record to fill a batch.
+    pub fn run_batches<E>(
+        self,
+        cancellation: StreamCancellation,
+        observe: impl FnOnce(LocalObservation),
+        mut consume: impl FnMut(&mut dyn Iterator<Item = NodeValues>) -> Result<(), E>,
         mut should_cancel: impl FnMut() -> bool,
     ) -> Result<RunnerCompletion<E>, RunnerError> {
         if should_cancel() {
@@ -215,16 +236,19 @@ fn cancel(cancellation: &StreamCancellation) {
 
 fn consume_records<E>(
     run: &mut LocalRun,
-    consume: &mut impl FnMut(NodeValues) -> Result<(), E>,
+    consume: &mut impl FnMut(&mut dyn Iterator<Item = NodeValues>) -> Result<(), E>,
     failure: &mut Option<E>,
 ) {
-    while let Ok(record) = run.try_record() {
-        if failure.is_none()
-            && let Err(error) = consume(record)
-        {
+    if failure.is_none() {
+        let mut records = std::iter::from_fn(|| run.try_record().ok());
+        if let Err(error) = consume(&mut records) {
             *failure = Some(error);
             run.cancel();
         }
+    }
+    if failure.is_some() {
+        // Drain after a protocol failure so the child can close stdout.
+        while run.try_record().is_ok() {}
     }
 }
 
