@@ -293,7 +293,7 @@ fn assert_agent_layouts(executable: &Path, routes: &[&str]) {
     let scopes: &[(&[&str], usize, &[&str])] = &[
         (&["agent"], 3, &["repeat", "result"]),
         (&["agent", "catalog", "project"], 2, &["definition"]),
-        (&["agent", "repeat"], 5, &["request", "turn", "dispatch"]),
+        (&["agent", "repeat"], 6, &["request", "turn", "dispatch"]),
         (&["agent", "repeat", "request"], 1, &[]),
         (&["agent", "repeat", "dispatch"], 2, &["dispatch"]),
         (

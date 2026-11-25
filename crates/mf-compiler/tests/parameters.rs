@@ -118,6 +118,28 @@ fn configuration_and_graph_placement_are_validated_without_reading_sources() {
 }
 
 #[test]
+fn an_omitted_optional_parameter_skips_its_port_without_synthesizing_null() {
+    let mut definition = definition(json!({
+        "policy":{"type":"flow", "required":false},
+        "label":{"type":{"nullable":"string"}, "required":false},
+        "name":{"type":"string", "required":false,"default":"fallback"}
+    }));
+    for output in &mut definition.outputs {
+        output.optional = true;
+    }
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let flow = instantiate_compiled(&plan, &registry).unwrap();
+    let absent = flow.execute().unwrap();
+    assert!(!absent.contains_key("policy") && !absent.contains_key("label"));
+    assert_eq!(absent["name"].as_str(), Some("fallback"));
+    let present = flow
+        .execute_with_inputs(WorkflowArguments::try_from(json!({"params.label":null})).unwrap())
+        .unwrap();
+    assert!(present["label"].is_null());
+}
+
+#[test]
 fn parameter_execution_uses_an_isolated_environment() {
     let mut command = Command::new(std::env::current_exe().unwrap());
     command

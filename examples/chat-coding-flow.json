@@ -20,6 +20,9 @@
     }
   },
   "flows": {
+    "finish": {
+      "path": "agent-coding/finish.json"
+    },
     "instructions": {
       "path": "agent-coding/instructions.json"
     },
@@ -40,6 +43,10 @@
             "type": {
               "list": "object"
             }
+          },
+          "context": {
+            "type": "object",
+            "default": {}
           },
           "workspace_root": {
             "type": "string"
@@ -390,12 +397,51 @@
       }
     },
     {
+      "id": "compact_policy",
+      "kind": "builtin.constant",
+      "config": {
+        "type": "flow",
+        "value": {
+          "path": "agent-coding/compact.json"
+        },
+        "inputs": {
+          "history": {
+            "$ref": "params.messages"
+          },
+          "context": {
+            "$ref": "params.context"
+          },
+          "workspace_root": {
+            "$ref": "params.workspace_root"
+          },
+          "instructions": {
+            "$ref": "instructions.messages"
+          },
+          "model": {
+            "$ref": "params.model"
+          },
+          "base_url": {
+            "$ref": "params.base_url"
+          },
+          "api_key": {
+            "$ref": "params.api_key"
+          }
+        }
+      }
+    },
+    {
       "id": "agent",
       "kind": "workflow.call",
       "config": {
         "flow": "agent"
       },
       "inputs": {
+        "params.compact": {
+          "from": {
+            "node": "compact_policy",
+            "port": "value"
+          }
+        },
         "params.tools": {
           "from": {
             "node": "tools",
@@ -435,70 +481,73 @@
       }
     },
     {
-      "id": "stamp_workspace",
-      "kind": "builtin.code",
+      "id": "finish",
+      "kind": "workflow.call",
       "config": {
-        "language": "cel",
-        "inputs": {
-          "messages": {
-            "list": "object"
-          },
-          "root": "string"
-        },
-        "code": {
-          "messages": "size(messages) == 0 ? messages : [messages[0] + {'metadata': (has(messages[0].metadata) ? messages[0].metadata : {}) + {'coding_workspace': root}}] + messages.slice(1, size(messages))"
-        }
+        "flow": "finish"
       },
       "inputs": {
-        "messages": {
+        "params.history": {
+          "from": {
+            "node": "params",
+            "port": "messages"
+          }
+        },
+        "params.context": {
+          "from": {
+            "node": "params",
+            "port": "context"
+          }
+        },
+        "params.workspace_root": {
+          "from": {
+            "node": "params",
+            "port": "workspace_root"
+          }
+        },
+        "params.model": {
+          "from": {
+            "node": "params",
+            "port": "model"
+          }
+        },
+        "params.base_url": {
+          "from": {
+            "node": "params",
+            "port": "base_url"
+          }
+        },
+        "params.api_key": {
+          "from": {
+            "node": "params",
+            "port": "api_key"
+          }
+        },
+        "params.generated": {
           "from": {
             "node": "agent",
             "port": "messages"
           }
         },
-        "root": {
+        "params.checkpoint": {
           "from": {
-            "node": "params",
-            "port": "workspace_root"
+            "node": "agent",
+            "port": "checkpoint"
           }
-        }
-      }
-    },
-    {
-      "id": "result",
-      "kind": "builtin.object",
-      "config": {
-        "fields": {
-          "status": "string",
-          "messages": {
-            "list": "object"
-          },
-          "usages": {
-            "list": "object"
-          },
-          "error": "string"
-        }
-      },
-      "inputs": {
-        "status": {
+        },
+        "params.status": {
           "from": {
             "node": "agent",
             "port": "status"
           }
         },
-        "messages": {
-          "from": {
-            "node": "stamp_workspace",
-            "port": "messages"
-          }
-        },
-        "usages": {
+        "params.usages": {
           "from": {
             "node": "agent",
             "port": "usages"
           }
         },
-        "error": {
+        "params.error": {
           "from": {
             "node": "agent",
             "port": "error"
@@ -508,6 +557,10 @@
     }
   ],
   "edges": [
+    {
+      "from_node": "instructions",
+      "to_node": "compact_policy"
+    },
     {
       "from_node": "params",
       "to_node": "mkdir"
@@ -562,8 +615,15 @@
     },
     {
       "name": "append",
-      "node": "result",
-      "port": "value"
+      "node": "finish",
+      "port": "append",
+      "optional": true
+    },
+    {
+      "name": "replace_context",
+      "node": "finish",
+      "port": "replace_context",
+      "optional": true
     }
   ]
 }

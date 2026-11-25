@@ -12,9 +12,9 @@ and defaults, with source-independent secret protection and ordinary graph outpu
 The `mfn-core` package SHALL register `builtin.parameters`. Its configuration SHALL
 contain a nonempty `parameters` object keyed by nonempty parameter names. Each entry
 SHALL declare a supported port `type`, MAY declare `env` and a typed JSON `default`,
-and SHALL default `secret` to true. Unknown fields and invalid types or defaults MUST
-fail preparation. Each parameter SHALL expose one required input and one required
-output with the same name and configured type.
+and SHALL default both `required` and `secret` to true. Unknown fields and invalid types or defaults MUST
+fail preparation. Each parameter SHALL expose one input and one output with the same name,
+configured type, and required flag.
 
 #### Scenario: Prepare without credentials
 
@@ -48,6 +48,11 @@ Parameter execution SHALL forward the input values supplied by the shared startu
 binder to their corresponding outputs. It MUST preserve JSON values, shared payloads,
 and secret metadata. It MUST NOT resolve sources again or remove an existing secret
 marker when the parameter is configured as public.
+
+#### Scenario: Omit a native Flow parameter
+
+- **WHEN** the caller omits a Flow parameter with `required: false` and no fallback
+- **THEN** the node skips its output without synthesizing a JSON null or a Flow handle
 
 #### Scenario: Route a secret credential
 

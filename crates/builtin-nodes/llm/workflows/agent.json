@@ -47,6 +47,11 @@
             "type": "string",
             "env": "OPENAI_API_KEY"
           },
+          "compact": {
+            "type": "flow",
+            "required": false,
+            "secret": false
+          },
           "tool_properties": {
             "type": {
               "map": "object"
@@ -72,12 +77,52 @@
       }
     },
     {
+      "id": "policy_route",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "absent",
+            "condition": {
+              "source": {
+                "output": "params.compact",
+                "path": ""
+              },
+              "operator": "not_exists"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "use_policy",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "from": {
+            "node": "params",
+            "port": "compact"
+          }
+        }
+      }
+    },
+    {
+      "id": "no_policy",
+      "kind": "builtin.constant",
+      "config": {
+        "value": null
+      }
+    },
+    {
       "id": "repeat",
       "kind": "loop.run",
       "config": {
         "inputs": {
           "prefix": {
             "list": "object"
+          },
+          "compact": {
+            "nullable": "flow"
           },
           "api_key": "string",
           "base_url": "string",
@@ -93,6 +138,11 @@
           }
         },
         "variables": [
+          {
+            "name": "checkpoint",
+            "type": "object",
+            "initial": {}
+          },
           {
             "name": "generated",
             "type": {
@@ -150,6 +200,12 @@
                 "flow": "agent-request"
               },
               "inputs": {
+                "params.checkpoint": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "checkpoint"
+                  }
+                },
                 "params.prefix": {
                   "from": {
                     "node": "%loop",
@@ -334,6 +390,7 @@
                   }
                 },
                 "code": {
+                  "through": "size(generated) + size(results)",
                   "generated": "generated + results.map(result, dyn({'role':'tool','tool_call_id':result.tool_call_id,'content':result.content}))"
                 }
               },
@@ -349,6 +406,233 @@
                     "node": "dispatch",
                     "port": "results"
                   }
+                }
+              }
+            },
+            {
+              "id": "check_budget",
+              "kind": "builtin.if_else",
+              "config": {
+                "branches": [
+                  {
+                    "id": "finished",
+                    "condition": {
+                      "source": {
+                        "output": "turn.outcome",
+                        "path": ""
+                      },
+                      "operator": "ne",
+                      "value": "tool_calls"
+                    }
+                  },
+                  {
+                    "id": "unmanaged",
+                    "condition": {
+                      "source": {
+                        "output": "%loop.compact",
+                        "path": ""
+                      },
+                      "operator": "eq",
+                      "value": null
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "finished_facts",
+              "kind": "builtin.constant",
+              "config": {
+                "value": {
+                  "error": "",
+                  "usages": []
+                }
+              }
+            },
+            {
+              "id": "no_compaction",
+              "kind": "builtin.constant",
+              "config": {
+                "value": {
+                  "error": "",
+                  "usages": []
+                }
+              }
+            },
+            {
+              "id": "compact",
+              "kind": "workflow.call",
+              "config": {
+                "inputs": [
+                  {
+                    "name": "params.generated",
+                    "value_type": {
+                      "list": "object"
+                    },
+                    "required": true
+                  },
+                  {
+                    "name": "params.checkpoint",
+                    "value_type": "object",
+                    "required": true
+                  },
+                  {
+                    "name": "params.usages",
+                    "value_type": {
+                      "list": "object"
+                    },
+                    "required": true
+                  }
+                ],
+                "outputs": [
+                  {
+                    "name": "result",
+                    "value_type": {
+                      "map": "any"
+                    },
+                    "required": true
+                  }
+                ]
+              },
+              "inputs": {
+                "flow": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "compact"
+                  }
+                },
+                "params.generated": {
+                  "from": {
+                    "node": "append_tool_results",
+                    "port": "generated"
+                  }
+                },
+                "params.checkpoint": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "checkpoint"
+                  }
+                },
+                "params.usages": {
+                  "from": {
+                    "node": "turn",
+                    "port": "usages"
+                  }
+                }
+              }
+            },
+            {
+              "id": "checkpoint",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "previous": "object",
+                  "through": "int",
+                  "report": "object"
+                },
+                "code": {
+                  "value": "report.replacement == null ? dyn(previous) : dyn(report.replacement + {'through':through})",
+                  "error": "string(report.error)",
+                  "facts": "{'error':report.error, 'usages':report.usages}"
+                }
+              },
+              "inputs": {
+                "previous": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "checkpoint"
+                  }
+                },
+                "through": {
+                  "from": {
+                    "node": "append_tool_results",
+                    "port": "through"
+                  }
+                },
+                "report": {
+                  "from": {
+                    "node": "compact",
+                    "port": "result"
+                  }
+                }
+              }
+            },
+            {
+              "id": "record_pass",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "outcome": "string",
+                  "usages": {
+                    "list": "object"
+                  },
+                  "facts": "object"
+                },
+                "code": {
+                  "outcome": "facts.error != '' ? 'compaction_failed' : outcome",
+                  "usages": "usages + facts.usages"
+                }
+              },
+              "inputs": {
+                "outcome": {
+                  "from": {
+                    "node": "turn",
+                    "port": "outcome"
+                  }
+                },
+                "usages": {
+                  "from": {
+                    "node": "collect_usages",
+                    "port": "value"
+                  }
+                },
+                "facts": {
+                  "exclusive": [
+                    {
+                      "node": "checkpoint",
+                      "port": "facts"
+                    },
+                    {
+                      "node": "finished_facts",
+                      "port": "value"
+                    },
+                    {
+                      "node": "no_compaction",
+                      "port": "value"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "id": "provider_error",
+              "kind": "builtin.identity",
+              "inputs": {
+                "input": {
+                  "from": {
+                    "node": "turn",
+                    "port": "error"
+                  }
+                }
+              }
+            },
+            {
+              "id": "pass_error",
+              "kind": "builtin.identity",
+              "inputs": {
+                "input": {
+                  "exclusive": [
+                    {
+                      "node": "checkpoint",
+                      "port": "error"
+                    },
+                    {
+                      "node": "provider_error",
+                      "port": "value"
+                    }
+                  ]
                 }
               }
             },
@@ -385,6 +669,30 @@
           ],
           "edges": [
             {
+              "from_node": "check_budget",
+              "from_output": "finished",
+              "to_node": "provider_error"
+            },
+            {
+              "from_node": "turn",
+              "to_node": "check_budget"
+            },
+            {
+              "from_node": "check_budget",
+              "from_output": "else",
+              "to_node": "compact"
+            },
+            {
+              "from_node": "check_budget",
+              "from_output": "finished",
+              "to_node": "finished_facts"
+            },
+            {
+              "from_node": "check_budget",
+              "from_output": "unmanaged",
+              "to_node": "no_compaction"
+            },
+            {
               "from_node": "turn",
               "to_node": "route"
             },
@@ -414,12 +722,27 @@
               ]
             },
             {
+              "label": "Check context budget",
+              "annotation": "Check the caller's policy after a complete tool batch, before the next request.",
+              "collapsed": true,
+              "nodes": [
+                "check_budget",
+                "finished_facts",
+                "no_compaction",
+                "compact",
+                "checkpoint"
+              ]
+            },
+            {
               "label": "Record turn",
-              "annotation": "Retain usage and the generated messages from either branch.",
+              "annotation": "Retain the generated transcript, usages and outcome from the completed pass.",
               "collapsed": true,
               "nodes": [
                 "collect_usages",
                 "append_tool_results",
+                "record_pass",
+                "provider_error",
+                "pass_error",
                 "finished_generated",
                 "generated"
               ]
@@ -432,9 +755,15 @@
               "port": "value"
             },
             {
+              "name": "checkpoint",
+              "node": "checkpoint",
+              "port": "value",
+              "optional": true
+            },
+            {
               "name": "usages",
-              "node": "collect_usages",
-              "port": "value"
+              "node": "record_pass",
+              "port": "usages"
             },
             {
               "name": "text",
@@ -443,13 +772,13 @@
             },
             {
               "name": "outcome",
-              "node": "turn",
+              "node": "record_pass",
               "port": "outcome"
             },
             {
               "name": "error",
-              "node": "turn",
-              "port": "error",
+              "node": "pass_error",
+              "port": "value",
               "optional": true
             }
           ]
@@ -470,6 +799,18 @@
         }
       },
       "inputs": {
+        "compact": {
+          "exclusive": [
+            {
+              "node": "use_policy",
+              "port": "value"
+            },
+            {
+              "node": "no_policy",
+              "port": "value"
+            }
+          ]
+        },
         "prefix": {
           "from": {
             "node": "params",
@@ -562,19 +903,42 @@
       }
     }
   ],
-  "edges": [],
+  "edges": [
+    {
+      "from_node": "policy_route",
+      "from_output": "else",
+      "to_node": "use_policy"
+    },
+    {
+      "from_node": "params",
+      "to_node": "policy_route"
+    },
+    {
+      "from_node": "policy_route",
+      "from_output": "absent",
+      "to_node": "no_policy"
+    }
+  ],
   "clusters": [
     {
       "label": "Prepare agent",
-      "annotation": "Read the request and build the tool catalog once.",
+      "annotation": "Prepare the request, tool catalog and optional context policy once.",
       "collapsed": true,
       "nodes": [
         "params",
-        "catalog"
+        "catalog",
+        "policy_route",
+        "use_policy",
+        "no_policy"
       ]
     }
   ],
   "outputs": [
+    {
+      "name": "checkpoint",
+      "node": "repeat",
+      "port": "checkpoint"
+    },
     {
       "name": "tool_output",
       "node": "repeat",

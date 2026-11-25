@@ -1,0 +1,322 @@
+{
+  "version": "2026-11-13",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../../crates/builtin-nodes/core"
+    },
+    "code": {
+      "package": "mfn-code",
+      "path": "../../crates/builtin-nodes/code"
+    },
+    "chat": {
+      "package": "mf-chat",
+      "path": "../../crates/mf-chat"
+    }
+  },
+  "flows": {
+    "candidate": {
+      "path": "candidate.json"
+    },
+    "compact": {
+      "builtin": "mf-chat.chat-compact"
+    },
+    "request": {
+      "path": "request.json"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "generated": {
+            "type": {
+              "list": "object"
+            }
+          },
+          "checkpoint": {
+            "type": "object"
+          },
+          "usages": {
+            "type": {
+              "list": "object"
+            }
+          },
+          "history": {
+            "type": {
+              "list": "object"
+            }
+          },
+          "context": {
+            "type": "object"
+          },
+          "workspace_root": {
+            "type": "string"
+          },
+          "instructions": {
+            "type": {
+              "list": "object"
+            }
+          },
+          "model": {
+            "type": "string",
+            "secret": false
+          },
+          "base_url": {
+            "type": "string",
+            "secret": false
+          },
+          "api_key": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "id": "candidate",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "candidate"
+      },
+      "inputs": {
+        "params.history": {
+          "from": {
+            "node": "params",
+            "port": "history"
+          }
+        },
+        "params.generated": {
+          "from": {
+            "node": "params",
+            "port": "generated"
+          }
+        },
+        "params.workspace_root": {
+          "from": {
+            "node": "params",
+            "port": "workspace_root"
+          }
+        },
+        "params.checkpoint": {
+          "from": {
+            "node": "params",
+            "port": "checkpoint"
+          }
+        }
+      }
+    },
+    {
+      "id": "policy",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "context": "object"
+        },
+        "code": {
+          "context": "has(context.compaction) && has(context.compaction.keep_recent_tokens) && context.compaction.keep_recent_tokens == 0 ? dyn(context + {'compaction':context.compaction + {'keep_recent_tokens':1}}) : dyn(context)"
+        }
+      },
+      "inputs": {
+        "context": {
+          "from": {
+            "node": "params",
+            "port": "context"
+          }
+        }
+      }
+    },
+    {
+      "id": "compact",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "compact"
+      },
+      "inputs": {
+        "params.messages": {
+          "from": {
+            "node": "candidate",
+            "port": "messages"
+          }
+        },
+        "params.usages": {
+          "from": {
+            "node": "params",
+            "port": "usages"
+          }
+        },
+        "params.context": {
+          "from": {
+            "node": "policy",
+            "port": "context"
+          }
+        },
+        "params.model": {
+          "from": {
+            "node": "params",
+            "port": "model"
+          }
+        },
+        "params.base_url": {
+          "from": {
+            "node": "params",
+            "port": "base_url"
+          }
+        },
+        "params.api_key": {
+          "from": {
+            "node": "params",
+            "port": "api_key"
+          }
+        }
+      }
+    },
+    {
+      "id": "route",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "changed",
+            "condition": {
+              "source": {
+                "output": "compact.compacted",
+                "path": ""
+              },
+              "operator": "eq",
+              "value": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "request",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "request"
+      },
+      "inputs": {
+        "params.messages": {
+          "from": {
+            "node": "compact",
+            "port": "messages"
+          }
+        },
+        "params.workspace_root": {
+          "from": {
+            "node": "params",
+            "port": "workspace_root"
+          }
+        },
+        "params.instructions": {
+          "from": {
+            "node": "params",
+            "port": "instructions"
+          }
+        }
+      }
+    },
+    {
+      "id": "checkpoint",
+      "kind": "builtin.object",
+      "config": {
+        "fields": {
+          "request": {
+            "list": "object"
+          },
+          "context": {
+            "list": "object"
+          }
+        }
+      },
+      "inputs": {
+        "request": {
+          "from": {
+            "node": "request",
+            "port": "messages"
+          }
+        },
+        "context": {
+          "from": {
+            "node": "compact",
+            "port": "messages"
+          }
+        }
+      }
+    },
+    {
+      "id": "unchanged",
+      "kind": "builtin.constant",
+      "config": {
+        "value": null
+      }
+    },
+    {
+      "id": "result",
+      "kind": "builtin.object",
+      "config": {
+        "fields": {
+          "replacement": {
+            "nullable": "object"
+          },
+          "error": "string",
+          "usages": {
+            "list": "object"
+          }
+        }
+      },
+      "inputs": {
+        "replacement": {
+          "exclusive": [
+            {
+              "node": "checkpoint",
+              "port": "value"
+            },
+            {
+              "node": "unchanged",
+              "port": "value"
+            }
+          ]
+        },
+        "error": {
+          "from": {
+            "node": "compact",
+            "port": "error"
+          }
+        },
+        "usages": {
+          "from": {
+            "node": "compact",
+            "port": "usages"
+          }
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "compact",
+      "to_node": "route"
+    },
+    {
+      "from_node": "route",
+      "from_output": "changed",
+      "to_node": "request"
+    },
+    {
+      "from_node": "route",
+      "from_output": "else",
+      "to_node": "unchanged"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "result",
+      "node": "result",
+      "port": "value"
+    }
+  ]
+}

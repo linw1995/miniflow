@@ -21,6 +21,9 @@ pub fn stage_example(root: &std::path::Path, name: &str) -> std::path::PathBuf {
         "chat-deepseek-flow.json" => &["agent-deepseek/search.json", "agent-deepseek/fetch.json"],
         CODING_AGENT => &[
             "coding-read.json",
+            "agent-coding/candidate.json",
+            "agent-coding/compact.json",
+            "agent-coding/finish.json",
             "agent-coding/instructions.json",
             "agent-coding/instruction-directory.json",
             "agent-coding/request.json",
@@ -42,13 +45,17 @@ pub fn stage_example(root: &std::path::Path, name: &str) -> std::path::PathBuf {
     staged.join(name)
 }
 
-pub fn streamed_tool_calls(mut calls: Value) -> Reply {
+pub fn streamed_tool_calls(calls: Value) -> Reply {
+    streamed_tool_calls_with_usage(calls, 2)
+}
+
+pub fn streamed_tool_calls_with_usage(mut calls: Value, prompt_tokens: u32) -> Reply {
     let mut streamed = Reply::stream_text("");
     for (index, call) in calls.as_array_mut().unwrap().iter_mut().enumerate() {
         call["index"] = json!(index);
     }
     let chunk = json!({"id":"tool-response","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{"tool_calls":calls},"finish_reason":null}]});
-    let finish = json!({"id":"tool-response","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}});
+    let finish = json!({"id":"tool-response","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":prompt_tokens,"completion_tokens":1,"total_tokens":prompt_tokens+1}});
     streamed.body = format!("data: {chunk}\n\ndata: {finish}\n\ndata: [DONE]\n\n");
     streamed
 }

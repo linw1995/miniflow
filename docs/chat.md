@@ -431,7 +431,10 @@ three compaction modes—mirroring session title generation:
    passing `params.context` straight through to inherit resolved policy defaults (including any
    API-discovered `context_window`) from `context.compaction`, querying `llm.model_info` directly,
    or overriding thresholds and models, and export `append` / `replace_context`. Declaring
-   `replace_context` causes the host to yield automatically so compaction never runs twice.
+   `replace_context` causes the host to yield automatically so compaction never runs twice. The
+   [coding Agent](coding-tools.md#context-between-tool-rounds) uses this policy both between tool
+   batches and at turn completion, preserving the display transcript even when the next provider
+   request already uses a checkpoint.
 3. **Custom compaction:** A chatflow declaring `replace_context` with custom summarization (such as
    [examples/chat-context-flow.json](../examples/chat-context-flow.json)), or a custom
    `ConversationBackend` that returns `MessageUpdate::ReplaceContext`, reports a usage with

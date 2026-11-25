@@ -44,7 +44,7 @@
           "root": "string"
         },
         "code": {
-          "starts": "messages.transformList(i, m,\n  i > 0 && messages[i-1].role == 'user' && m.role == 'assistant' &&\n  has(m.metadata) && has(m.metadata.coding_workspace) && type(m.metadata.coding_workspace) == string,\n  {'at': i-1, 'root': string(m.metadata.coding_workspace)}\n) + [{'at': size(messages) > 0 ? size(messages)-1 : 0, 'root': root}]"
+          "starts": "cel.bind(users, messages.transformList(i, m, m.role == 'user', i), cel.bind(active, size(users) > 0 ? users[size(users)-1] : 0,\n  messages.transformList(i, m,\n    i > 0 && i-1 < active && messages[i-1].role == 'user' && m.role == 'assistant' &&\n    has(m.metadata) && has(m.metadata.coding_workspace) && type(m.metadata.coding_workspace) == string,\n    {'at': i-1, 'root': string(m.metadata.coding_workspace)}\n  ) + [{'at': active, 'root': root}]\n))"
         }
       },
       "inputs": {

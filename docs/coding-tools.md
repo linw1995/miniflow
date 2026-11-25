@@ -202,11 +202,31 @@ The Flow stamps the first generated assistant message of each turn with `metadat
 It uses those stamps in the retained context to reconstruct boundaries, never guesses a root for
 unmarked earlier history, and never takes the binding from model text. Paths are sent to the
 provider in these notices and are stored in SQLite metadata. The system messages themselves are
-request-only. The Flow streams `answer`, `tool_call_delta`, and `tool_output` and returns only newly generated
-messages and usages in `append`, so the normal chat host stores tool exchanges and can reopen them.
+request-only. The Flow streams `answer`, `tool_call_delta`, and `tool_output`. Both `append` and
+`replace_context` preserve the original generated assistant and tool messages for display and audit.
 A failing test is a tool result, not an
 automatic retry. Cancelling or retrying a turn does not roll back files. Tests execute workspace
 code, including changes the Agent just made, with your OS permissions. Use an OS sandbox for untrusted code.
+
+### Context between tool rounds
+
+After each complete tool batch, the [budget check](../examples/agent-coding/compact.json) calls
+[`mf-chat.chat-compact`](chat.md#automatic-and-reusable-compaction-mf-chatchat-compact) with the
+admitted window and reserve, the latest conversation usage, and the canonical transcript including
+the new results. If the budget is exceeded and a prefix can be summarized, the **next** model
+request gets the summary and a recent suffix instead of the discarded exchanges. Even with
+`keep_recent_tokens: 0`, a continuation keeps the last assistant call and its entire result batch.
+Workspace notices and the rules loaded for this submission are projected again for the provider;
+they are neither summarized nor saved as instructions. If a prior workspace stamp no longer
+survives in context, the next submission names its active root without guessing the previous one.
+
+On success, settlement saves the clean checkpoint plus later messages, independently of the full
+audit. The Flow also checks the final answer against the remaining budget, so ordinary turns
+still get end-of-turn compaction. The host does not run a second compactor. A failed mid-turn
+summary stops before another conversation request and reports the completed tool records and
+attempted usages. A failed end-of-turn summary does not discard a successful answer. Cancelling
+or reopening does not replay side effects, and a partial summary is never a recovery candidate.
+Token estimates are not a provider guarantee; this is not an automatic overflow retry.
 
 ### Project instructions
 
@@ -228,7 +248,7 @@ fallback. An unreadable or unsafe selected file fails the turn before any model 
 rather than quietly running without its instructions.
 
 Each submission reads fresh files and places one system message per nonblank file after the active
-workspace notice. Tool rounds reuse that request prefix. A workspace switch replaces the active
+workspace notice. Tool rounds reuse those instructions, including after a checkpoint. A workspace switch replaces the active
 rule set; old rule bodies are neither reread from history nor added to `append` or SQLite as
 instructions. The provider receives the paths and contents, so only enable sources you trust and
 intend to share. More specific subdirectory rules are not globally injected.

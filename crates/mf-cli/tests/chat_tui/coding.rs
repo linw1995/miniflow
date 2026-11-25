@@ -12,6 +12,9 @@ use mfn_llm::test_support::{Reply, Request, Server};
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, fs, path::Path};
 
+#[path = "compaction.rs"]
+mod compaction;
+
 fn call(id: &str, name: &str, arguments: Value) -> Value {
     json!({"id":id, "type":"function", "function":{"name":name, "arguments":arguments.to_string()}})
 }

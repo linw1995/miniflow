@@ -2128,8 +2128,8 @@ fn draw<B: Backend>(
                 connection_summary(layout), elapsed.as_secs_f64()
             ),
             Presentation::Preview => format!(
-                "{}  |  Preview  |  Scope: {scope}{pass_label}  |  {} nodes",
-                connection_summary(layout), layout.nodes().len()
+                "Preview  |  Scope: {scope}{pass_label}  |  {} nodes  |  {}",
+                layout.nodes().len(), connection_summary(layout)
             ),
         }), header);
         let (graph, details) = if view_state.details_visible {
