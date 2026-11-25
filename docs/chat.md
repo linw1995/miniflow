@@ -239,9 +239,10 @@ expose it to a model or tool. With no endpoint the Agent performs no steering I/
 can call `ChatJob::steer`; a clone of `job.steering()`'s inbox can outlive the job for collecting
 unsent input. Each inbox accepts up to 32 pending messages totaling 256 KiB of UTF-8 at a time.
 
-Delivery receipts in `steering_deliveries` contain private user text. The host checks exact text,
-order, and positions in the display delta before settlement or save-only recovery. A Flow cannot
-invent user input for the audit. A failed turn still publishes no model context. Cancellation or
+The host keeps delivery receipts in memory for the active call and any pending save-only recovery.
+It checks exact text, order, and positions in the display delta. Steering does not read or write
+SQLite at a reply boundary: user messages become durable only in the ordinary turn settlement.
+A Flow cannot invent user input for the audit. A failed turn still publishes no model context. Cancellation or
 failure does not deliver pending input; the TUI restores it beside any newer draft while open.
 Late submissions are rejected without clearing the editor. Closing the application discards the
 in-memory queue; reopening does not resume it.

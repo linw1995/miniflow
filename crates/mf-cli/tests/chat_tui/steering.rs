@@ -80,6 +80,23 @@ fn steering_during_a_running_tool_is_fifo_and_save_only_never_replays_it() {
         0
     );
     fail_save(&path, false);
+    let mut tampered = pending.as_ref().clone();
+    let mf_chat::MessageUpdate::Append { messages } = &mut tampered.completion.result.update else {
+        panic!("expected append")
+    };
+    messages.remove(2);
+    assert!(matches!(
+        host.retry_completion(tampered),
+        Err(ChatError::Uncommitted { .. })
+    ));
+    assert_eq!(
+        host.database()
+            .messages(&session.id, 10, None)
+            .unwrap()
+            .messages
+            .len(),
+        1
+    );
     let saved = host.retry_completion(*pending).unwrap();
     assert_eq!(saved.result.display_messages().len(), 5);
     assert_eq!(saved.result.usages.len(), 2);
@@ -121,6 +138,66 @@ fn cancelling_before_delivery_restores_steering_as_a_draft_not_as_a_follow_up() 
     assert_eq!(db.messages(&session.id, 8, None).unwrap().messages.len(), 1);
     assert_eq!(db.model_context(&session.id).unwrap().revision, 0);
     assert_eq!(server.requests().len(), 1);
+}
+
+#[test]
+fn killing_the_host_after_delivery_leaves_no_steering_on_disk_or_for_replay() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let pause = |text| {
+        let reply = Reply::stream_text(text);
+        let prefix = format!("{}\n\n", reply.body.split_once("\n\n").unwrap().0);
+        gated(reply, prefix)
+    };
+    let (first, advance) = pause("First reply");
+    let (second, finish) = pause("Unfinished revision");
+    let server = Server::start(vec![first, second]);
+    let root = tempfile::tempdir().unwrap();
+    let binary = compiled(root.path(), &server, "chat-context-flow.json");
+    let path = root.path().join("chat.sqlite");
+    let marker = "OnlyInTheSteeredRequest";
+    let mut live = ChatTerminal::open(&binary, &path);
+    live.wait_for(&["What would you like"]);
+    live.send(b"Original question\x1b\r");
+    live.wait_for(&["First reply", "Alt+Enter steer"]);
+    live.send(format!("{marker}\x1b\r").as_bytes());
+    live.wait_for(&["Steering queued"]);
+    advance.store(true, Ordering::Release);
+    live.wait_for(&["Unfinished revision"]);
+    assert_eq!(
+        server.requests()[1].body["messages"][2],
+        json!({"role":"user","content":marker})
+    );
+    live.child.kill().unwrap();
+    assert_eq!(
+        live.child.wait().unwrap().signal(),
+        Some(nix::libc::SIGKILL)
+    );
+    drop(live);
+    finish.store(true, Ordering::Release);
+
+    for name in ["chat.sqlite", "chat.sqlite-wal"] {
+        let file = root.path().join(name);
+        if file.exists() {
+            assert!(
+                !fs::read(file)
+                    .unwrap()
+                    .windows(marker.len())
+                    .any(|bytes| bytes == marker.as_bytes()),
+                "steering persisted in {name}"
+            );
+        }
+    }
+    let db = ChatDatabase::open(path).unwrap();
+    let session = &db.list_sessions(false, 2, None).unwrap().sessions[0];
+    let page = db.messages(&session.id, 10, None).unwrap();
+    assert_eq!(page.messages.len(), 1);
+    assert_eq!(
+        db.turn(&page.messages[0].message.turn_id).unwrap().state,
+        "interrupted"
+    );
+    assert_eq!(db.model_context(&session.id).unwrap().revision, 0);
+    assert_eq!(server.requests().len(), 2);
 }
 
 #[test]

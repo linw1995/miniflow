@@ -81,6 +81,11 @@ Stored success MUST win over late errors or conflicting output, with separate di
 - **WHEN** a workflow returns a user display addition without the matching host delivery at that position
 - **THEN** neither settlement nor save-only recovery accepts the terminal result
 
+#### Scenario: Interrupt a steered turn before settlement
+
+- **WHEN** the owning host exits after delivering steering but before settling the turn
+- **THEN** reopening MUST NOT recover the steering as a message, pending request, or save-only candidate
+
 #### Scenario: Persist a failed workflow result
 
 - **WHEN** either failed update variant contains completed rounds and a final unresolved display call batch

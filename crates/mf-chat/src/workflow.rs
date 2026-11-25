@@ -818,7 +818,7 @@ impl InvocationCall {
         )?;
         let mut consume = |delta| emit_preview(&started.invocation, delta, sink);
         let response = crate::steering::with_endpoint(
-            std::path::Path::new(&started.database_path),
+            &self.capture.steering,
             &started.invocation,
             self.steering.as_ref(),
             |endpoint| {
@@ -887,24 +887,15 @@ impl InvocationCall {
             self.capture.retain(&mut reply.clone());
         }
         let mut response = response?;
-        let database_path = std::path::Path::new(&started.database_path);
+        self.capture
+            .steering
+            .validate(&started.invocation.call_id, response.display_messages())?;
         if let Some(alternatives) = self.target.alternatives() {
             alternatives.validate(&response)?;
             response.validate_against(&started.request.messages)?;
-            if self.steering.is_some()
-                || response
-                    .display_messages()
-                    .iter()
-                    .any(|m| matches!(m, mfn_llm::ChatMessage::User { .. }))
-            {
-                crate::steering::validate(
-                    &mut crate::storage::connect(database_path)?,
-                    &started.invocation.turn_id,
-                    response.display_messages(),
-                )?;
-            }
         } else {
-            let mut connection = crate::storage::connect(database_path)?;
+            let mut connection =
+                crate::storage::connect(std::path::Path::new(&started.database_path))?;
             let admitted = crate::turn::load_turn(&mut connection, &started.invocation.turn_id)?;
             crate::turn::validate_admitted(&mut connection, &admitted, &response)?;
         }
@@ -973,6 +964,7 @@ impl FinishConversationInputs {
 
 #[derive(Clone)]
 struct CompletionCapture {
+    steering: Arc<crate::steering::Deliveries>,
     calls: Arc<Mutex<crate::CallEventCollector>>,
     delivered: Arc<Mutex<Option<ConversationResult>>>,
 }
@@ -996,7 +988,7 @@ impl CompletionCapture {
     fn finish(&self, inputs: FinishConversationInputs) -> Result<SettlementOutputs, ChatError> {
         let mut completion = inputs.into_turn_completion()?;
         self.retain(&mut completion.response);
-        let completion = crate::turn::complete(completion)?.completion;
+        let completion = crate::turn::complete(completion, &self.steering)?.completion;
         Ok(SettlementOutputs {
             settlement: Settlement { completion },
         })
@@ -1374,6 +1366,7 @@ pub fn run_observed_conversation(
         });
     }
     let capture = CompletionCapture {
+        steering: database.deliveries.clone(),
         calls,
         delivered: Arc::new(Mutex::new(None)),
     };

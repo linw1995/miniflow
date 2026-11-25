@@ -1,19 +1,15 @@
 //! Turn-scoped input for the Agent's next complete reply boundary.
 
-use crate::{
-    ChatError, ChatMessage, Invocation, error::*, schema::steering_deliveries as deliveries,
-    storage, turn,
-};
-use diesel::prelude::*;
+use crate::{ChatError, ChatMessage, Invocation, error::*};
 use mfn_llm::{
     CallOutcome,
     steering::{Boundary, Endpoint, MAX_PENDING_BYTES, MAX_PENDING_MESSAGES},
 };
-use snafu::{ResultExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 use std::{
+    collections::{HashMap, hash_map::Entry},
     io::{Read, Write},
     net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},
-    path::Path,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -103,25 +99,54 @@ impl SteeringInbox {
         }
         Ok(std::mem::take(&mut state.pending))
     }
+}
 
-    fn deliver(
-        &self,
-        db: &Path,
-        invocation: &Invocation,
-        boundary: Boundary,
-        mut stream: impl Write,
-    ) -> Result<(), ChatError> {
-        let mut batch = self.take_at(boundary.outcome)?;
-        // Do not hold the admission lock across SQLite or transport I/O.
+struct DeliveryLog {
+    inbox: SteeringInbox,
+    messages: Mutex<Vec<(i64, String)>>,
+}
+
+impl DeliveryLog {
+    fn deliver(&self, boundary: Boundary, mut stream: impl Write) -> Result<(), ChatError> {
+        let mut batch = self.inbox.take_at(boundary.outcome)?;
+        // The listener is the only writer. Publish the receipt before closing the reply socket,
+        // but never authorize an input whose frame could not be written.
         let result = (|| {
             if !batch.is_empty() {
-                record(db, invocation, boundary.position, &batch)?;
+                ensure!(
+                    boundary.position > 0
+                        && self
+                            .messages
+                            .lock()
+                            .unwrap()
+                            .last()
+                            .is_none_or(|(last, _)| *last < boundary.position),
+                    InvalidSnafu {
+                        field: "steering position",
+                        reason: "must advance past the previous delivery at a completed reply"
+                    }
+                );
+                boundary
+                    .position
+                    .checked_add((batch.len() - 1) as i64)
+                    .context(ArithmeticSnafu {
+                        operation: "position steering messages",
+                    })?;
             }
             let frame = serde_json::to_vec(&batch).context(JsonSnafu)?;
-            stream.write_all(&frame).context(SteeringIoSnafu)
+            stream.write_all(&frame).context(SteeringIoSnafu)?;
+            if !batch.is_empty() {
+                self.messages.lock().unwrap().extend(
+                    batch
+                        .drain(..)
+                        .enumerate()
+                        .map(|(i, text)| (boundary.position + i as i64, text)),
+                );
+            }
+            Ok(())
         })();
         if result.is_err() {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.inbox.state.lock().unwrap();
             state.closed = true;
             batch.append(&mut state.pending);
             state.pending = batch;
@@ -130,81 +155,53 @@ impl SteeringInbox {
     }
 }
 
-fn record(
-    db: &Path,
-    invocation: &Invocation,
-    position: i64,
-    batch: &[String],
-) -> Result<(), ChatError> {
-    ensure!(
-        position > 0,
-        InvalidSnafu {
-            field: "steering position",
-            reason: "must follow a completed reply"
-        }
-    );
-    let mut db = storage::connect(db)?;
-    db.immediate_transaction(|db| {
-        let call = turn::load_call(db, &invocation.call_id)?;
-        ensure!(
-            call.state == "running"
-                && call.purpose == "conversation"
-                && call.session_id == invocation.session_id
-                && call.turn_id.as_deref() == Some(&invocation.turn_id),
-            ConflictSnafu {
-                id: &invocation.call_id
-            }
-        );
-        for (offset, text) in batch.iter().enumerate() {
-            let position = position.checked_add(offset as i64).ok_or_else(|| {
-                ArithmeticSnafu {
-                    operation: "position steering messages",
-                }
-                .build()
-            })?;
-            diesel::insert_into(deliveries::table)
-                .values((
-                    deliveries::turn_id.eq(&invocation.turn_id),
-                    deliveries::position.eq(position),
-                    deliveries::content.eq(text),
-                ))
-                .execute(db)
-                .context(DatabaseSnafu {
-                    operation: "record steering delivery",
-                })?;
-        }
-        Ok(())
-    })
+/// Shared only by one database owner and its host calls. Keep receipts while a call can still
+/// be saved or abandoned, including when its runner or job handle no longer exists.
+#[derive(Default)]
+pub struct Deliveries {
+    calls: Mutex<HashMap<String, Arc<DeliveryLog>>>,
 }
 
-pub fn validate(
-    db: &mut SqliteConnection,
-    turn_id: &str,
-    display: &[ChatMessage],
-) -> Result<(), ChatError> {
-    let admitted = deliveries::table
-        .filter(deliveries::turn_id.eq(turn_id))
-        .order(deliveries::position)
-        .select((deliveries::position, deliveries::content))
-        .load::<(i64, String)>(db)
-        .context(DatabaseSnafu {
-            operation: "validate steering deliveries",
-        })?;
-    let users = display
-        .iter()
-        .enumerate()
-        .filter_map(|(index, message)| match message {
-            ChatMessage::User { content, .. } => Some((index as i64, content)),
-            _ => None,
-        });
-    ensure!(
-        users.eq(admitted.iter().map(|(index, content)| (*index, content))),
-        InvalidSnafu {
-            field: "display steering",
-            reason: "must exactly match host-delivered user input at its reply boundaries"
+impl Deliveries {
+    fn register(&self, inbox: &SteeringInbox) -> Result<Arc<DeliveryLog>, ChatError> {
+        let id = &inbox.invocation.call_id;
+        match self.calls.lock().unwrap().entry(id.clone()) {
+            Entry::Vacant(slot) => Ok(slot
+                .insert(Arc::new(DeliveryLog {
+                    inbox: inbox.clone(),
+                    messages: Mutex::default(),
+                }))
+                .clone()),
+            Entry::Occupied(_) => ConflictSnafu { id }.fail(),
         }
-    );
-    Ok(())
+    }
+
+    pub fn validate(&self, call_id: &str, display: &[ChatMessage]) -> Result<(), ChatError> {
+        let receipts = self.calls.lock().unwrap().get(call_id).cloned();
+        let delivered = receipts.as_ref().map(|log| log.messages.lock().unwrap());
+        let expected = delivered.as_deref().map_or(&[][..], Vec::as_slice);
+        let users = display
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| match message {
+                ChatMessage::User { content, .. } => Some((index as i64, content)),
+                _ => None,
+            });
+        ensure!(
+            users.eq(expected.iter().map(|(index, text)| (*index, text))),
+            InvalidSnafu {
+                field: "display steering",
+                reason: "must exactly match host-delivered user input at its reply boundaries"
+            }
+        );
+        Ok(())
+    }
+
+    pub fn forget(&self, call_id: &str) {
+        if let Some(log) = self.calls.lock().unwrap().remove(call_id) {
+            log.inbox.close();
+        }
+    }
 }
 
 /// Only this pull capability crosses the executable boundary. The runner never receives the
@@ -218,7 +215,11 @@ struct Listener {
 }
 
 impl Listener {
-    fn start(db: &Path, invocation: &Invocation, inbox: &SteeringInbox) -> Result<Self, ChatError> {
+    fn start(
+        deliveries: &Deliveries,
+        invocation: &Invocation,
+        inbox: &SteeringInbox,
+    ) -> Result<Self, ChatError> {
         ensure!(
             inbox.invocation() == invocation,
             ConflictSnafu {
@@ -234,9 +235,7 @@ impl Listener {
         };
         let stopped = Arc::new(AtomicBool::new(false));
         let stop = stopped.clone();
-        let queue = inbox.clone();
-        let db = db.to_owned();
-        let invocation = invocation.clone();
+        let log = deliveries.register(inbox)?;
         let worker = thread::Builder::new()
             .name("mf-steering".into())
             .spawn(move || {
@@ -262,7 +261,7 @@ impl Listener {
                     let Ok(boundary) = serde_json::from_slice(&frame) else {
                         continue;
                     };
-                    queue.deliver(&db, &invocation, boundary, stream)?;
+                    log.deliver(boundary, stream)?;
                 }
                 Ok(())
             })
@@ -299,13 +298,13 @@ impl Drop for Listener {
 }
 
 pub fn with_endpoint<T>(
-    db: &Path,
+    deliveries: &Deliveries,
     invocation: &Invocation,
     inbox: Option<&SteeringInbox>,
     run: impl FnOnce(Option<Endpoint>) -> Result<T, ChatError>,
 ) -> Result<T, ChatError> {
     let Some(inbox) = inbox else { return run(None) };
-    let mut listener = Listener::start(db, invocation, inbox)?;
+    let mut listener = Listener::start(deliveries, invocation, inbox)?;
     let result = run(Some(listener.endpoint.clone()));
     listener.finish()?;
     result

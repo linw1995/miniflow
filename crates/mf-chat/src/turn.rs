@@ -3,7 +3,9 @@ use crate::{
     ConversationResult, ModelCall, Turn,
     error::*,
     schema::{messages, model_calls, sessions, turns},
-    session, storage,
+    session,
+    steering::Deliveries,
+    storage,
 };
 use diesel::prelude::*;
 use mf_runtime::NodeValue;
@@ -427,7 +429,6 @@ pub fn validate_admitted(
     if let Some(alternatives) = turn.result_alternatives {
         alternatives.validate(response)?;
     }
-    crate::steering::validate(connection, &turn.id, response.display_messages())?;
     response.validate_against(&admitted_messages(connection, turn)?)
 }
 
@@ -469,10 +470,13 @@ pub fn save_response(
     Ok(())
 }
 
-pub fn complete(input: CompleteTurnInputs) -> Result<CompletionOutputs, ChatError> {
+pub fn complete(
+    input: CompleteTurnInputs,
+    deliveries: &Deliveries,
+) -> Result<CompletionOutputs, ChatError> {
     validate_result(&input.response)?;
     let mut connection = storage::connect(Path::new(&input.database_path))?;
-    connection.immediate_transaction(|connection| {
+    let result = connection.immediate_transaction(|connection| {
         let call = load_call(connection, &input.invocation.call_id)?;
         ensure!(
             call.session_id == input.invocation.session_id
@@ -503,6 +507,7 @@ pub fn complete(input: CompleteTurnInputs) -> Result<CompletionOutputs, ChatErro
             call.state == "running" && turn.state == "running",
             ConflictSnafu { id: &call.id }
         );
+        deliveries.validate(&call.id, input.response.display_messages())?;
         validate_admitted(connection, &turn, &input.response)?;
         let owner = session::load(connection, &call.session_id)?;
         if input.response.status == "succeeded" {
@@ -592,7 +597,8 @@ pub fn complete(input: CompleteTurnInputs) -> Result<CompletionOutputs, ChatErro
                 result: saved_result(&load_call(connection, &call.id)?)?,
             },
         })
-    })
+    });
+    result.inspect(|_| deliveries.forget(&input.invocation.call_id))
 }
 
 pub fn failure_summary(text: &str) -> &str {
@@ -828,6 +834,10 @@ impl ChatDatabase {
                     id: &invocation.call_id
                 }
             );
+            if !result_matches(&call, response) {
+                self.deliveries
+                    .validate(&call.id, response.display_messages())?;
+            }
             validate_admitted(connection, &turn, response)
         })
     }
@@ -837,7 +847,7 @@ impl ChatDatabase {
         invocation: Invocation,
         response: ConversationResult,
     ) -> Result<Completion, ChatError> {
-        let result: CompletionOutputs = complete(CompleteTurnInputs {
+        let input = CompleteTurnInputs {
             database_path: self
                 .path()
                 .to_str()
@@ -845,8 +855,8 @@ impl ChatDatabase {
                 .into(),
             invocation,
             response,
-        })?;
-        Ok(result.completion)
+        };
+        Ok(complete(input, &self.deliveries)?.completion)
     }
 
     pub fn fail_turn_with_usages(
@@ -855,7 +865,8 @@ impl ChatDatabase {
         error: &str,
         usages: Vec<crate::CallUsage>,
     ) -> Result<bool, ChatError> {
-        let result: Changed = fail(FailTurnInputs {
+        let call_id = invocation.call_id.clone();
+        let result = fail(FailTurnInputs {
             usages: Some(usages),
             database_path: self
                 .path()
@@ -866,6 +877,7 @@ impl ChatDatabase {
             state: "failed".into(),
             error: error.into(),
         })?;
+        self.deliveries.forget(&call_id);
         Ok(result.changed)
     }
 
@@ -875,7 +887,8 @@ impl ChatDatabase {
         state: &str,
         error: &str,
     ) -> Result<bool, ChatError> {
-        let result: Changed = fail(FailTurnInputs {
+        let call_id = invocation.call_id.clone();
+        let result = fail(FailTurnInputs {
             usages: None,
             database_path: self
                 .path()
@@ -886,6 +899,7 @@ impl ChatDatabase {
             state: state.into(),
             error: error.into(),
         })?;
+        self.deliveries.forget(&call_id);
         Ok(result.changed)
     }
 
@@ -900,7 +914,7 @@ impl ChatDatabase {
         error: &str,
         usages: Option<Vec<crate::CallUsage>>,
     ) -> Result<bool, ChatError> {
-        let result: Changed = fail_call(FailCallInputs {
+        let result = fail_call(FailCallInputs {
             usages,
             database_path: self
                 .path()
@@ -911,6 +925,7 @@ impl ChatDatabase {
             state: state.into(),
             error: error.into(),
         })?;
+        self.deliveries.forget(call_id);
         Ok(result.changed)
     }
 
@@ -1227,12 +1242,15 @@ mod tests {
         let mut unsupported = base.clone();
         unsupported.response.usages[0].usage = Some(BTreeMap::from([("cost".into(), 1)]));
         for input in [empty, negative, unsupported] {
-            assert!(matches!(complete(input), Err(ChatError::Invalid { .. })));
+            assert!(matches!(
+                complete(input, &database.deliveries),
+                Err(ChatError::Invalid { .. })
+            ));
         }
         let mut foreign = base.clone();
         foreign.invocation.session_id = "different".into();
         assert!(matches!(
-            complete(foreign.clone()),
+            complete(foreign.clone(), &database.deliveries),
             Err(ChatError::Conflict { .. })
         ));
         assert!(matches!(
@@ -1273,6 +1291,9 @@ mod tests {
             .unwrap();
         let saved = database.turn(&begun.invocation.turn_id).unwrap();
         assert_eq!(saved.error.unwrap(), "x".repeat(4095));
-        assert!(matches!(complete(base), Err(ChatError::Conflict { .. })));
+        assert!(matches!(
+            complete(base, &database.deliveries),
+            Err(ChatError::Conflict { .. })
+        ));
     }
 }

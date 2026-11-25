@@ -282,6 +282,7 @@ Common message rules:
 - A result consumes one pending call ID. Unknown/duplicate results fail, and all pending calls must
   be answered before another non-tool message. Partial-prefix mode permits only a final unresolved batch.
 - `D` contains generated assistant/tool messages and exactly the steering delivered to this invocation. It must not echo the initial user or old history.
+  The owning host retains delivery positions and text in memory until settlement or abandonment, not in a separate database record.
   On success it has complete tool exchanges and ends with a nonempty assistant answer without calls.
   On failure it may be empty or a valid partial prefix; failure requires an error and forbids a title.
 - `Append` validates `P + D` under the appropriate complete/partial rules, including collisions with
