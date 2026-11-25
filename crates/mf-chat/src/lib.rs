@@ -13,6 +13,7 @@ pub mod nodes;
 mod preview;
 mod schema;
 mod session;
+mod steering;
 mod storage;
 mod title;
 mod tool_metrics;
@@ -33,6 +34,7 @@ pub use model_selection::{ModelSelection, ModelSelectionCancellation, ModelSelec
 pub use models::{Message, ModelCall, Session, Turn};
 pub use preview::{PreviewConsumer, PreviewDelta, PreviewEvent, PreviewReceiver};
 pub use session::{MessagePage, MessageRecord, SessionPage};
+pub use steering::SteeringInbox;
 pub use storage::ChatDatabase;
 pub use tool_metrics::{ToolExecution, ToolExecutionMetrics, ToolExecutionPhase};
 pub use turn::{Invocation, ModelIdentity};

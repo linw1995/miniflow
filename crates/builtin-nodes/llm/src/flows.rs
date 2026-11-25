@@ -67,7 +67,7 @@ mod tests {
             .unwrap();
         assert!(repeat.config.get("max_iterations").is_none());
         let loop_inputs = repeat.config["inputs"].as_object().unwrap();
-        assert_eq!(loop_inputs.len(), 7);
+        assert_eq!(loop_inputs.len(), 8);
         assert_eq!(loop_inputs["prefix"], json!({"list":"object"}));
         assert_eq!(loop_inputs["tools"], json!({"map":"flow"}));
         assert_eq!(loop_inputs["tool_properties"], json!({"map":"object"}));

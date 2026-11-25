@@ -45,6 +45,7 @@ impl HostConfig {
 }
 
 struct Active {
+    steering: Option<crate::SteeringInbox>,
     invocation: Invocation,
     cancellation: StreamCancellation,
 }
@@ -74,6 +75,7 @@ pub struct ChatJob {
     ready: Option<Result<Completion, ChatError>>,
     completed: Arc<AtomicBool>,
     tool_metrics: ToolExecutionMetrics,
+    steering: Option<crate::SteeringInbox>,
 }
 
 impl ChatJob {
@@ -85,7 +87,22 @@ impl ChatJob {
         &self.tool_metrics
     }
 
+    /// Keep a handle to recover input not delivered before cancellation or failure.
+    pub fn steering(&self) -> Option<&crate::SteeringInbox> {
+        self.steering.as_ref()
+    }
+
+    pub fn steer(&self, text: impl Into<String>) -> Result<(), ChatError> {
+        self.steering
+            .as_ref()
+            .context(SteeringClosedSnafu)?
+            .submit(text.into())
+    }
+
     pub fn cancel(&self) {
+        if let Some(inbox) = &self.steering {
+            inbox.close();
+        }
         if self.completed.load(Ordering::Acquire) {
             return;
         }
@@ -264,9 +281,15 @@ impl ChatHost {
         {
             let _ = handle.join();
         }
+        let steering = profile
+            .backend()
+            .steering_input()
+            .is_some()
+            .then(|| crate::SteeringInbox::new(invocation.clone()));
         workers.active.insert(
             invocation.call_id.clone(),
             Active {
+                steering: steering.clone(),
                 invocation: invocation.clone(),
                 cancellation: cancellation.clone(),
             },
@@ -299,6 +322,7 @@ impl ChatHost {
         let worker_cancellation = job_cancellation.clone();
         let tool_metrics = ToolExecutionMetrics::default();
         let worker_metrics = tool_metrics.clone();
+        let worker_steering = steering.clone();
         let worker = thread::Builder::new()
             .name(format!("mf-chat-{}", invocation.call_id))
             .spawn(move || {
@@ -309,11 +333,15 @@ impl ChatHost {
                         job_cancellation,
                         ConversationPresentation {
                             preview,
+                            steering: worker_steering.clone(),
                             tools: Some(worker_metrics.clone()),
                             context_windows: inner.context_windows.clone(),
                         },
                     )
                 }));
+                if let Some(inbox) = worker_steering {
+                    inbox.close();
+                }
                 worker_metrics.close(worker_cancellation.failure().is_some());
                 let result = match result {
                     Ok(result) => result,
@@ -371,6 +399,7 @@ impl ChatHost {
             receiver,
             ready: None,
             completed,
+            steering,
             tool_metrics,
         })
     }
@@ -419,6 +448,9 @@ impl ChatHost {
             }
             workers.closed = true;
             for active in workers.active.values() {
+                if let Some(inbox) = &active.steering {
+                    inbox.close();
+                }
                 active.cancellation.cancel(
                     mf_runtime::StreamExecutionSnafu {
                         message: "chat host closed",

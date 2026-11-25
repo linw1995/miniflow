@@ -549,7 +549,9 @@ unchanged.
 
 The Agent accepts complete `params.messages` as a read-only Loop prefix and calls `mfn-llm.tool-catalog`
 once before the first request. The Loop carries only the generated suffix and continues while the
-model requests tools, without a fixed round limit. The
+model requests tools or a [steering message](chat.md#steering-a-running-agent) arrives at a complete
+reply boundary, without a fixed round limit. The private optional `params.steering` endpoint defaults
+to `null`; it is not part of the tool catalog or request history. The
 [request Flow](../crates/builtin-nodes/llm/workflows/agent-request.json) forwards the prefix unchanged
 when the suffix is empty, avoiding CEL conversion of the request history on the first model request.
 After a completed tool round, it joins the prefix and the generated messages with CEL, while the

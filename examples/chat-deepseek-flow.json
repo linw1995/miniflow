@@ -25,6 +25,12 @@
       "kind": "builtin.parameters",
       "config": {
         "parameters": {
+          "steering": {
+            "type": {
+              "nullable": "object"
+            },
+            "default": null
+          },
           "messages": {
             "type": {
               "list": "object"
@@ -162,6 +168,12 @@
           "from": {
             "node": "tool_properties",
             "port": "value"
+          }
+        },
+        "params.steering": {
+          "from": {
+            "node": "params",
+            "port": "steering"
           }
         },
         "params.messages": {

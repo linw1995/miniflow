@@ -66,6 +66,8 @@ pub enum ChatRunError {
     WorkerPanic,
     #[snafu(display("finish, cancel, or recover the current turn first"))]
     Busy,
+    #[snafu(display("this turn is not accepting steering input"))]
+    SteeringClosed,
     #[snafu(display("there is no reply to recover"))]
     MissingReply,
     #[snafu(display("invalid chat options: {reason}"))]
@@ -160,6 +162,10 @@ pub enum ChatEvent {
         invocation: Invocation,
         prompt: String,
     },
+    UnsentSteering {
+        invocation: Invocation,
+        prompts: Vec<String>,
+    },
     Observing(LocalObservation),
     Preview {
         invocation: Invocation,
@@ -182,7 +188,11 @@ pub enum ChatEvent {
     },
 }
 
+type ActiveSteering = Arc<Mutex<Option<mf_chat::SteeringInbox>>>;
+
 pub struct ChatController {
+    steering: ActiveSteering,
+    supports_steering: bool,
     _database: Arc<ChatDatabase>,
     commands: SyncSender<ChatCommand>,
     events: Receiver<ChatEvent>,
@@ -226,7 +236,10 @@ impl ChatController {
         let cancel = Arc::new(AtomicBool::new(false));
         let preview = Arc::new(Mutex::new(Capture::default()));
         let compacting = Arc::new(Mutex::new((None, false)));
+        let steering = ActiveSteering::default();
+        let supports_steering = launch.contract.steering_input.is_some();
         let controller = Controller {
+            steering: steering.clone(),
             launch: Arc::new(launch),
             model_selection,
             database: Arc::clone(&database),
@@ -247,6 +260,8 @@ impl ChatController {
             })?;
         Ok(Self {
             _database: database,
+            steering,
+            supports_steering,
             commands,
             events,
             deferred: Mutex::new(None),
@@ -264,6 +279,22 @@ impl ChatController {
             cancel,
             worker: Some(worker),
         })
+    }
+    pub fn supports_steering(&self) -> bool {
+        self.supports_steering
+    }
+    /// Never route live input through the command queue blocked by the current invocation.
+    pub fn steer(&self, target: &Invocation, text: String) -> Result<(), ChatRunError> {
+        let active = self.steering.lock().unwrap();
+        let inbox = active
+            .as_ref()
+            .filter(|inbox| inbox.invocation() == target)
+            .context(SteeringClosedSnafu)?;
+        ensure!(
+            !self.closed.load(Ordering::Acquire) && !self.cancel.load(Ordering::Acquire),
+            SteeringClosedSnafu
+        );
+        Ok(inbox.submit(text)?)
     }
     pub fn supports_model_selection(&self) -> bool {
         self.supports_model_selection
@@ -304,6 +335,9 @@ impl ChatController {
     }
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Release);
+        if let Some(inbox) = &*self.steering.lock().unwrap() {
+            inbox.close();
+        }
         self.model_selection_cancel.cancel_active();
     }
     pub fn try_event(&self) -> Option<ChatEvent> {
@@ -406,6 +440,7 @@ struct Retained {
     response: RetainedResponse,
 }
 struct Controller {
+    steering: ActiveSteering,
     launch: Arc<ChatLaunch>,
     model_selection: ModelSelection,
     database: Arc<ChatDatabase>,
@@ -672,16 +707,39 @@ impl Controller {
                 }
             }
         });
-        let resolution = mf_chat::workflow::run_conversation_with_context_windows(
+        let inbox = self
+            .launch
+            .contract
+            .steering_input
+            .is_some()
+            .then(|| mf_chat::SteeringInbox::new(invocation.clone()));
+        *self.steering.lock().unwrap() = inbox.clone();
+        let resolution = mf_chat::workflow::run_observed_conversation(
             &self.database,
             request,
             Arc::new(backend),
             cancellation,
             true,
+            &mf_chat::CompactionConfig::default(),
             None,
-            preview_consumer,
-            self.model_selection.context_windows(),
+            mf_chat::workflow::ConversationPresentation {
+                steering: inbox,
+                preview: preview_consumer,
+                context_windows: self.model_selection.context_windows(),
+                tools: None,
+            },
         );
+        let ended = self.steering.lock().unwrap().take();
+        if let Some(inbox) = ended {
+            inbox.close();
+            let prompts = inbox.take_unsent();
+            if !prompts.is_empty() {
+                self.emit(ChatEvent::UnsentSteering {
+                    invocation: invocation.clone(),
+                    prompts,
+                });
+            }
+        }
         // A captured result may need save-only recovery without visiting the finish node.
         if matches!(
             &resolution,
@@ -794,6 +852,9 @@ struct ExternalBackend {
 }
 
 impl mf_chat::ConversationBackend for ExternalBackend {
+    fn steering_input(&self) -> Option<&str> {
+        self.launch.contract.steering_input.as_deref()
+    }
     fn registered_workflow(
         &self,
     ) -> Option<(
@@ -832,7 +893,7 @@ impl mf_chat::ConversationBackend for ExternalBackend {
                 prompt: request.prompt()?.to_owned(),
             },
         );
-        let execution = self.execute(request, context, preview);
+        let execution = self.execute(context, preview);
         let failure = match execution.as_ref().err() {
             Some(ChatRunError::Runner {
                 source: RunnerError::Cancelled { .. },
@@ -898,17 +959,15 @@ impl mf_chat::ConversationBackend for ExternalBackend {
 impl ExternalBackend {
     fn execute(
         &self,
-        request: mf_chat::ConversationInputs,
         context: &mut mf_runtime::ExecutionContext,
         mut preview: Option<
             &mut dyn FnMut(mf_chat::PreviewDelta) -> Result<(), mf_chat::ChatError>,
         >,
     ) -> Result<(LocalOutcome, Option<mf_chat::ChatError>), ChatRunError> {
-        let arguments = self.launch.contract.arguments(request, &self.parameters)?;
         let mut decoder = mf_chat::contract::ConversationOutputDecoder::new(&self.launch.contract);
         let completion = RunnerInvocation {
             runner: &self.launch.runner,
-            arguments: &arguments,
+            arguments: context.workflow_arguments(),
             verbose: self.launch.options.run.verbose,
             snapshots: true,
         }

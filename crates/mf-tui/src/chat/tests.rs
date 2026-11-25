@@ -176,6 +176,52 @@ fn argument_transports_and_invalid_chat_options_fail_before_database_ownership()
 }
 
 #[test]
+fn steering_ports_are_host_owned_and_must_not_bind_ambient_or_public_values() {
+    let port = |binding| {
+        serde_json::from_value(
+            json!({"type":{"nullable":"object"},"required":true,"binding":binding}),
+        )
+        .unwrap()
+    };
+    let mut manifest = chat_manifest();
+    for binding in [
+        json!({"secret":false,"default":null}),
+        json!({"secret":true,"env":"STEERING","default":null}),
+        json!({"secret":true,"default":{}}),
+    ] {
+        manifest
+            .descriptor
+            .input_schema
+            .inputs
+            .get_mut("start")
+            .unwrap()
+            .insert("steering".into(), port(binding));
+        assert!(ChatContract::from_manifest(&manifest).is_err());
+    }
+    manifest
+        .descriptor
+        .input_schema
+        .inputs
+        .get_mut("start")
+        .unwrap()
+        .insert(
+            "steering".into(),
+            port(json!({"secret":true,"default":null})),
+        );
+    let contract = ChatContract::from_manifest(&manifest).unwrap();
+    assert_eq!(contract.steering_input.as_deref(), Some("start.steering"));
+    assert!(!contract.parameters.inputs["start"].contains_key("steering"));
+    assert!(
+        RunOptions {
+            arguments: vec!["--start.steering={}".into()],
+            ..Default::default()
+        }
+        .parsed_workflow_arguments(&contract.parameters)
+        .is_err()
+    );
+}
+
+#[test]
 fn one_execution_lane_rejects_queued_submissions_and_cancels_without_switching() {
     let root = tempfile::tempdir().unwrap();
     let prepared = launch(root.path());
@@ -203,6 +249,11 @@ fn one_execution_lane_rejects_queued_submissions_and_cancels_without_switching()
         panic!("expected admission")
     };
     assert_eq!(session.title, "first prompt");
+    assert!(!controller.supports_steering());
+    assert!(matches!(
+        controller.steer(&invocation, "not a new turn".into()),
+        Err(ChatRunError::SteeringClosed)
+    ));
     assert_eq!(session.title_source, "provisional");
     assert!(matches!(next(&controller), ChatEvent::Observing(_)));
     assert!(matches!(

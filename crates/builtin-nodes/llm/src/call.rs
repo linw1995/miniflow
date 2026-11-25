@@ -74,7 +74,8 @@ impl ToolCall {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, NodeEnum)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, NodeEnum)]
+#[serde(rename_all = "snake_case")]
 pub enum CallOutcome {
     #[value(rename = "completed")]
     Completed,

@@ -734,6 +734,7 @@ struct ChatView {
     sessions: Option<SessionPage>,
     sessions_after: Option<String>,
     supports_model_selection: bool,
+    supports_steering: bool,
     active_model: Option<String>,
     active_context_window: Option<u64>,
     context_tokens: Option<u64>,
@@ -833,6 +834,7 @@ impl ChatView {
             sessions: None,
             sessions_after: None,
             supports_model_selection: false,
+            supports_steering: false,
             active_model: None,
             active_context_window: None,
             context_tokens: Some(0),
@@ -862,6 +864,7 @@ impl ChatView {
     }
     fn apply_controller_state(&mut self, controller: &ChatController) {
         self.supports_model_selection = controller.supports_model_selection();
+        self.supports_steering = controller.supports_steering();
         self.active_model = controller.initial_model().map(str::to_owned);
         self.loading_default_model = controller.loading_default_model();
     }
@@ -1047,6 +1050,24 @@ impl ChatView {
                         .is_some_and(|(current, _)| current == &invocation)
                 {
                     self.host_compacting = active;
+                }
+            }
+            ChatEvent::UnsentSteering {
+                invocation,
+                prompts,
+            } => {
+                if self
+                    .active
+                    .as_ref()
+                    .is_some_and(|(id, _)| id == &invocation)
+                {
+                    let mut restored = prompts.join("\n\n");
+                    if !self.editor.text.is_empty() {
+                        restored.push_str("\n\n");
+                        restored.push_str(&self.editor.text);
+                    }
+                    self.editor = Editor::default();
+                    self.editor.insert(&restored);
                 }
             }
             ChatEvent::Observing(observation) => self.observation = Some(observation),
@@ -1310,6 +1331,18 @@ impl ChatView {
     }
     fn submit(&mut self, controller: &ChatController) {
         if self.editor.text.trim().is_empty() {
+            return;
+        }
+        if self.running && self.supports_steering {
+            if let Some((invocation, _)) = &self.active {
+                match controller.steer(invocation, self.editor.text.clone()) {
+                    Ok(()) => {
+                        self.editor = Editor::default();
+                        self.notice = "Steering queued for the current reply boundary".into();
+                    }
+                    Err(error) => self.notice = error.to_string(),
+                }
+            }
             return;
         }
         if self.send(
@@ -2092,6 +2125,9 @@ impl ChatView {
         ));
         drop(transcript);
         let hint = match self.mode {
+            Mode::Input if self.running && self.supports_steering => {
+                " Alt+Enter steer | Enter newline | Esc browse "
+            }
             Mode::Input => " Alt+Enter send | Enter newline | Esc browse ",
             Mode::Browse => " Enter send | i edit | j/k tool | Space fold | arrows scroll ",
             _ => "",

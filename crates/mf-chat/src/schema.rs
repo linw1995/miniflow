@@ -79,6 +79,14 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    steering_deliveries (turn_id, position) {
+        turn_id -> Text,
+        position -> BigInt,
+        content -> Text,
+    }
+}
+
 diesel::joinable!(turns -> sessions (session_id));
 diesel::joinable!(messages -> sessions (session_id));
 diesel::joinable!(messages -> turns (turn_id));

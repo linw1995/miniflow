@@ -224,6 +224,28 @@ Set `capture_errors: true` on LLM nodes that should report request failures as d
 input, cancellation, and infrastructure errors can still abort before any terminal result. Previews
 and observations are never substitutes for missing messages or usages.
 
+## Steering a running Agent
+
+When the editor says `Alt+Enter steer`, sending text changes the **current** turn. The Agent finishes
+its in-flight model request and every tool in the batch before adding pending user messages in FIFO
+order to its next model request. A normal text answer with pending input also continues the same
+execution. No tool is interrupted or replayed. This is not a fresh submission, Retry, or a follow-up
+scheduled after settlement. Without steering support the running turn continues to reject submissions.
+
+The calculator, context, and DeepSeek chat examples opt in by forwarding a private `steering` startup
+port (`type: {"nullable":"object"}`, `default: null`, no environment binding) to `params.steering`
+on `mfn-llm.agent`. The host supplies a short-lived authenticated loopback **pull** endpoint. Do not
+expose it to a model or tool. With no endpoint the Agent performs no steering I/O. Embedded clients
+can call `ChatJob::steer`; a clone of `job.steering()`'s inbox can outlive the job for collecting
+unsent input. Each inbox accepts up to 32 pending messages totaling 256 KiB of UTF-8 at a time.
+
+Delivery receipts in `steering_deliveries` contain private user text. The host checks exact text,
+order, and positions in the display delta before settlement or save-only recovery. A Flow cannot
+invent user input for the audit. A failed turn still publishes no model context. Cancellation or
+failure does not deliver pending input; the TUI restores it beside any newer draft while open.
+Late submissions are rejected without clearing the editor. Closing the application discards the
+in-memory queue; reopening does not resume it.
+
 ## Turn lifecycle
 
 The host-bound `begin` call atomically stores the original user, running turn and application invocation,
@@ -702,7 +724,7 @@ resources on session change, eviction, or exit.
 
 | Interaction | Key |
 | --- | --- |
-| Send the prompt | Alt+Enter, or Esc then Enter |
+| Send a prompt, or steer an active Agent that supports it | Alt+Enter, or Esc then Enter |
 | Insert a newline | Enter while editing |
 | Browse messages / return to editing | Esc / i |
 | Open commands | Ctrl+P |
@@ -729,8 +751,8 @@ context replacement is marked pending, not published. Failed records stay visibl
 including failed results with tool records or no assistant answer. Saving a failed audit result does
 not publish its snapshot. A retry action starts a fresh execution and may repeat tool effects.
 
-Session switching waits for active or retained work to be resolved. Extra submissions are rejected,
-not queued. Drafts survive idle switches. History opens at a bounded latest page; Earlier/Latest
+Session switching waits for active or retained work to be resolved. A second turn is never queued.
+Drafts survive idle switches. History opens at a bounded latest page; Earlier/Latest
 commands page original records, not model context. Turn-level performance appears once per page and
 is not duplicated on reload.
 

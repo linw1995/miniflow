@@ -18,6 +18,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "chat_tui/steering.rs"]
+mod steering;
 #[path = "support/terminal.rs"]
 mod terminal;
 use terminal::Screen;
@@ -210,10 +212,17 @@ fn compiled(root: &Path, server: &Server, example: &str) -> std::path::PathBuf {
 }
 
 fn calculator_call(id: &str, operation: &str, left: f64, right: f64) -> Reply {
+    tool_call(
+        id,
+        "calculator",
+        serde_json::json!({"operation":operation,"left":left,"right":right}),
+    )
+}
+
+fn tool_call(id: &str, name: &str, arguments: serde_json::Value) -> Reply {
     let mut reply = Reply::stream_text("");
-    let arguments =
-        serde_json::json!({"operation":operation,"left":left,"right":right}).to_string();
-    let identity = serde_json::json!({"id":"response","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":id,"type":"function","function":{"name":"calculator","arguments":""}}]},"finish_reason":null}]});
+    let arguments = arguments.to_string();
+    let identity = serde_json::json!({"id":"response","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":id,"type":"function","function":{"name":name,"arguments":""}}]},"finish_reason":null}]});
     let chunk = serde_json::json!({"id":"response","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":arguments}}]},"finish_reason":null}]});
     let finish = serde_json::json!({"id":"response","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}});
     reply.body = format!("data: {identity}\n\ndata: {chunk}\n\ndata: {finish}\n\ndata: [DONE]\n\n");

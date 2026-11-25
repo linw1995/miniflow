@@ -427,6 +427,7 @@ pub fn validate_admitted(
     if let Some(alternatives) = turn.result_alternatives {
         alternatives.validate(response)?;
     }
+    crate::steering::validate(connection, &turn.id, response.display_messages())?;
     response.validate_against(&admitted_messages(connection, turn)?)
 }
 

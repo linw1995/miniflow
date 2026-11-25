@@ -868,7 +868,14 @@ Handled turn failures SHALL allow exit status 0 when cleanup succeeds; display o
 
 The terminal SHALL reserve one execution lane before accepting a submission. A running turn or retained reply
 SHALL block additional submissions, new chats, and session switching. Extra submissions MUST be rejected instead
-of queued. Storage and supervision SHALL run off the terminal rendering thread, with independent cancellation.
+of queued. Steering is input to the running execution, not another submission. Storage and supervision
+SHALL run off the terminal rendering thread, with independent cancellation.
+
+#### Scenario: Steer instead of starting another child
+
+- **WHEN** the active chatflow accepts steering and the user sends nonblank text
+- **THEN** the terminal targets that invocation and clears the draft only on admission
+- **AND** a closed inbox rejects late input; cancellation returns undelivered input for editing, not execution
 
 #### Scenario: Reject a second submission
 

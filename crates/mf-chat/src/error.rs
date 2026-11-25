@@ -34,6 +34,12 @@ pub enum ChatError {
     },
     #[snafu(display("chat workflow profile {name:?} does not exist"))]
     ProfileMissing { name: String },
+    #[snafu(display("this turn is not accepting steering input"))]
+    SteeringClosed,
+    #[snafu(display("could not bind the steering capability: {source}"))]
+    SteeringBinding { source: mf_runtime::TypeMismatch },
+    #[snafu(display("could not exchange input over the local steering channel: {source}"))]
+    SteeringIo { source: io::Error },
     #[snafu(display("chat host is closed"))]
     Closed,
     #[snafu(display("chat host reached its {limit}-workflow capacity"))]

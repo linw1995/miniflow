@@ -281,7 +281,7 @@ Common message rules:
   parsed arguments are preserved without a new object-only restriction on historical calls.
 - A result consumes one pending call ID. Unknown/duplicate results fail, and all pending calls must
   be answered before another non-tool message. Partial-prefix mode permits only a final unresolved batch.
-- `D` contains only generated assistant/tool messages. It must not echo submitted users or old history.
+- `D` contains generated assistant/tool messages and exactly the steering delivered to this invocation. It must not echo the initial user or old history.
   On success it has complete tool exchanges and ends with a nonempty assistant answer without calls.
   On failure it may be empty or a valid partial prefix; failure requires an error and forbids a title.
 - `Append` validates `P + D` under the appropriate complete/partial rules, including collisions with
@@ -380,8 +380,8 @@ candidate for save-only recovery as well; do not permit saving whichever branch 
 An otherwise unique valid result followed only by process/delivery failure retains existing explicit
 save-only recovery. Already committed success still wins over later conflicting reconciliation.
 
-The generic built-in Agent consumes a complete request and returns only generated assistant/tool
-additions, including its final assistant. Tool catalog projection stays outside its Loop, and ordered
+The generic built-in Agent consumes a complete request and returns generated assistant/tool
+additions and host-delivered steering, including its final assistant. Tool catalog projection stays outside its Loop, and ordered
 tool results survive parallel dispatch. The Agent continues while the model requests tools. Captured
 model failures return available rounds/usages without inventing an assistant or claiming success.
 
