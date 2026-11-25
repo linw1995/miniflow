@@ -915,7 +915,7 @@ impl PreparedStream {
                 })
             })
             .collect();
-        let plan = Arc::new(prepared);
+        let plan = prepared;
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
                 output: None,

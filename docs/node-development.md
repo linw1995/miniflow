@@ -1260,12 +1260,15 @@ adding an observation scope. Such Flows use serial domains and dynamic publicati
 payloads and sensitivity across updates. Root source and assignment instructions require their
 owning invocation and are not exposed as isolated node targets.
 
-The current authored/compiler-prepared child path remains finite, including compatible TaskStream
-forwarding and calls from parent Stream messages. Its preparation rejects autonomous Event/Stream
-children. This is separate from the runtime lifecycle API above: factory-backed Event handles can use
-`PreparedSubgraph::from_stream_factory` and `FlowInvocation`. Merging that runtime support does not
-provide the fresh-state preparation and code generation needed to accept authored Event children.
-Terminal-only execution of a finite TaskStream child does not subscribe to its incremental outputs.
+A callable body with internal stream edges or Event/Stream operators runs a frozen stream plan
+in the caller's execution context. Its interface distinguishes startup-frame selections (one terminal
+map after a successful drain) from message-frame selections (incremental packets). Task and TaskStream
+executors are shared; each invocation instantiates fresh Event/Stream state from the originally
+bound provider and children. There is no per-invocation compilation or provider lookup. Use
+`PreparedSubgraph` or `FlowValue` to receive this interface; a typed `Flow` config field specifically
+requires synchronous task wiring. Factory-backed `PreparedSubgraph::from_stream_factory` still exposes
+all selections as emissions. A body that only forwards TaskStream exports can continue to execute
+without subscribing to those exports when the caller requests only terminal results.
 
 Interpreted and generated preparation use the same registered factory and frozen child contracts.
 Loop still establishes a fresh scope per pass, and Iteration per item; sharing a factory does not

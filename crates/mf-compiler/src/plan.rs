@@ -496,6 +496,11 @@ impl CompiledWorkflow {
                 }
             });
         }
+        let scheduled = body_layouts
+            .iter()
+            .filter(|(_, layout)| layout.stream_plan.is_some())
+            .map(|(path, _)| path.iter().map(ToString::to_string).collect())
+            .collect();
         let mut typed_plan = crate::TypedPlan::default();
         if let Some(execution) = &self.graph.definition.execution {
             typed_plan.connections = self
@@ -518,7 +523,7 @@ impl CompiledWorkflow {
             let prepared = flow
                 .into_stream(execution.clone())
                 .map_err(crate::WorkflowBuildError::from)?;
-            layouts.push(crate::fixed::stream_preparation(self)?);
+            layouts.push(crate::fixed::stream_preparation(self, &scheduled)?);
             layouts.push(stream_program_tokens(
                 prepared.plan(),
                 &self.graph.definition,
@@ -540,7 +545,12 @@ impl CompiledWorkflow {
             let flow = flow.into_tasks().map_err(crate::WorkflowBuildError::from)?;
             typed_plan =
                 crate::plan_typed_segments(&flow, !options.preserve_intermediate_outputs, true);
-            layouts.push(typed_preparation_tokens(self, &flow, &typed_plan)?);
+            layouts.push(typed_preparation_tokens(
+                self,
+                &flow,
+                &typed_plan,
+                &scheduled,
+            )?);
             layouts.push(task_layout_tokens(
                 &self.graph.definition,
                 &order,
@@ -648,6 +658,7 @@ fn typed_preparation_tokens(
     workflow: &CompiledWorkflow,
     flow: &mf_runtime::Flow,
     plan: &crate::TypedPlan,
+    scheduled: &crate::fixed::ScheduledScopes,
 ) -> Result<TokenStream, PlanError> {
     let typed_positions: BTreeSet<_> = plan
         .segments
@@ -735,8 +746,15 @@ fn typed_preparation_tokens(
             })()
         });
     }
-    let (preparations, _, root) =
-        crate::fixed::scope(&workflow.graph, "root", &[], &constructors, true, None)?;
+    let (preparations, _, root) = crate::fixed::scope(
+        &workflow.graph,
+        "root",
+        &[],
+        &constructors,
+        true,
+        scheduled,
+        None,
+    )?;
     let mut bindings = Vec::new();
     for domain in flow.execution_domains().domains() {
         let segments: Vec<_> = plan
@@ -989,25 +1007,49 @@ fn collect_body_layouts(
             let mut body = body.clone();
             path.push(body.child_scope_key(node, name).into());
             let layout = &body_layouts[path.as_slice()];
-            let domains = layout.domains.as_ref().expect("prepared child domains");
             let streams = &layout.streams;
             layouts.push(crate::fixed::bindings(
                 &child_scope_name(scope, index, binding_index, node, name, &body),
                 layout,
             ));
             let body_scope = child_scope_name(scope, index, binding_index, node, name, &body);
-            layouts.push(subgraph_stream_tokens(&body_scope, &node.id, streams)?);
-            if body.relations.is_callable() {
-                body.definition
-                    .outputs
-                    .retain(|output| !streams.iter().any(|stream| stream.name == output.name));
+            let bind = format_ident!("bind_child_{body_scope}");
+            let schema = format_ident!("input_schema_{body_scope}");
+            let interface = format_ident!("interface_{body_scope}");
+            let owner = node.id.as_str();
+            if let Some(plan) = &layout.stream_plan {
+                let module = format_ident!("scheduled_{body_scope}");
+                let program = stream_program_tokens(plan, &body.definition, &body.execution_order);
+                let guards = stream_guard_tokens(&body.definition, &body.execution_order, plan);
+                let limits = &plan.execution().limits;
+                let workers = limits.workers;
+                let pending = limits.max_pending_messages;
+                layouts.push(quote! { mod #module { use super::*; #program #guards
+                    pub(super) fn prepare(nodes: Vec<mf_runtime::FlowNode>) -> mf_runtime::PreparedStream {
+                        let execution = mf_runtime::StreamExecution { limits: mf_runtime::StreamLimits { workers: #workers, max_pending_messages: #pending } };
+                        bind_stream_guards(mf_runtime::PreparedStream::from_plan(execution, nodes, stream_program(), #schema()))
+                    }
+                } });
+                layouts.push(quote! {
+                    fn #bind(nodes: Vec<mf_runtime::FlowNode>, operators: mf_runtime::StreamOperatorFactories, identities: Vec<mf_runtime::NodeIdentity>) -> Result<mf_runtime::PreparedSubgraph, mf_runtime::generated::BindError> {
+                        use snafu::ResultExt as _;
+                        mf_runtime::PreparedSubgraph::from_stream_plan(#module::prepare(nodes), operators, identities, #interface()).context(mf_runtime::generated::NodeSnafu { definition_id: mf_runtime::DefinitionId::from(#owner) })
+                    }
+                });
+            } else {
+                layouts.push(subgraph_stream_tokens(&body_scope, &node.id, streams)?);
+                if body.relations.is_callable() {
+                    body.definition
+                        .outputs
+                        .retain(|o| !streams.iter().any(|s| s.name == o.name));
+                }
+                layouts.push(task_layout_tokens(
+                    &body.definition,
+                    &body.execution_order,
+                    &body_scope,
+                    layout.domains.as_ref().expect("finite child domains"),
+                ));
             }
-            layouts.push(task_layout_tokens(
-                &body.definition,
-                &body.execution_order,
-                &body_scope,
-                domains,
-            ));
             collect_body_layouts(&body, &body_scope, path, body_layouts, layouts)?;
             path.pop();
         }
@@ -1100,19 +1142,7 @@ fn stream_program_tokens(
     order: &[DefinitionId],
 ) -> TokenStream {
     let incoming = crate::compiler::incoming_dependencies(definition);
-    let mut owners = vec![0; plan.nodes().len()];
-    for (message, entry) in plan.program().messages.iter().enumerate() {
-        for &domain in entry.schedule.domains.iter() {
-            for node in plan.execution_domain(domain).nodes.iter() {
-                owners[node.index()] = message;
-            }
-        }
-    }
-    for (node, binding) in plan.program().emissions.iter().enumerate() {
-        if let Some(binding) = binding.as_ref().filter(|binding| !binding.terminal) {
-            owners[node] = binding.message;
-        }
-    }
+    let owners = crate::construction::stream_output_messages(plan);
     let executions = domain_tokens(plan.execution_domains());
     let mut functions = Vec::new();
     let inputs: Vec<_> = plan.nodes().iter().enumerate().map(|(index, _)| {
@@ -1161,9 +1191,7 @@ fn stream_program_tokens(
         let select = if program.select_outputs.is_some() {
             let name = format_ident!("select_stream_outputs_{message}");
             let outputs = definition.outputs.iter().filter(|output| {
-                let index = plan.nodes().iter().position(|node| node.definition_id == output.node).expect("validated selected output");
-                let owner = if plan.nodes()[index].metadata.stream_outputs.iter().any(|port| port.name == output.port) { plan.emission_binding(index).message } else { owners[index] };
-                owner == message
+                owners[&(output.node.as_str(), output.port.as_ref())].1 == message
             }).map(|output| {
                 let name = LitStr::new(&output.name, Span::call_site());
                 let node = LitStr::new(output.node.as_str(), Span::call_site());
@@ -1446,6 +1474,7 @@ mod tests {
             &["owner".into()],
             &BTreeMap::new(),
             false,
+            &Default::default(),
             None,
         )
         .unwrap();

@@ -158,7 +158,21 @@ pub struct SubgraphInterface {
 impl SubgraphInputMetadata {
     /// Partitions a prepared Flow without changing its flat runtime input binding.
     pub fn from_flow(flow: &Flow) -> Self {
-        let domains = flow.execution_domains().domains();
+        Self::from_domains(
+            flow.execution_domains(),
+            flow.execution_order(),
+            flow.nodes(),
+            flow.input_schema(),
+        )
+    }
+
+    pub fn from_domains<N>(
+        layout: &crate::ExecutionDomains,
+        order: &[crate::NodeId],
+        nodes: &[crate::FlowNode<N>],
+        schema: &WorkflowInputSchema,
+    ) -> Self {
+        let domains = layout.domains();
         let mut domain_flows = vec![usize::MAX; domains.len()];
         let mut components = Vec::<Vec<usize>>::new();
         for start in 0..domains.len() {
@@ -191,7 +205,7 @@ impl SubgraphInputMetadata {
                 .expect("a connected component contains a domain")
         });
 
-        let mut node_flows = vec![usize::MAX; flow.nodes().len()];
+        let mut node_flows = vec![usize::MAX; nodes.len()];
         for (component, domain_ids) in components.iter().enumerate() {
             for &domain in domain_ids {
                 for node in domains[domain].nodes.iter() {
@@ -199,16 +213,14 @@ impl SubgraphInputMetadata {
                 }
             }
         }
-        let schema = flow.input_schema();
         let flows = components
             .iter()
             .enumerate()
             .map(|(component, _)| {
-                let nodes: Vec<_> = flow
-                    .execution_order()
+                let nodes: Vec<_> = order
                     .iter()
                     .filter(|node| node_flows[node.index()] == component)
-                    .map(|node| flow.nodes()[node.index()].definition_id.clone())
+                    .map(|node| nodes[node.index()].definition_id.clone())
                     .collect();
                 let mut inputs = WorkflowInputSchema::default();
                 for node in &nodes {
@@ -255,6 +267,7 @@ pub enum SubgraphOrigin {
 #[derive(Clone)]
 enum PreparedSubgraphBody {
     Flow(Flow),
+    Scheduled(Arc<crate::callable_stream::CallableStream>),
     Finite(Arc<SubgraphBody>),
     Event(Arc<dyn Fn() -> Result<crate::PreparedStream, WorkflowRunError> + Send + Sync>),
 }
@@ -388,17 +401,52 @@ impl PreparedSubgraph {
         }
     }
 
-    /// Recovers an actual compiled Flow for injection into a typed node configuration.
+    /// Binds ordinary stream dataflow in a callable scope. Domain-zero selections
+    /// become terminal only after the entire invocation drains successfully.
+    pub fn from_stream_plan(
+        prepared: crate::PreparedStream,
+        factories: crate::StreamOperatorFactories,
+        nodes: Vec<NodeIdentity>,
+        interface: SubgraphInterface,
+    ) -> Result<Self, crate::NodeBuildError> {
+        let inputs = prepared.plan().input_schema().clone();
+        let body = crate::callable_stream::CallableStream::new(
+            prepared,
+            factories,
+            &interface.stream_outputs,
+        )?;
+        Ok(Self {
+            nodes,
+            origin: None,
+            inputs,
+            outputs: interface.outputs,
+            stream_outputs: interface.stream_outputs,
+            relations: None,
+            input_metadata: interface.input_metadata,
+            body: PreparedSubgraphBody::Scheduled(Arc::new(body)),
+        })
+    }
+
+    /// Returns the frozen scheduler layout, when this body has internal stream dataflow.
+    pub fn scheduled_plan(&self) -> Option<&Arc<crate::StreamPlan>> {
+        if let PreparedSubgraphBody::Scheduled(graph) = &self.body {
+            Some(&graph.plan)
+        } else {
+            None
+        }
+    }
+
+    /// Recovers a synchronous task Flow for injection into a typed node configuration.
     /// Host callbacks and Event factories have no equivalent finite Flow representation.
     pub fn into_flow(self) -> Result<Flow, crate::NodeBuildError> {
         match self.body {
             PreparedSubgraphBody::Flow(flow) => Ok(flow),
-            PreparedSubgraphBody::Finite(_) | PreparedSubgraphBody::Event(_) => {
-                crate::NodeInvalidSubgraphSnafu {
-                    message: "prepared body is not backed by a compiled finite Flow",
-                }
-                .fail()
+            PreparedSubgraphBody::Scheduled(_)
+            | PreparedSubgraphBody::Finite(_)
+            | PreparedSubgraphBody::Event(_) => crate::NodeInvalidSubgraphSnafu {
+                message: "prepared body is not backed by a compiled finite Flow",
             }
+            .fail(),
         }
     }
 
@@ -475,6 +523,13 @@ impl PreparedSubgraph {
                 let flow = flow.clone();
                 crate::FlowInvocation::start_body(
                     Arc::new(move |state, sink| flow.execute_with_sink(state, sink)),
+                    context,
+                )
+            }
+            PreparedSubgraphBody::Scheduled(graph) => {
+                let graph = graph.clone();
+                crate::FlowInvocation::start_body(
+                    Arc::new(move |state, sink| graph.execute(state, sink)),
                     context,
                 )
             }
@@ -603,6 +658,7 @@ impl PreparedSubgraph {
     ) -> Result<FlowOutputs, WorkflowRunError> {
         match &self.body {
             PreparedSubgraphBody::Flow(flow) => flow.execute_with_sink(state, sink),
+            PreparedSubgraphBody::Scheduled(graph) => graph.execute(state, sink),
             PreparedSubgraphBody::Finite(body) => body(state, sink),
             PreparedSubgraphBody::Event(_) => {
                 let context = state.fork_domain_with_observation(state.observation().cloned());
