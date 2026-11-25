@@ -448,9 +448,11 @@ pub fn run_chat(path: &Path, options: ChatOptions) -> Result<u8, ChatRunError> {
                 controller.cancel();
             }
             view.draw(&mut terminal)?;
-            if !event::poll(Duration::from_millis(50)).context(IoSnafu {
-                operation: "poll terminal",
-            })? {
+            if !event::poll(view.inspector.frame_wait(Duration::from_millis(50))).context(
+                IoSnafu {
+                    operation: "poll terminal",
+                },
+            )? {
                 continue;
             }
             match event::read().context(IoSnafu {
@@ -1864,10 +1866,12 @@ impl ChatView {
             if let Some(observation) = &self.observation {
                 self.inspector.render_execution(frame, inner, observation);
             } else {
+                self.inspector.hide_pips();
                 frame.render_widget(Paragraph::new("Flow: Starting..."), inner);
             }
             chat
         } else {
+            self.inspector.hide_pips();
             body
         };
         let mut transcript = self.transcript.borrow_mut();
