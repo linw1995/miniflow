@@ -1,3 +1,4 @@
+mod callable_stream;
 mod cancellation;
 mod compiled_graph;
 mod config_template;
@@ -39,6 +40,7 @@ mod worker;
 mod workflow_inputs;
 mod workflow_manifest;
 
+pub use callable_stream::StreamOperatorFactories;
 #[cfg(feature = "async")]
 pub use cancellation::Cancelled;
 pub use cancellation::StreamCancellation;

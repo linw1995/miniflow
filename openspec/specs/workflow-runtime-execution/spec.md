@@ -26,6 +26,14 @@ Preparation MUST reject unsupported executors before invocation.
 - **WHEN** a valid workflow contains an Event/Stream executor or consumes or selects an incremental output
 - **THEN** preparation produces the same Flow type in stream mode and the runtime starts a stream instance
 
+#### Scenario: Wire streaming nodes inside a callable Flow
+
+- **WHEN** an authored callable body contains an Event/Stream node or an internal incremental edge
+- **THEN** interpreted and generated execution use its frozen stream schedule and fresh operator state per invocation
+- **AND** selections belonging to emitted message frames are forwarded incrementally, including ordinary downstream Task outputs
+- **AND** startup-frame selections are returned only after successful drain; failure suppresses this terminal result
+- **AND** invalid joins across message domains are rejected during preparation
+
 #### Scenario: Reject streaming executors in a synchronous body
 
 - **WHEN** a Loop or iteration body contains a pure event or stream executor

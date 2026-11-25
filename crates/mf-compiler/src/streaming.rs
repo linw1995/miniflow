@@ -3,6 +3,34 @@ use crate::{CompiledWorkflow, NodeRegistry, WorkflowCompileError, WorkflowExecut
 use mf_runtime::PreparedStream;
 use snafu::ResultExt;
 
+pub fn callable_interface(
+    plan: &mf_runtime::StreamPlan,
+    selections: &[mf_runtime::WorkflowOutputDefinition],
+    input_metadata: mf_runtime::SubgraphInputMetadata,
+) -> mf_runtime::SubgraphInterface {
+    let mut interface = mf_runtime::SubgraphInterface {
+        input_metadata,
+        ..Default::default()
+    };
+    let ports = crate::construction::stream_output_messages(plan);
+    let sparse = plan.selected_domains().filter(|m| *m != 0).count() > 1;
+    for selection in selections {
+        let (port, message) = ports[&(selection.node.as_str(), selection.port.as_ref())];
+        let terminal = message == 0;
+        let spec = mf_runtime::PortSpec::owned(
+            selection.name.as_ref(),
+            port.value_type.clone(),
+            !selection.optional && (terminal || !sparse),
+        );
+        if terminal {
+            interface.outputs.push(spec);
+        } else {
+            interface.stream_outputs.push(spec);
+        }
+    }
+    interface
+}
+
 pub fn start_stream(
     plan: &CompiledWorkflow,
     registry: &NodeRegistry,
