@@ -300,7 +300,7 @@ TRACES
 }
 
 #[test]
-fn tui_displays_parallel_running_nodes_in_pips_until_they_finish() {
+fn tui_retains_parallel_pips_briefly_after_the_nodes_finish() {
     if !loopback_available() {
         return;
     }
@@ -527,11 +527,19 @@ TELEMETRY
                         && text.contains(" Running: parallel-1 ")
                     {
                         stage = 1;
-                    } else if stage == 1 && text.contains("Exited:") && !text.contains(" Running: ")
+                    } else if stage == 1
+                        && text.contains(" Recent: parallel-0 ")
+                        && text.contains(" Recent: parallel-1 ")
+                    {
+                        stage = 2;
+                    } else if stage == 2
+                        && text.contains("Exited:")
+                        && !text.contains(" Running: ")
+                        && !text.contains(" Recent: ")
                     {
                         finished_without_pips = true;
                         master.write_all(b"q").unwrap();
-                        stage = 2;
+                        stage = 3;
                     }
                 }
             }

@@ -696,10 +696,12 @@ overview. Dragging and mouse folding are not supported; use the existing keyboar
 or collapse bodies.
 When at least two display nodes run concurrently in the current scope, picture-in-picture local graphs
 center on and highlight each running node without changing the main graph's selection, pan state, or
-layout. The PiP grid recomputes its rows, columns, and visible count from the running-node count and
-available terminal area on every frame. It shows every running node when space permits and reports a
-`+N more` overflow otherwise. Completed nodes leave the grid, and fewer than two running nodes removes
-it entirely. Expanded bodies with running descendants do not add duplicate PiPs for the same branch.
+layout. New PiPs expand upward into their slots over 200 ms. When a PiP is no longer needed, it
+shows its last active view as `Recent` for 600 ms, then retracts over 200 ms. This also applies when
+the ordinary execution view drops below two running nodes. The main graph shows observed state
+changes immediately. The grid adapts to the available terminal area, giving running nodes priority
+over retained PiPs and reporting any running nodes that do not fit as `+N more`. Expanded bodies
+with running descendants do not add duplicate live PiPs for the same branch.
 Running members of folded clusters and bodies remain visible in separate PiPs through a shared fully
 expanded PiP layout; folding the main graph does not hide them. PiP titles include the body path to
 distinguish nodes with the same ID in different scopes. The compact chat Flow execution panel uses the
