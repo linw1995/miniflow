@@ -1,10 +1,14 @@
+mod output;
+use output::Capture;
+
 use crate::{check_cancelled, error::*, private_text, workspace::WorkspaceRoot};
 use mf_runtime::{
     ExecutionContext, NodeBuildError, NodeExecutionError, NodeFactory, NodeRegistration, NodeValue,
-    Nullable, PreparedNode, Shared, TypedNodeResult, TypedTaskNode, deserialize_config,
+    Nullable, PreparedNode, Shared, TypedEmitter, TypedNodeResult, TypedTaskStreamNode,
+    deserialize_config,
 };
 use rustix::{
-    fs::{Access, OFlags, access, fcntl_getfl, fcntl_setfl},
+    fs::{Access, access},
     io::Errno,
     process::{Pid, Signal, WaitId, WaitIdOptions, kill_process, kill_process_group, waitid},
 };
@@ -14,11 +18,8 @@ use snafu::{OptionExt, ResultExt, ensure};
 use std::{
     env,
     ffi::OsStr,
-    io::{self, Read},
-    os::{
-        fd::AsFd,
-        unix::process::{CommandExt, ExitStatusExt},
-    },
+    io,
+    os::unix::process::{CommandExt, ExitStatusExt},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     thread,
@@ -28,7 +29,7 @@ use std::{
 pub const BASH_KIND: &str = "builtin.coding.bash";
 
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
-const CHUNK_BYTES: usize = 8192;
+const PREVIEW_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 
 #[derive(Default, Deserialize)]
@@ -146,16 +147,25 @@ struct BashOutputs {
     stderr: Shared<String>,
     stdout_truncated: bool,
     stderr_truncated: bool,
+    stdout_path: Option<Shared<String>>,
+    stderr_path: Option<Shared<String>>,
 }
 
-impl TypedTaskNode for BashNode {
+#[derive(NodeValue)]
+struct BashEmission {
+    progress: Shared<String>,
+}
+
+impl TypedTaskStreamNode for BashNode {
     type Input = BashInputs;
     type Output = BashOutputs;
+    type Emission = BashEmission;
 
     fn execute(
         &self,
         input: BashInputs,
         context: &mut ExecutionContext,
+        emitter: &mut TypedEmitter<'_, '_, BashEmission>,
     ) -> Result<TypedNodeResult<BashOutputs>, NodeExecutionError> {
         check_cancelled(context)?;
         let timeout = match input.timeout {
@@ -190,6 +200,32 @@ impl TypedTaskNode for BashNode {
             process.child.stderr.take().expect("piped stderr"),
             self.max_output_bytes,
         )?;
+        let mut published = 0;
+        let mut last = None;
+        let mut publish = |stdout: &mut Capture<std::process::ChildStdout>,
+                           stderr: &mut Capture<std::process::ChildStderr>,
+                           force|
+         -> Result<(), NodeExecutionError> {
+            let bytes = stdout.bytes + stderr.bytes;
+            if emitter.is_connected()
+                && bytes != published
+                && (force || last.is_none_or(|at: Instant| at.elapsed() >= PREVIEW_INTERVAL))
+            {
+                let mut parts = Vec::new();
+                if stdout.bytes > 0 {
+                    parts.push(format!("stdout:\n{}", stdout.preview()));
+                }
+                if stderr.bytes > 0 {
+                    parts.push(format!("stderr:\n{}", stderr.preview()));
+                }
+                emitter.send(BashEmission {
+                    progress: private_text(parts.join("\n")),
+                })?;
+                last = Some(Instant::now());
+                published = bytes;
+            }
+            Ok(())
+        };
         let timed_out = loop {
             check_cancelled(context)?;
             if process.exited()? {
@@ -199,14 +235,18 @@ impl TypedTaskNode for BashNode {
             if remaining == Some(Duration::ZERO) {
                 break true;
             }
-            stdout.drain(8)?;
-            stderr.drain(8)?;
+            stdout.drain(64 * 1024)?;
+            stderr.drain(64 * 1024)?;
+            publish(&mut stdout, &mut stderr, false)?;
             thread::sleep(remaining.map_or(POLL_INTERVAL, |left| POLL_INTERVAL.min(left)));
         };
         let status = process.close()?;
-        let (stdout, stdout_truncated) = stdout.finish()?;
-        let (stderr, stderr_truncated) = stderr.finish()?;
+        stdout.drain_remaining()?;
+        stderr.drain_remaining()?;
+        publish(&mut stdout, &mut stderr, true)?;
         check_cancelled(context)?;
+        let (stdout, stdout_path) = stdout.finish()?;
+        let (stderr, stderr_path) = stderr.finish()?;
         let mut result = TypedNodeResult::from(BashOutputs {
             exit_code: if timed_out {
                 None
@@ -221,9 +261,17 @@ impl TypedTaskNode for BashNode {
             timed_out,
             stdout: private_text(stdout),
             stderr: private_text(stderr),
-            stdout_truncated,
-            stderr_truncated,
+            stdout_truncated: stdout_path.is_some(),
+            stderr_truncated: stderr_path.is_some(),
+            stdout_path: stdout_path.map(private_text),
+            stderr_path: stderr_path.map(private_text),
         });
+        if result.outputs.stdout_path.is_none() {
+            result.skipped.insert("stdout_path".into());
+        }
+        if result.outputs.stderr_path.is_none() {
+            result.skipped.insert("stderr_path".into());
+        }
         if result.outputs.exit_code.is_none() {
             result.skipped.insert("exit_code".into());
         }
@@ -308,61 +356,6 @@ impl Drop for OwnedProcess {
     }
 }
 
-struct Capture<R> {
-    pipe: R,
-    prefix: Vec<u8>,
-    limit: usize,
-    truncated: bool,
-}
-
-impl<R: AsFd + Read> Capture<R> {
-    fn new(pipe: R, limit: usize) -> Result<Self, CodingError> {
-        fcntl_getfl(&pipe)
-            .and_then(|flags| fcntl_setfl(&pipe, flags | OFlags::NONBLOCK))
-            .map_err(io::Error::from)
-            .context(IoSnafu {
-                operation: "configure command output pipe",
-            })?;
-        Ok(Self {
-            pipe,
-            prefix: Vec::new(),
-            limit,
-            truncated: false,
-        })
-    }
-
-    fn drain(&mut self, max_reads: usize) -> Result<bool, CodingError> {
-        let mut buffer = [0; CHUNK_BYTES];
-        for _ in 0..max_reads {
-            match self.pipe.read(&mut buffer) {
-                Ok(0) => return Ok(false),
-                Ok(bytes) => {
-                    let retained = bytes.min(self.limit - self.prefix.len());
-                    self.prefix.extend_from_slice(&buffer[..retained]);
-                    self.truncated |= retained < bytes;
-                }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(error) => {
-                    return Err(error).context(IoSnafu {
-                        operation: "read command output",
-                    });
-                }
-            }
-        }
-        Ok(true)
-    }
-
-    fn finish(mut self) -> Result<(String, bool), CodingError> {
-        // A descendant outside the group may still own the other end. Never wait for EOF.
-        self.truncated |= self.drain(2 * MAX_OUTPUT_BYTES / CHUNK_BYTES)?;
-        Ok((
-            String::from_utf8_lossy(&self.prefix).into_owned(),
-            self.truncated,
-        ))
-    }
-}
-
 fn prepare(value: Value) -> Result<PreparedNode, NodeBuildError> {
     let config: Config = deserialize_config(value)?;
     config.shell.validate()?;
@@ -382,7 +375,7 @@ fn prepare(value: Value) -> Result<PreparedNode, NodeBuildError> {
     );
     let root = WorkspaceRoot::prepare(config.workspace_root)?;
     let metadata = root.metadata();
-    PreparedNode::typed_task(
+    PreparedNode::typed_task_stream(
         BashNode {
             root,
             shell: config.shell,

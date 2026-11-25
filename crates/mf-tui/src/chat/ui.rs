@@ -151,6 +151,7 @@ fn render_message_group(
                 title: tool_call_label(Some(&call.name), &call.id),
                 arguments: Some(&call.arguments),
                 result: group.results.get(call.id.as_str()).copied(),
+                output: None,
                 execution: executions
                     .get(&call.id)
                     .filter(|execution| execution.name == call.name),
@@ -200,6 +201,7 @@ struct ToolGroup<'a> {
     title: String,
     arguments: Option<&'a Text>,
     result: Option<(&'a Text, usize)>,
+    output: Option<&'a Text>,
     execution: Option<&'a mf_chat::ToolExecution>,
 }
 
@@ -215,6 +217,7 @@ impl<'a> ToolGroup<'a> {
             title: format!("Tool result [{id}] ({} bytes)", content.1),
             arguments: None,
             result: Some(content),
+            output: None,
             execution,
         }
     }
@@ -230,6 +233,7 @@ impl<'a> ToolGroup<'a> {
             title,
             arguments,
             result,
+            output,
             execution,
         } = self;
         let open = expanded.contains(&key);
@@ -250,6 +254,13 @@ impl<'a> ToolGroup<'a> {
         if let Some(arguments) = arguments {
             transcript.deferred(format!("{key}:arguments"), arguments, Format::Json);
         }
+        if let Some(output) = output {
+            transcript.plain(
+                format!("{key}:output:label"),
+                vec![role_label("Command output (latest)", Color::Yellow, None)],
+            );
+            transcript.deferred(format!("{key}:output"), output, Format::Literal);
+        }
         if let Some((content, bytes)) = result {
             if arguments.is_some() {
                 transcript.plain(
@@ -262,7 +273,7 @@ impl<'a> ToolGroup<'a> {
                 );
             }
             transcript.deferred(format!("{key}:result"), content, Format::Literal);
-        } else if arguments.is_none() {
+        } else if arguments.is_none() && output.is_none() {
             transcript.plain(
                 format!("{key}:arguments"),
                 vec![Line::styled(
@@ -306,6 +317,26 @@ fn live_messages<'a>(
     executions: &'a BTreeMap<String, mf_chat::ToolExecution>,
 ) -> LiveMessages<'a> {
     let unique = unique_preview_ids(segments);
+    let outputs: BTreeMap<_, _> = segments
+        .iter()
+        .filter_map(|s| {
+            let t = s.output.as_ref()?;
+            Some(((s.model_call_id.as_str(), t.tool_call_id.as_str()), &s.text))
+        })
+        .collect();
+    let arguments: BTreeSet<_> = segments
+        .iter()
+        .filter_map(|s| {
+            let id = s
+                .tool
+                .as_ref()?
+                .id
+                .as_deref()
+                .filter(|id| unique.contains(id))?;
+            Some((s.model_call_id.as_str(), id))
+        })
+        .collect();
+    let output_ids: BTreeSet<_> = outputs.keys().map(|(_, id)| *id).collect();
     let mut messages = Vec::new();
     let mut positions = BTreeMap::new();
     for segment in segments {
@@ -321,6 +352,20 @@ fn live_messages<'a>(
             position
         });
         let message = &mut messages[position];
+        if let Some(output) = &segment.output {
+            let id = output.tool_call_id.as_str();
+            if !arguments.contains(&(model_call_id, id)) {
+                message.tools.push(ToolGroup {
+                    key: tool_key(turn, id),
+                    title: tool_call_label(Some(&output.name), id),
+                    arguments: None,
+                    result: None,
+                    output: Some(&segment.text),
+                    execution: executions.get(id).filter(|e| e.name == output.name),
+                });
+            }
+            continue;
+        }
         let Some(tool) = &segment.tool else {
             message.text = Some(&segment.text);
             continue;
@@ -343,18 +388,20 @@ fn live_messages<'a>(
             ),
             title: tool_call_label(name, id.unwrap_or(&index)),
             arguments: (!segment.text.is_empty()).then_some(&segment.text),
+            output: id.and_then(|id| outputs.get(&(model_call_id, id)).copied()),
             result: None,
             execution,
         });
     }
     let unmatched = executions
         .iter()
-        .filter(|(id, _)| !unique.contains(id.as_str()))
+        .filter(|(id, _)| !unique.contains(id.as_str()) && !output_ids.contains(id.as_str()))
         .map(|(id, execution)| ToolGroup {
             key: tool_key(turn, id),
             title: tool_call_label(Some(&execution.name), id),
             arguments: None,
             result: None,
+            output: None,
             execution: Some(execution),
         })
         .collect();
@@ -1378,6 +1425,11 @@ impl ChatView {
                     .iter()
                     .enumerate()
                     .filter_map(|(i, segment)| {
+                        if let Some(output) = &segment.output {
+                            return (self.preview.segments.get(i).is_none()
+                                && !current_ids.contains(output.tool_call_id.as_str()))
+                            .then(|| tool_key(turn, &output.tool_call_id));
+                        }
                         let tool = segment.tool.as_ref()?;
                         // Auto-open on the first argument, not on every delta after a manual fold.
                         let was_empty = self
@@ -3478,6 +3530,47 @@ mod tests {
         }
         view.switch(None);
         assert!(!render(&view, 180, 40).contains("Flow execution"));
+    }
+
+    #[test]
+    fn output_without_argument_previews_replaces_its_own_folded_tool_body() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let (_dir, db, invocation) = preview_turn();
+        let mut preview = capture(&db, &invocation);
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
+        view.show_execution = false;
+        view.running = true;
+        view.latest_invocation = Some(invocation.clone());
+        let update = |value: &str| mf_chat::PreviewEvent {
+            invocation: invocation.clone(),
+            delta: mf_chat::PreviewDelta::ToolOutput {
+                delta: mf_chat::ToolOutputUpdate {
+                    context: mf_chat::ToolOutputContext {
+                        model_call_id: "model".into(),
+                        tool_call_id: "known".into(),
+                        name: "bash".into(),
+                    },
+                    value: value.into(),
+                },
+            },
+        };
+        preview.apply(update("first sample")).unwrap();
+        view.replace_preview(preview.frame.clone());
+        let screen = render(&view, 100, 26);
+        assert!(
+            screen.contains("[-] Tool call bash [known]") && screen.contains("first sample"),
+            "{screen}"
+        );
+        view.focused_tool = Some(tool_key(&invocation.turn_id, "known"));
+        view.toggle_tool();
+        preview.apply(update("newer sample")).unwrap();
+        view.replace_preview(preview.frame);
+        assert!(!render(&view, 100, 26).contains("sample"));
+        view.toggle_tool();
+        let screen = render(&view, 100, 26);
+        assert!(screen.contains("newer sample") && !screen.contains("first sample"));
+        assert!(!screen.contains("Tool result"));
     }
 
     #[test]

@@ -111,7 +111,16 @@ mod tests {
         ] {
             assert!(!serialized.contains(synthetic), "{synthetic}");
         }
-        assert_eq!(definition.outputs.len(), 7);
+        assert_eq!(definition.outputs.len(), 8);
+        assert!(
+            definition
+                .outputs
+                .iter()
+                .any(|output| output.name == "tool_output"
+                    && output.node.as_str() == "repeat"
+                    && output.port == "tool_output"
+                    && output.optional)
+        );
         assert!(
             definition
                 .nodes

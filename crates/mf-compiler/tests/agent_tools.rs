@@ -403,7 +403,16 @@ fn zero_one_and_three_tool_supersets_keep_the_same_agent_source_and_ports() {
             .keys()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        ["params.calls", "params.tool_properties", "params.tools"]
+        [
+            "params.calls",
+            "params.model_call_id",
+            "params.tool_properties",
+            "params.tools"
+        ]
+    );
+    assert_eq!(
+        dispatch["inputs"]["params.model_call_id"]["from"],
+        json!({"node":"collect_usages", "port":"model_call_id"})
     );
     assert!(dispatch["config"].get("body").is_none());
 

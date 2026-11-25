@@ -269,7 +269,7 @@
           "bash_interface": "object"
         },
         "code": {
-          "value": "{\n  'ls': {'interface': ls_interface, 'description': 'List immediate nonignored files and directories under path (default .), including dotfiles. Returns workspace-relative paths and kinds in name order.'},\n  'find': {'interface': find_interface, 'description': 'Find files or directories by glob pattern under path (default .). Use *.rs for basenames or src/**/*.rs for scoped paths. kind is any, file, or directory; max_depth=1 selects immediate children.'},\n  'grep': {'interface': grep_interface, 'description': 'Search UTF-8 lines by regex pattern or literal text (literal=true). Optional path is a file or directory; defaults to the workspace root. Returns path, one-based line and text. Narrow the search if truncated.'},\n  'mkdir': {'interface': mkdir_interface, 'description': 'Create one new directory at path. Its parent must exist; an existing target is an error.'},\n  'read': {'interface': read_interface, 'description': 'Read a UTF-8 file by relative path. start_line is one-based; limit is at most 2000 lines. Continue at next_line if present.'},\n  'edit': {'interface': edit_interface, 'description': 'Edit an existing file by relative path. Supply edits as a list of objects with string fields old_text and new_text. Each old_text must match exactly once in the original file; matches may not overlap. All replacements apply together.'},\n  'write': {'interface': write_interface, 'description': 'Create a new UTF-8 file at a relative path with the supplied content. The parent directory must exist. Does not overwrite; use edit for existing files.'},\n  'bash': {'interface': bash_interface, 'description': 'Execute shell command text in the workspace. Each call starts a new non-interactive shell. Pipes, redirections, and multiple commands are supported. Optional timeout is in seconds. Inspect exit_code, timed_out, stdout and stderr.'}\n}"
+          "value": "{\n  'ls': {'interface': ls_interface, 'description': 'List immediate nonignored files and directories under path (default .), including dotfiles. Returns workspace-relative paths and kinds in name order.'},\n  'find': {'interface': find_interface, 'description': 'Find files or directories by glob pattern under path (default .). Use *.rs for basenames or src/**/*.rs for scoped paths. kind is any, file, or directory; max_depth=1 selects immediate children.'},\n  'grep': {'interface': grep_interface, 'description': 'Search UTF-8 lines by regex pattern or literal text (literal=true). Optional path is a file or directory; defaults to the workspace root. Returns path, one-based line and text. Narrow the search if truncated.'},\n  'mkdir': {'interface': mkdir_interface, 'description': 'Create one new directory at path. Its parent must exist; an existing target is an error.'},\n  'read': {'interface': read_interface, 'description': 'Read a UTF-8 file by relative path. start_line is one-based; limit is at most 2000 lines. Continue at next_line if present.'},\n  'edit': {'interface': edit_interface, 'description': 'Edit an existing file by relative path. Supply edits as a list of objects with string fields old_text and new_text. Each old_text must match exactly once in the original file; matches may not overlap. All replacements apply together.'},\n  'write': {'interface': write_interface, 'description': 'Create a new UTF-8 file at a relative path with the supplied content. The parent directory must exist. Does not overwrite; use edit for existing files.'},\n  'bash': {'interface': bash_interface, 'description': 'Execute shell command text in the workspace. Each call starts a new non-interactive shell. Pipes, redirections, and multiple commands are supported. Optional timeout is in seconds. stdout and stderr contain diagnostic tails (up to 50 KiB or 2000 lines each). When truncated, stdout_path or stderr_path names the complete private log; inspect selected ranges with another shell command without rerunning the original.'}\n}"
         }
       },
       "inputs": {
@@ -542,6 +542,12 @@
     }
   ],
   "outputs": [
+    {
+      "name": "tool_output",
+      "node": "agent",
+      "port": "tool_output",
+      "optional": true
+    },
     {
       "name": "tool_call_delta",
       "node": "agent",

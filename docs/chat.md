@@ -572,14 +572,20 @@ Tool-aware chatflows may select the shared Agent's optional `tool_call_delta` st
 contains a raw `arguments` fragment, its `model_call_id`, and the provider tool `index`, with optional
 `id` and `name` hints. An identity-only event has an empty `arguments` string. A fragment need not be
 valid JSON on its own.
-`PreviewEvent.delta` distinguishes `PreviewDelta::Text` from `PreviewDelta::ToolCall`. Neither enters
-history or model context. The calculator, context-replacement, and DeepSeek examples explicitly
+`PreviewEvent.delta` distinguishes `PreviewDelta::Text`, `PreviewDelta::ToolCall`, and
+`PreviewDelta::ToolOutput`. None enters history or model context. The calculator, context-replacement, and DeepSeek examples explicitly
 select `tool_call_delta`. A chatflow can select it without exposing `answer`.
+
+The coding example also selects `tool_output`: `{context: {model_call_id, tool_call_id, name}, value}`.
+`value` is a nonempty display snapshot (at most 16 KiB of UTF-8), **not** incremental text to append.
+The latest snapshot replaces the previous one for that call in the UI and the SQLite draft. It can
+be reopened after interruption, but it is never presented as a completed tool result. Only the
+terminal tool message goes back to the model.
 
 Terminal preview capture runs independently of drawing and inspection. Before publishing a frame,
 the terminal commits the available text and raw argument fragments to `preview_segments` and
 `preview_chunks` in `--chat-db`. These are ordinary tables keyed by turn, model call, and tool index,
-not a second message history. Each batch appends only new bytes. A frame addresses exact prefixes
+not a second message history. For text and arguments, each batch appends only new bytes. A frame addresses exact prefixes
 without copying the turn's bodies. There is no entry, byte, or argument-tail limit. If a draft write
 fails, the terminal reports it and stops extending that preview; the runner can still finish and save
 its result.

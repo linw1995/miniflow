@@ -466,8 +466,9 @@ A Flow owns its own callable properties. `builtin.constant` with `type: "flow"` 
 native capability (`value`) and its interface as plain JSON (`properties`), derived from the prepared
 body: `callable`, `startup`, `parameters`, `allowed`, `required`, `plain`, `outputs`, `streams` and
 `stdin`. Nothing is inferred from the source JSON, re-declared in a tool record, or exposed as a
-separate projection node. `callable` is true only for a body with exactly one startup node, no stdin and
-no incremental outputs; such a body also publishes `allowed` (unconfigured, non-secret input names
+separate projection node. `callable` requires exactly one startup node and no stdin. A Flow may have
+incremental outputs alongside its terminal interface, but a stream-only result is not callable.
+A callable body publishes `allowed` (unconfigured, non-secret input names
 mapped to JSON Schema) and `required` (effective required names, already excluding configured inputs
 and inputs with an environment or default). `plain` reports the sole required string `content` output that encodes as plain text.
 
@@ -483,7 +484,8 @@ native `Map(Flow)`. The matching properties map is JSON and can be assembled wit
 CEL. A fixed catalog Iteration visits the properties map, using each business key as the tool name, and
 projects a model definition with a CEL `builtin.code` node. Three assertions validate the whole
 catalog before any model request, including when no tools are called: each tool has exactly one startup
-node with a terminal interface and no stdin, only declared inputs are documented, and no public input
+node with a terminal interface and no stdin, its only permitted stream is a string named `progress`,
+only declared inputs are documented, and no public input
 is runtime-only. Dispatch consumes original calls and the same properties map.
 
 `mfn-llm.tool-uses` is an ordinary composed Flow. Per call it classifies the request with CEL, then a
@@ -691,8 +693,11 @@ business results. Recovery is fail-closed: explicit ordinary node execution fail
 Call wrappers, are recoverable. Providers may also return a typed
 `NodeExecutionError::BusinessFailed` retaining their own domain-error source. Unknown plugin errors
 are not assumed to be business failures.
-Invocation drains incremental emissions terminally without exposing Router stream ports. Ordinary
-`workflow.call` syntax and topology are unchanged.
+By default, the Router exposes no stream ports. Set `config.forward_stream` to a child stream name
+to forward each matching emission on the optional `update` port as `{context, value}`; other child
+emissions are ignored. `stream_context` is an optional object input (default `{}`), not a child
+argument. A route without the stream still returns its normal terminal envelope. The Agent uses this
+to tag `progress` with the model call, tool call and tool name. Ordinary `workflow.call` is unchanged.
 
 ## Node clusters
 

@@ -31,7 +31,10 @@ pub use error::{BackendSnafu, CaptureSnafu, ChatError};
 pub use host::{ChatHost, ChatJob, HostConfig};
 pub use model_selection::{ModelSelection, ModelSelectionCancellation, ModelSelectionUpdate};
 pub use models::{Message, ModelCall, Session, Turn};
-pub use preview::{PreviewConsumer, PreviewDelta, PreviewEvent, PreviewReceiver};
+pub use preview::{
+    PreviewConsumer, PreviewDelta, PreviewEvent, PreviewReceiver, ToolOutputContext,
+    ToolOutputUpdate,
+};
 pub use session::{MessagePage, MessageRecord, SessionPage};
 pub use storage::ChatDatabase;
 pub use tool_metrics::{ToolExecution, ToolExecutionMetrics, ToolExecutionPhase};

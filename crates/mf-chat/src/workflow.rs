@@ -401,8 +401,10 @@ fn compile_call(
         })
         .collect();
     if definition.outputs.iter().any(|output| {
-        matches!(output.name.as_ref(), "answer" | "tool_call_delta")
-            && !streams.contains(&(output.node.as_str(), output.port.as_ref()))
+        matches!(
+            output.name.as_ref(),
+            "answer" | "tool_call_delta" | "tool_output"
+        ) && !streams.contains(&(output.node.as_str(), output.port.as_ref()))
     }) || definition
         .edges
         .iter()

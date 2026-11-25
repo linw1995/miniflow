@@ -4,7 +4,15 @@
 
 Rig buffers Chat Completions arguments before yielding its tool-call event. The existing SSE normalizer captures nonempty string fragments from the primary choice before that assembly. The synchronous publisher drains them on the same poll that reads the frame, including when Rig is still waiting for the rest of the call. This adds no second loader or provider request. Rig still owns validation and completed model output.
 
-`tool_call_delta` carries raw arguments, model-call identity, provider tool index, and optional wire ID/name hints. An identity-only record retains its hints with an empty argument string. The shared Agent forwards only this optional model-output port. ToolUses and `llm.tool_result` keep their ordinary execution contracts. The chat host accepts only declared previews, shares acknowledgement and cancellation with text previews, and admits terminal alternatives before preview validation.
+`tool_call_delta` carries raw arguments, model-call identity, provider tool index, and optional wire
+ID/name hints. An identity-only record retains its hints with an empty argument string.
+
+The shared Agent may also forward a tool Flow's optional string `progress` as `tool_output`. The
+caller supplies the model call and tool call identities; they are not parsed from command output.
+Each update replaces a bounded display snapshot. It is not a model delta, execution status, or tool
+result. `llm.tool_result` still consumes only the terminal result. The chat host accepts only
+declared previews, shares acknowledgement and cancellation with text previews, and admits terminal
+alternatives before preview validation.
 
 ## Execution observations
 

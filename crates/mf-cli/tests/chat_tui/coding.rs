@@ -265,6 +265,73 @@ fn coding_rules_follow_the_active_workspace_without_entering_the_saved_transcrip
 }
 
 #[test]
+fn command_output_reaches_the_terminal_before_exit_and_only_the_tail_reaches_the_model() {
+    let root = tempfile::tempdir().unwrap();
+    let work = root.path().join("working copy");
+    fs::create_dir(&work).unwrap();
+    let early = "First diagnostic from the subprocess";
+    let last = "Last diagnostic from the subprocess";
+    let noise = "uninteresting bytes\n".repeat(4000);
+    fs::write(work.join("early"), format!("{early}\n")).unwrap();
+    fs::write(work.join("noise"), &noise).unwrap();
+    fs::write(work.join("diagnose.sh"), format!("cat early; while [ ! -f release ]; do sleep 0.05; done; cat noise; printf '%s\\n' '{last}'; exit 7")).unwrap();
+    let server = Server::start(vec![
+        streamed_tool_calls(json!([call(
+            "diagnostic",
+            "bash",
+            json!({"command":"/bin/sh diagnose.sh", "timeout":20})
+        )])),
+        Reply::stream_text("Command inspected."),
+        Reply::text("Diagnostics"),
+    ]);
+    let binary = compiled(root.path(), &server, CODING_AGENT);
+    let path = root.path().join("chat.sqlite");
+    let mut terminal = super::ChatTerminal::with_args(
+        &binary,
+        &path,
+        &["--params.workspace_root", work.to_str().unwrap()],
+    );
+    terminal.wait_for(&["What would you like"]);
+    terminal.send(b"Run diagnostics\x1b\r");
+    terminal.wait_for(&[
+        "Command output (latest)",
+        early,
+        "Tool call bash [diagnostic]",
+    ]);
+    assert_eq!(server.requests().len(), 1);
+    fs::write(work.join("release"), "").unwrap();
+    terminal.wait_for(&["Command inspected.", "Saved"]);
+    terminal.quit();
+    let requests = server.requests();
+    let result = tool_result(&requests[1], "diagnostic");
+    assert_eq!(result["exit_code"], 7);
+    assert_eq!(result["stdout_truncated"], true);
+    assert!(
+        result["stdout"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("{last}\n"))
+    );
+    assert!(!requests[1].body.to_string().contains(early));
+    let log = result["stdout_path"].as_str().unwrap();
+    assert_eq!(
+        fs::read_to_string(log).unwrap(),
+        format!("{early}\n{noise}{last}\n")
+    );
+    fs::remove_file(log).unwrap();
+    let db = ChatDatabase::open(path).unwrap();
+    let id = &db.list_sessions(false, 10, None).unwrap().sessions[0].id;
+    let page = db.display_page(id, 10, None).unwrap();
+    assert_eq!(page.messages.len(), 4);
+    assert!(page.messages.iter().all(|m| m.unfinished.is_empty()));
+    assert!(
+        !serde_json::to_string(&db.model_context(id).unwrap())
+            .unwrap()
+            .contains(early)
+    );
+}
+
+#[test]
 fn coding_agent_repairs_a_failing_workspace_and_reopens_its_tool_transcript() {
     const OLD: &str = "printf 'Hello, world!\\n'";
     const NEW: &str = r#"printf 'Hello, %s!\n' "${1:-world}""#;

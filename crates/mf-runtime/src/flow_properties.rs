@@ -84,16 +84,17 @@ fn stdin(inputs: &WorkflowInputSchema) -> Value {
 
 /// Projects a prepared body's interface without executing it.
 ///
-/// A body has a callable interface only when it starts from exactly one node and
-/// exposes neither incremental outputs nor stdin. Such a body publishes no
-/// `allowed` parameters: a dynamic caller cannot bind them unambiguously.
+/// A single startup without stdin can accept flat arguments. Incremental ports
+/// may accompany a terminal interface, but cannot themselves be the result.
 pub fn interface_properties(
     inputs: &WorkflowInputSchema,
     outputs: &[PortSpec],
     streams: &[PortSpec],
 ) -> Value {
     let startups: Vec<&String> = inputs.inputs.keys().collect();
-    let callable = startups.len() == 1 && streams.is_empty() && inputs.stdin.is_empty();
+    let callable = startups.len() == 1
+        && inputs.stdin.is_empty()
+        && (streams.is_empty() || !outputs.is_empty());
     let mut parameters = Vec::new();
     let mut allowed = Map::new();
     let mut required = Vec::new();
@@ -337,14 +338,22 @@ mod tests {
     }
 
     #[test]
-    fn streams_make_a_body_non_callable() {
+    fn incremental_outputs_can_accompany_but_not_replace_a_callable_result() {
         let properties = interface_properties(
             &schema(),
             &[PortSpec::new("sum", ValueType::Int64, true)],
             &[PortSpec::new("chunk", ValueType::String, false)],
         );
-        assert_eq!(properties["callable"], json!(false));
-        assert_eq!(properties["startup"], Value::Null);
+        assert_eq!(properties["callable"], true);
+        assert_eq!(properties["startup"], "calculate");
+        assert_eq!(
+            interface_properties(
+                &schema(),
+                &[],
+                &[PortSpec::new("chunk", ValueType::String, false)]
+            )["callable"],
+            false
+        );
         assert_eq!(
             properties["streams"],
             json!([{

@@ -496,7 +496,15 @@ fn bash_executes_supplied_shell_text_in_the_workspace_and_preserves_exit_status(
     )
     .unwrap();
     assert_eq!(signalled.outputs["signal"], json!(15));
-    assert_eq!(signalled.skipped, ["exit_code".into()].into());
+    assert_eq!(
+        signalled.skipped,
+        [
+            "exit_code".into(),
+            "stdout_path".into(),
+            "stderr_path".into()
+        ]
+        .into()
+    );
 }
 
 #[test]
@@ -562,10 +570,103 @@ fn bash_bounds_each_stream_independently() {
     );
     let result = call(&bash, json!({"command":"i=0; while [ \"$i\" -lt 2000 ]; do printf '1234567890'; printf 'abcdef' >&2; i=$((i+1)); done"})).unwrap();
     assert_eq!(result["exit_code"].as_i64(), Some(0));
-    assert_eq!(result["stdout"].as_str(), Some("12345"));
-    assert_eq!(result["stderr"].as_str(), Some("abcde"));
+    assert_eq!(result["stdout"].as_str(), Some("67890"));
+    assert_eq!(result["stderr"].as_str(), Some("bcdef"));
+    for (field, expected) in [
+        ("stdout_path", "1234567890".repeat(2000)),
+        ("stderr_path", "abcdef".repeat(2000)),
+    ] {
+        let path = std::path::Path::new(result[field].as_str().unwrap());
+        assert!(path.is_absolute() && !path.starts_with(dir.path()) && result[field].is_secret());
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(fs::read(path).unwrap(), expected.as_bytes());
+        fs::remove_file(path).unwrap();
+    }
     assert_eq!(result["stdout_truncated"].as_bool(), Some(true));
     assert_eq!(result["stderr_truncated"].as_bool(), Some(true));
+}
+
+#[test]
+fn bash_streams_private_rolling_snapshots_without_truncating_the_terminal_result() {
+    struct Viewer {
+        resume: std::path::PathBuf,
+        snapshots: Vec<String>,
+    }
+    impl mf_runtime::EmissionSink for Viewer {
+        fn send(&mut self, emission: NodeResult) -> Result<(), mf_runtime::StreamError> {
+            let progress = &emission.outputs["progress"];
+            assert!(progress.is_secret());
+            let text = progress.as_str().unwrap();
+            if text.contains("opening stdout") && text.contains("opening stderr") {
+                fs::write(&self.resume, "").unwrap();
+            }
+            self.snapshots.push(text.to_owned());
+            Ok(())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let noise = "working\n".repeat(1500);
+    fs::write(dir.path().join("bulk"), &noise).unwrap();
+    let node = prepare(BASH_KIND, json!({"workspace_root":dir.path()}));
+    let mut viewer = Viewer {
+        resume: dir.path().join("resume"),
+        snapshots: Vec::new(),
+    };
+    let command = "echo 'opening stdout'; echo 'opening stderr' >&2; while [ ! -f resume ]; do sleep 0.02; done; cat bulk; echo 'final stdout'; echo 'final stderr' >&2; exit 13";
+    let result = node
+        .execution
+        .as_task_node()
+        .unwrap()
+        .execute_with_sink(
+            [
+                ("command".into(), command.into()),
+                ("timeout".into(), json!(10.0).into()),
+            ]
+            .into(),
+            &mut ExecutionContext::default(),
+            &mut viewer,
+        )
+        .unwrap();
+    assert_eq!(result.outputs["exit_code"].as_i64(), Some(13));
+    assert_eq!(
+        result.outputs["stdout"].as_str().unwrap(),
+        format!("opening stdout\n{noise}final stdout\n")
+    );
+    assert!(!result.outputs.contains_key("stdout_path"));
+    let last = viewer.snapshots.last().unwrap();
+    assert!(viewer.snapshots.len() >= 2 && !last.contains("opening stdout"));
+    assert!(last.contains("stdout:\n") && last.contains("final stdout\n"));
+    assert!(last.contains("stderr:\nopening stderr\nfinal stderr\n"));
+    assert!(viewer.snapshots.iter().all(|frame| frame.len() < 4096 + 32));
+}
+
+#[test]
+fn bash_spills_on_the_line_limit_without_losing_binary_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let bash = prepare(BASH_KIND, json!({"workspace_root": dir.path()}));
+    let line = [0xff, 0, b'\n'];
+    for count in [2000, 2001] {
+        let raw = line.repeat(count);
+        fs::write(dir.path().join("bytes"), &raw).unwrap();
+        let result = call(&bash, json!({"command":"cat bytes >&2"})).unwrap();
+        assert_eq!(
+            result["stderr"].as_str().unwrap(),
+            "\u{fffd}\0\n".repeat(2000)
+        );
+        assert_eq!(result["stderr_truncated"].as_bool(), Some(count > 2000));
+        assert!(!result.contains_key("stdout_path"));
+        if count > 2000 {
+            let path = result["stderr_path"].as_str().unwrap();
+            assert_eq!(fs::read(path).unwrap(), raw);
+            fs::remove_file(path).unwrap();
+        } else {
+            assert!(!result.contains_key("stderr_path"));
+        }
+    }
 }
 
 #[test]
@@ -594,7 +695,16 @@ fn bash_honors_the_shorter_of_the_call_timeout_and_the_workflow_limit() {
         )
         .unwrap();
         assert_eq!(result.outputs["timed_out"].as_bool(), Some(true));
-        assert_eq!(result.skipped, ["exit_code".into(), "signal".into()].into());
+        assert_eq!(
+            result.skipped,
+            [
+                "exit_code".into(),
+                "signal".into(),
+                "stdout_path".into(),
+                "stderr_path".into()
+            ]
+            .into()
+        );
     }
 }
 
@@ -632,8 +742,8 @@ fn bash_cancellation_is_not_a_tool_result_and_reaps_the_child() {
     match worker.join().unwrap().unwrap_err() {
         NodeExecutionError::PluginFailed { source } => {
             assert!(matches!(
-                source.downcast_ref::<CodingError>(),
-                Some(CodingError::Cancelled { .. })
+                source.downcast_ref::<mf_runtime::StreamError>(),
+                Some(mf_runtime::StreamError::Execution { message }) if message == "cancel test command"
             ));
         }
         error => panic!("unexpected cancellation error: {error}"),

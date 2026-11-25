@@ -3,12 +3,27 @@ use mf_runtime::{NodeEnum, NodeValue, StreamCancellation, StreamDelivery};
 use snafu::ensure;
 use std::sync::mpsc;
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, NodeValue)]
+pub struct ToolOutputContext {
+    pub model_call_id: String,
+    pub tool_call_id: String,
+    pub name: String,
+}
+
+/// A replaceable display snapshot, not an argument delta or a terminal tool result.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, NodeValue)]
+pub struct ToolOutputUpdate {
+    pub context: ToolOutputContext,
+    pub value: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, NodeEnum)]
 #[serde(tag = "kind")]
 #[value(tag = "kind")]
 pub enum PreviewDelta {
     Text { delta: TextDelta },
     ToolCall { delta: ToolCallDelta },
+    ToolOutput { delta: ToolOutputUpdate },
 }
 
 impl From<TextDelta> for PreviewDelta {
@@ -26,6 +41,20 @@ impl From<ToolCallDelta> for PreviewDelta {
 impl PreviewDelta {
     pub fn validate(&self) -> Result<(), ChatError> {
         match self {
+            Self::ToolOutput { delta } => ensure!(
+                [
+                    &delta.context.model_call_id,
+                    &delta.context.tool_call_id,
+                    &delta.context.name
+                ]
+                .into_iter()
+                .all(|s| !s.trim().is_empty())
+                    && (1..=16 * 1024).contains(&delta.value.len()),
+                InvalidSnafu {
+                    field: "tool_output stream",
+                    reason: "requires model and tool identities and a nonempty snapshot up to 16 KiB"
+                }
+            ),
             Self::Text { delta } => ensure!(
                 !delta.text.is_empty() && !delta.model_call_id.trim().is_empty(),
                 InvalidSnafu {

@@ -1,7 +1,7 @@
 # Coding tools
 
 `mfn-coding` is an opt-in node provider for Linux and macOS. It uses ordinary
-terminal Tasks and does not require the chat host or a model. Declare it as a
+serializable Task results and optional incremental outputs. It does not require the chat host or a model. Declare it as a
 Flow dependency, like any other [node package](workflows.md#node-dependencies).
 
 ## Workspace files
@@ -112,10 +112,22 @@ With a root template, wire or order this node after the referenced producer. The
 **milliseconds**. The shorter limit wins. With neither limit, the command runs until exit or
 cancellation. Stdin is closed; the runner forwards its `PATH`, not the rest of its environment.
 
-`max_output_bytes` defaults to 51,200 (1 to 1,048,576) **per stream**. The node retains bounded prefixes for
-`stdout` and `stderr`, decodes them as lossy UTF-8, and reports
-`stdout_truncated` and `stderr_truncated` separately. Nonzero exit codes are
-normal results, so a model can use failing tests as feedback. A normal exit
+`stdout` and `stderr` are separate **diagnostic tails**. Each retains at most 2,000 lines and
+`max_output_bytes` raw bytes (default 51,200; configurable from 1 to 1,048,576). Prefer complete
+lines; for one oversized final line, keep its suffix. Text is decoded as lossy UTF-8. When a stream
+exceeds either bound, its `*_truncated` flag is true and `stdout_path` or `stderr_path` names a
+private `mf-bash-*.log` in the runner's temporary directory containing that stream's **original
+bytes**, including its beginning. A stream that fits creates no file. The paths survive the tool
+call: use a subsequent `bash` call with `head`, `tail` or `grep` and the quoted path to inspect the
+log without rerunning the command. Do not feed the whole file back into chat. Workspace-relative
+`read` does not gain access to arbitrary temporary paths. These files use disk space proportional
+to the truncated streams; remove them when finished or rely on the host's temporary-file policy.
+Use a protected, quota-limited temporary directory when running untrusted workloads.
+
+The optional `progress` stream emits rolling, labelled stdout/stderr snapshots while the command
+runs (up to 12 lines and 2 KiB of source bytes per stream, at most once per 100 ms plus a final
+changed snapshot). The coding chat shows these under **Command output (latest)** for that call.
+They are not tool results. Nonzero exit codes are normal results, so a model can use failing tests as feedback. A normal exit
 reports `exit_code`; a signal reports `signal` instead. A timeout sets
 `timed_out: true` and omits both. On completion, timeout, or cancellation the
 node terminates the owned process group and reaps the direct child. Cancellation
@@ -190,7 +202,7 @@ The Flow stamps the first generated assistant message of each turn with `metadat
 It uses those stamps in the retained context to reconstruct boundaries, never guesses a root for
 unmarked earlier history, and never takes the binding from model text. Paths are sent to the
 provider in these notices and are stored in SQLite metadata. The system messages themselves are
-request-only. The Flow streams `answer` and `tool_call_delta` and returns only newly generated
+request-only. The Flow streams `answer`, `tool_call_delta`, and `tool_output` and returns only newly generated
 messages and usages in `append`, so the normal chat host stores tool exchanges and can reopen them.
 A failing test is a tool result, not an
 automatic retry. Cancelling or retrying a turn does not roll back files. Tests execute workspace

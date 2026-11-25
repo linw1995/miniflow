@@ -217,6 +217,7 @@
                   }
                 },
                 "code": {
+                  "model_call_id": "size(right) > 0 ? string(right[0].call_id) : ''",
                   "value": "left + right"
                 }
               },
@@ -293,6 +294,12 @@
                 "flow": "tool-uses"
               },
               "inputs": {
+                "params.model_call_id": {
+                  "from": {
+                    "node": "collect_usages",
+                    "port": "model_call_id"
+                  }
+                },
                 "params.calls": {
                   "from": {
                     "node": "turn",
@@ -448,6 +455,10 @@
           ]
         },
         "stream_outputs": {
+          "tool_output": {
+            "node": "dispatch",
+            "port": "tool_output"
+          },
           "tool_call_delta": {
             "node": "turn",
             "port": "tool_call_delta"
@@ -564,6 +575,12 @@
     }
   ],
   "outputs": [
+    {
+      "name": "tool_output",
+      "node": "repeat",
+      "port": "tool_output",
+      "optional": true
+    },
     {
       "name": "tool_call_delta",
       "node": "repeat",

@@ -12,7 +12,7 @@ use diesel::{
     prelude::*,
     sql_types::{BigInt, Nullable, Text as SqlText},
 };
-use snafu::{ResultExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 use std::{collections::BTreeSet, sync::Arc};
 
 #[derive(Clone, Debug)]
@@ -20,6 +20,7 @@ pub struct PreviewSegment {
     pub model_call_id: String,
     pub text: Text,
     pub tool: Option<ToolCallPreview>,
+    pub output: Option<crate::ToolOutputContext>,
 }
 
 #[derive(Clone, Debug)]
@@ -47,19 +48,35 @@ struct Header {
 
 impl Header {
     fn segment(self, reader: &Reader) -> Result<PreviewSegment, ChatError> {
-        let tool = if self.part.is_empty() {
-            None
+        let (tool, output) = if let Some(id) = self.part.strip_prefix("output:") {
+            (
+                None,
+                Some(crate::ToolOutputContext {
+                    model_call_id: self.model_call_id.clone(),
+                    tool_call_id: id.to_owned(),
+                    name: self.name.context(InvalidSnafu {
+                        field: "tool output preview",
+                        reason: "missing tool name",
+                    })?,
+                }),
+            )
+        } else if self.part.is_empty() {
+            (None, None)
         } else {
-            Some(ToolCallPreview {
-                index: serde_json::from_str(&self.part).context(JsonSnafu)?,
-                id: self.tool_id,
-                name: self.name,
-            })
+            (
+                Some(ToolCallPreview {
+                    index: serde_json::from_str(&self.part).context(JsonSnafu)?,
+                    id: self.tool_id,
+                    name: self.name,
+                }),
+                None,
+            )
         };
         Ok(PreviewSegment {
             model_call_id: self.model_call_id,
             text: reader.draft_text(self.id, self.bytes),
             tool,
+            output,
         })
     }
 }
@@ -113,7 +130,14 @@ impl DraftWriter {
                 .iter()
                 .map(|delta| {
                     delta.validate()?;
-                    append_chunk(conn, &inv.turn_id, delta)?.segment(&self.reader)
+                    let mut segment =
+                        append_chunk(conn, &inv.turn_id, delta)?.segment(&self.reader)?;
+                    if let PreviewDelta::ToolOutput { delta } = delta {
+                        // Rolling snapshots replace the row. A previously published frame
+                        // must not read a newer snapshot before its application receipt.
+                        segment.text = Text::inline(delta.value.clone());
+                    }
+                    Ok(segment)
                 })
                 .collect()
         })
@@ -142,6 +166,13 @@ fn append_chunk(
         PreviewDelta::Text { delta } => {
             (&delta.model_call_id, String::new(), None, None, &delta.text)
         }
+        PreviewDelta::ToolOutput { delta } => (
+            &delta.context.model_call_id,
+            format!("output:{}", delta.context.tool_call_id),
+            Some(delta.context.tool_call_id.as_str()),
+            Some(delta.context.name.as_str()),
+            &delta.value,
+        ),
         PreviewDelta::ToolCall { delta } => (
             &delta.model_call_id,
             delta.index.to_string(),
@@ -153,14 +184,23 @@ fn append_chunk(
     // Empty denotes assistant text; decimal tool indices preserve all u64 values.
     let header = diesel::sql_query("INSERT INTO preview_segments (turn_id, model_call_id, part, tool_id, name, bytes)
                 VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(turn_id, model_call_id, part) DO UPDATE SET bytes = bytes + excluded.bytes,
+                ON CONFLICT(turn_id, model_call_id, part) DO UPDATE SET bytes = CASE WHEN ? THEN excluded.bytes ELSE bytes + excluded.bytes END,
                     tool_id = coalesce(excluded.tool_id, tool_id), name = coalesce(excluded.name, name)
                 RETURNING id, model_call_id, part, tool_id, name, bytes")
                 .bind::<SqlText,_>(turn).bind::<SqlText,_>(model).bind::<SqlText,_>(part)
                 .bind::<Nullable<SqlText>,_>(id.filter(|s| !s.trim().is_empty()))
                 .bind::<Nullable<SqlText>,_>(name.filter(|s| !s.trim().is_empty()))
                 .bind::<BigInt,_>(fragment.len() as i64)
+                .bind::<diesel::sql_types::Bool,_>(matches!(delta, PreviewDelta::ToolOutput { .. }))
                 .get_result::<Header>(conn).context(DatabaseSnafu { operation: "update turn preview" })?;
+    if matches!(delta, PreviewDelta::ToolOutput { .. }) {
+        diesel::sql_query("DELETE FROM preview_chunks WHERE segment_id = ?")
+            .bind::<BigInt, _>(header.id)
+            .execute(conn)
+            .context(DatabaseSnafu {
+                operation: "replace tool output preview",
+            })?;
+    }
     if !fragment.is_empty() {
         diesel::sql_query(
             "INSERT INTO preview_chunks (segment_id, end_byte, value) VALUES (?, ?, ?)",
@@ -197,6 +237,7 @@ pub struct PreviewCoverage<'a> {
     calls: BTreeSet<&'a str>,
     texts: BTreeSet<&'a str>,
     tools: BTreeSet<&'a str>,
+    results: BTreeSet<&'a str>,
 }
 
 impl<'a> PreviewCoverage<'a> {
@@ -214,6 +255,9 @@ impl<'a> PreviewCoverage<'a> {
                     .map(|u| u.call_id.as_str()),
             );
             for message in result.display_messages() {
+                if let ChatMessage::ToolResult { tool_call_id, .. } = message {
+                    coverage.results.insert(tool_call_id);
+                }
                 if let ChatMessage::Assistant {
                     content,
                     tool_calls,
@@ -231,11 +275,18 @@ impl<'a> PreviewCoverage<'a> {
     }
 
     pub fn covers(&self, segment: &PreviewSegment) -> bool {
+        if let Some(output) = &segment.output {
+            return self.covers_output(&output.tool_call_id);
+        }
         self.replaces(
             &segment.model_call_id,
             segment.tool.as_ref().map(|tool| tool.id.as_deref()),
             || segment.text.load(),
         )
+    }
+
+    fn covers_output(&self, id: &str) -> bool {
+        self.complete || self.results.contains(id)
     }
 
     fn replaces(
@@ -280,11 +331,16 @@ pub fn settle(
         let headers = diesel::sql_query("SELECT id, model_call_id, part, tool_id, name, bytes FROM preview_segments WHERE turn_id = ?")
             .bind::<SqlText,_>(turn).load::<Header>(conn).context(DatabaseSnafu { operation: "compare failed turn preview" })?;
         for h in headers {
-            if coverage.replaces(
-                &h.model_call_id,
-                (!h.part.is_empty()).then_some(h.tool_id.as_deref()),
-                || super::text::read_draft(conn, h.id, h.bytes),
-            ) {
+            let covered = if let Some(id) = h.part.strip_prefix("output:") {
+                coverage.covers_output(id)
+            } else {
+                coverage.replaces(
+                    &h.model_call_id,
+                    (!h.part.is_empty()).then_some(h.tool_id.as_deref()),
+                    || super::text::read_draft(conn, h.id, h.bytes),
+                )
+            };
+            if covered {
                 diesel::sql_query("DELETE FROM preview_segments WHERE id = ?")
                     .bind::<BigInt, _>(h.id)
                     .execute(conn)

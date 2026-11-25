@@ -93,6 +93,19 @@ fn tool(call: &str, index: u64, id: Option<&str>, value: &str) -> PreviewDelta {
     .into()
 }
 
+fn output(model: &str, id: &str, value: &str) -> PreviewDelta {
+    PreviewDelta::ToolOutput {
+        delta: crate::ToolOutputUpdate {
+            context: crate::ToolOutputContext {
+                model_call_id: model.into(),
+                tool_call_id: id.into(),
+                name: "bash".into(),
+            },
+            value: value.into(),
+        },
+    }
+}
+
 fn chunk_count(path: &Path) -> i64 {
     diesel::select(sql::<sql_types::BigInt>(
         "(SELECT count(*) FROM preview_chunks)",
@@ -118,6 +131,7 @@ fn recovered_drafts_survive_later_turns_without_entering_requests_or_audit() {
             tool("a", u64::MAX, None, "{ "),
             tool("b", 0, None, "["),
             text("c", "later"),
+            output("a", "late-id", "first snapshot"),
         ])
         .unwrap();
     writer
@@ -125,15 +139,13 @@ fn recovered_drafts_survive_later_turns_without_entering_requests_or_audit() {
             tool("a", u64::MAX, Some("late-id"), ""),
             text("a", " tail"),
             tool("a", u64::MAX, None, "\"key\":"),
+            output("a", "late-id", "last snapshot"),
         ])
         .unwrap();
     assert_eq!(first_frame[0].text.load().unwrap(), "A\0é");
     assert_eq!(first_frame[1].text.load().unwrap(), "{ ");
-    assert_eq!(
-        chunk_count(&path),
-        6,
-        "hints are metadata, not extra bodies"
-    );
+    assert_eq!(first_frame[4].text.load().unwrap(), "first snapshot");
+    assert_eq!(chunk_count(&path), 7, "only the latest snapshot is stored");
     assert!(
         db.display_page(&session, 10, None).unwrap().messages[0]
             .unfinished
@@ -170,7 +182,11 @@ fn recovered_drafts_survive_later_turns_without_entering_requests_or_audit() {
             .iter()
             .map(|s| s.text.load().unwrap())
             .collect::<Vec<_>>(),
-        ["A\0é tail", "{ \"key\":", "[", "later"]
+        ["A\0é tail", "{ \"key\":", "[", "later", "last snapshot"]
+    );
+    assert_eq!(
+        one.unfinished[4].output.as_ref().unwrap().tool_call_id,
+        "late-id"
     );
     let call = one.unfinished[1].tool.as_ref().unwrap();
     assert_eq!(
@@ -202,6 +218,8 @@ fn failed_completion_removes_only_replaced_segments_and_attaches_the_rest_to_the
             text("unknown", "unrepresented"),
             tool("partial", 0, Some("covered"), "{ \"preview\":"),
             tool("partial", 1, None, "["),
+            output("partial", "covered", "superseded"),
+            output("completed", "pending", "no tool result yet"),
         ])
         .unwrap();
     let mut result = ConversationResult::append(serde_json::from_value(json!([
@@ -213,7 +231,7 @@ fn failed_completion_removes_only_replaced_segments_and_attaches_the_rest_to_the
     result.usages = serde_json::from_value(json!([{"call_id":"completed","model":"fixture"},{"call_id":"partial","model":"fixture","error":"provider failed"}])).unwrap();
     db.complete_turn(inv.clone(), result.clone()).unwrap();
     db.complete_turn(inv, result).unwrap();
-    assert_eq!(chunk_count(db.path()), 2);
+    assert_eq!(chunk_count(db.path()), 3);
     let page = db.display_page(&session, 2, None).unwrap();
     assert!(
         page.messages
@@ -236,7 +254,7 @@ fn failed_completion_removes_only_replaced_segments_and_attaches_the_rest_to_the
             .iter()
             .map(|s| s.text.load().unwrap())
             .collect::<Vec<_>>(),
-        ["unrepresented", "["]
+        ["unrepresented", "[", "no tool result yet"]
     );
     assert!(parts[1].tool.as_ref().unwrap().id.is_none());
     assert_eq!(db.model_context(&session).unwrap().revision, 0);

@@ -59,6 +59,24 @@
   ],
   "outputs": [
     {
+      "name": "progress",
+      "node": "bash",
+      "port": "progress",
+      "optional": true
+    },
+    {
+      "name": "stdout_path",
+      "node": "bash",
+      "port": "stdout_path",
+      "optional": true
+    },
+    {
+      "name": "stderr_path",
+      "node": "bash",
+      "port": "stderr_path",
+      "optional": true
+    },
+    {
       "name": "exit_code",
       "node": "bash",
       "port": "exit_code",

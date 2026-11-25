@@ -744,7 +744,7 @@ fn invalid_terminal_records_invalidate_native_recovery_instead_of_saving_first()
 
 #[test]
 fn preview_selections_require_native_streaming_execution() {
-    for name in ["answer", "tool_call_delta"] {
+    for name in ["answer", "tool_call_delta", "tool_output"] {
         let mut manifest = live_manifest();
         manifest.descriptor.description.execution = None;
         manifest.definition.outputs.last_mut().unwrap().name = name.into();

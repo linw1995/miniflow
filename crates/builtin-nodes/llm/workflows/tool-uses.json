@@ -17,6 +17,11 @@
       "kind": "builtin.parameters",
       "config": {
         "parameters": {
+          "model_call_id": {
+            "type": "string",
+            "default": "",
+            "secret": false
+          },
           "calls": {
             "type": {
               "list": "object"
@@ -94,7 +99,14 @@
       "config": {
         "mode": "parallel",
         "on_error": "terminate",
+        "stream_outputs": {
+          "tool_output": {
+            "node": "execute",
+            "port": "update"
+          }
+        },
         "inputs": {
+          "model_call_id": "string",
           "tools": {
             "map": "object"
           },
@@ -111,10 +123,12 @@
               "config": {
                 "language": "cel",
                 "inputs": {
+                  "model_call_id": "string",
                   "call": "object",
                   "tools": "object"
                 },
                 "code": {
+                  "stream_context": "{'model_call_id': model_call_id, 'tool_call_id': call.id, 'name': call.name}",
                   "name": "call.name",
                   "ok": "call.name in tools && type(call.arguments) == map && size(call.arguments) == size(call.arguments.transformMap(k, v, k in tools[call.name].interface.allowed, v)) && tools[call.name].interface.required.all(r, r in call.arguments)",
                   "arguments": "call.name in tools && type(call.arguments) == map ? call.arguments.transformMap(k, v, k in tools[call.name].interface.allowed, v) : {}",
@@ -123,6 +137,12 @@
                 }
               },
               "inputs": {
+                "model_call_id": {
+                  "from": {
+                    "node": "%iteration",
+                    "port": "model_call_id"
+                  }
+                },
                 "call": {
                   "from": {
                     "node": "%iteration",
@@ -160,9 +180,16 @@
               "id": "execute",
               "kind": "builtin.router",
               "config": {
-                "routes": []
+                "routes": [],
+                "forward_stream": "progress"
               },
               "inputs": {
+                "stream_context": {
+                  "from": {
+                    "node": "classify",
+                    "port": "stream_context"
+                  }
+                },
                 "flows": {
                   "from": {
                     "node": "%iteration",
@@ -281,6 +308,12 @@
         }
       },
       "inputs": {
+        "model_call_id": {
+          "from": {
+            "node": "params",
+            "port": "model_call_id"
+          }
+        },
         "items": {
           "from": {
             "node": "validated_calls",
@@ -326,6 +359,12 @@
     }
   ],
   "outputs": [
+    {
+      "name": "tool_output",
+      "node": "dispatch",
+      "port": "tool_output",
+      "optional": true
+    },
     {
       "name": "results",
       "node": "dispatch",

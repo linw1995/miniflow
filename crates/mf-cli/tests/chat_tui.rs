@@ -864,6 +864,10 @@ struct ChatTerminal {
 
 impl ChatTerminal {
     fn open(binary: &Path, database: &Path) -> Self {
+        Self::with_args(binary, database, &[])
+    }
+
+    fn with_args(binary: &Path, database: &Path, args: &[&str]) -> Self {
         let size = Winsize {
             ws_row: 40,
             ws_col: 160,
@@ -878,6 +882,7 @@ impl ChatTerminal {
             .arg(database)
             .arg(binary)
             .args(["--params.model", "fixture-model"])
+            .args(args)
             .stdin(Stdio::from(pty.slave.try_clone().unwrap()))
             .stderr(Stdio::from(pty.slave))
             .stdout(Stdio::null())
@@ -923,6 +928,8 @@ impl ChatTerminal {
         self.send(b"\x11");
         let deadline = Instant::now() + Duration::from_secs(10);
         while self.child.try_wait().unwrap().is_none() {
+            // A final repaint must not block terminal restoration on a full PTY.
+            let _ = self.master.read(&mut [0; 16384]);
             assert!(Instant::now() < deadline, "chat did not quit");
             thread::sleep(Duration::from_millis(10));
         }
