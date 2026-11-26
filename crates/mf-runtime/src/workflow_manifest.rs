@@ -22,8 +22,8 @@ pub const MAX_MANIFEST_SECTION_BYTES: usize =
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkflowManifestVersion {
-    #[serde(rename = "2026-11-18")]
-    V2026_11_18,
+    #[serde(rename = "2026-11-25")]
+    V2026_11_25,
 }
 
 /// Read-only public projection, independent of compiler IR and executable layouts.
@@ -97,7 +97,7 @@ impl WorkflowManifest {
         input_schema: WorkflowInputSchema,
     ) -> Result<Self, WorkflowManifestError> {
         let manifest = Self {
-            version: WorkflowManifestVersion::V2026_11_18,
+            version: WorkflowManifestVersion::V2026_11_25,
             definition: graph.definition.clone(),
             entry: "workflow.json".into(),
             sources: [(

@@ -2133,7 +2133,8 @@ task-only graph finishes without external input. A producer reached through star
 Use `builtin.readline` to read UTF-8 text lines from a file or stdin. Its optional string input `path`
 selects a regular text file when supplied, including through a symbolic link to a regular file. FIFO paths,
 directories, devices, and sockets are unsupported and cause execution to fail. A FIFO path is rejected
-without waiting for a writer. Omission selects stdin, which can be a pipe or terminal.
+without waiting for a writer. Omission selects `TextInput` supplied by an embedding host;
+compiled runners require a path because they do not supply business stdin.
 Its string output `line` preserves blank lines and whitespace and strips LF/CRLF delimiters. JSON parsing
 belongs in downstream nodes. Other StreamNodes can
 obtain data from files or services using their startup parameters. Every source is an ordinary declared node;

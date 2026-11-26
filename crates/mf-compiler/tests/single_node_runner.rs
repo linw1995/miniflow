@@ -249,13 +249,12 @@ fn streaming_binary_selects_finite_typed_tasks_and_rejects_producers_and_events(
             .unwrap();
         assert!(!String::from_utf8_lossy(&observed.stderr).contains("unsupported for streaming"));
         assert_eq!(result(observed), json!({"value":"finite"}));
-        let whole = Command::new(&binary)
-            .env("MF_CAPTURE_SNAPSHOTS", "1")
-            .stdin(Stdio::piped())
-            .output()
-            .unwrap();
-        assert!(whole.status.success(), "{:?}", whole);
-        assert!(String::from_utf8_lossy(&whole.stderr).contains("data capture unavailable"));
+        let whole = Command::new(&binary).output().unwrap();
+        assert!(!whole.status.success(), "{whole:?}");
+        assert!(
+            String::from_utf8_lossy(&whole.stderr)
+                .contains("required stdin resource is unavailable")
+        );
     }
     fs::remove_file(&definition).unwrap();
     fs::remove_dir_all(&build).unwrap();

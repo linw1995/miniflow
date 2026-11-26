@@ -174,6 +174,7 @@ pub struct StreamOptions {
     pub observation: Option<StreamObservation>,
     pub snapshots: Option<crate::SnapshotRecorder>,
     pub arguments: crate::WorkflowArguments,
+    pub cancellation: crate::StreamCancellation,
     pub stdin: Option<crate::TextInput>,
 }
 impl Default for StreamOptions {
@@ -183,6 +184,7 @@ impl Default for StreamOptions {
             observation: None,
             snapshots: None,
             arguments: crate::WorkflowArguments::default(),
+            cancellation: Default::default(),
             stdin: None,
         }
     }
@@ -790,6 +792,7 @@ impl PreparedStream {
     ) -> Result<StreamInstance, StreamError> {
         let observation = options.observation.clone();
         let mut context = ExecutionContext::default();
+        context.set_cancellation(options.cancellation.clone());
         context.configure_worker_limit(runtime_options.max_parallel_domains);
         let result = self.start_inner(options, runtime_options, context, false);
         if let (Err(error), Some(observation)) = (&result, observation) {

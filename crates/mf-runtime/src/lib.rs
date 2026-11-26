@@ -133,7 +133,7 @@ pub use stream_instance::{
     ProducerSnafu as StreamProducerSnafu, StreamClock, StreamDelivery, StreamError, StreamInstance,
     StreamMetrics, StreamOptions, StreamOutput, StreamSummary,
 };
-pub use stream_io::{StreamStdio, TextInput};
+pub use stream_io::{RunnerStdio, TextInput};
 pub use stream_plan::{
     FlowDependency, GeneratedStreamDomainExecutor, MessageSchedule, PreparedStream,
     StreamEmissionBinding, StreamInputResolver, StreamMessageInitializer, StreamMessageProgram,
@@ -172,7 +172,7 @@ pub use workflow_inputs::{
 };
 
 pub use runner_arguments::{
-    RunnerArgumentError, RunnerArguments, RunnerInvocation, runner_help_command,
+    RunnerArgumentError, RunnerArguments, RunnerCommand, RunnerInvocation, runner_help_command,
 };
 #[cfg(unix)]
 pub use runner_signals::{RunnerSignalError, RunnerSignals};

@@ -197,6 +197,11 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
     let manifest = read_manifest(path).context(ManifestSnafu)?;
     let arguments = options.workflow_arguments(&manifest.descriptor.input_schema)?;
     let description = manifest.description()?;
+    let arguments = mf_runtime::resolve_workflow_inputs(
+        &manifest.descriptor.input_schema,
+        &arguments,
+        |name| std::env::var_os(name),
+    )?;
     let needs_stdin = manifest
         .descriptor
         .input_schema
@@ -204,7 +209,7 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
         .is_some();
     if needs_stdin {
         return option_error(
-            "TUI execution cannot supply workflow stdin; provide source parameters or run the executable directly",
+            "TUI execution cannot supply workflow stdin; provide source parameters",
         );
     }
     let arguments = if !arguments.0.is_empty() {
