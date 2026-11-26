@@ -239,3 +239,37 @@ impl RunnerStdio {
         instance.join()
     }
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_supports_dev_null_but_preserves_cancellation_and_write_failures() {
+        let output = RunnerStdio {
+            output: File::options().write(true).open("/dev/null").unwrap(),
+        };
+        let cancel = StreamCancellation::default();
+        output.write_output(Default::default(), &cancel).unwrap();
+        cancel.cancel(
+            crate::StreamExecutionSnafu {
+                message: "cancelled before output",
+            }
+            .build(),
+        );
+        assert!(matches!(
+            output.write_output(Default::default(), &cancel),
+            Err(StreamError::Execution { .. })
+        ));
+
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let read_only = RunnerStdio {
+            output: File::open(file.path()).unwrap(),
+        };
+        assert!(matches!(
+            read_only.write_output(Default::default(), &Default::default()),
+            Err(StreamError::OutputWrite { .. })
+        ));
+        assert_eq!(file.as_file().metadata().unwrap().len(), 0);
+    }
+}

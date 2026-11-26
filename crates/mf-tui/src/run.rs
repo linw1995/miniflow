@@ -6529,6 +6529,31 @@ mod tests {
                 .to_string()
                 .contains("cannot supply workflow stdin")
         );
+        let binding = &mut manifest
+            .descriptor
+            .input_schema
+            .inputs
+            .get_mut("source/id")
+            .unwrap()
+            .get_mut("path")
+            .unwrap()
+            .binding;
+        binding.env = Some("PATH".into());
+        binding.default = Some(serde_json::json!("fallback.txt"));
+        std::fs::write(
+            &runner,
+            crate::test_support::elf(Some(&manifest.to_bytes().unwrap()), 1),
+        )
+        .unwrap();
+        let resolved = prepare_launch(&runner, &RunOptions::default())
+            .unwrap()
+            .arguments
+            .unwrap();
+        let args = WorkflowArguments::from_json(&std::fs::read(resolved.path()).unwrap()).unwrap();
+        assert_eq!(
+            args.0["source/id.path"].as_str().unwrap(),
+            std::env::var("PATH").unwrap_or_else(|_| "fallback.txt".into())
+        );
         let mut corrupt = std::fs::read(&runner).unwrap();
         *corrupt.last_mut().unwrap() = 0xff;
         std::fs::write(&runner, corrupt).unwrap();
