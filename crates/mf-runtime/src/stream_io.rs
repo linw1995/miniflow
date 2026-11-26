@@ -7,10 +7,6 @@ use std::{
     collections::VecDeque,
     fs::File,
     io::{self, Read, Write},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
 };
 
 #[derive(Debug)]
@@ -161,28 +157,16 @@ fn wait_ready(_: &File, _: bool, _: &StreamCancellation) -> io::Result<()> {
     ))
 }
 
-#[derive(Debug, snafu::Snafu)]
-pub enum RunnerLaunchError {
-    #[snafu(transparent)]
-    Arguments { source: crate::RunnerArgumentError },
-    #[snafu(transparent)]
-    Protocol {
-        source: crate::callback::CallbackError,
-    },
-    #[snafu(transparent)]
-    Stdio { source: StreamError },
-}
-
+/// Owns the business output descriptor of a generated runner. Process stdin is never a workflow input.
 pub struct RunnerStdio {
     output: File,
-    rpc_failed: Arc<AtomicBool>,
 }
 
 impl RunnerStdio {
     #[cfg(unix)]
-    fn claim() -> Result<File, StreamError> {
+    pub fn claim() -> Result<Self, StreamError> {
         use std::os::fd::{AsRawFd, FromRawFd};
-        let reserve = || -> io::Result<File> {
+        let reserve = || -> io::Result<Self> {
             io::stdout().flush()?;
             let fd = unsafe { libc::fcntl(libc::STDOUT_FILENO, libc::F_DUPFD_CLOEXEC, 3) };
             if fd < 0 {
@@ -195,58 +179,18 @@ impl RunnerStdio {
             {
                 return Err(io::Error::last_os_error());
             }
-            Ok(output)
+            Ok(Self { output })
         };
         reserve().context(StdioSnafu)
     }
 
-    pub fn launch(
-        command: crate::RunnerCommand<'_>,
-        sites: &crate::callback::CallbackSites,
-    ) -> Result<
-        (
-            crate::RunnerInvocation,
-            Self,
-            crate::callback::HostCallbacks,
-        ),
-        RunnerLaunchError,
-    > {
-        #[cfg(unix)]
-        {
-            // Do not expose inherited stdin even during --inputs-file or --context-file resolution.
-            let output = Self::claim()?;
-            let invocation = command.resolve()?;
-            let isolated = Default::default();
-            let rpc_failed = Arc::new(AtomicBool::new(false));
-            let callbacks = crate::callback_rpc::from_env(
-                if invocation.node.is_some() {
-                    &isolated
-                } else {
-                    sites
-                },
-                &rpc_failed,
-            )?;
-            Ok((invocation, Self { output, rpc_failed }, callbacks))
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = (command, sites);
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "runner stdio requires Linux or macOS",
-            ))
-            .context(StdioSnafu)?
-        }
-    }
-
-    fn check_rpc(&self) -> Result<(), StreamError> {
-        snafu::ensure!(
-            !self.rpc_failed.load(Ordering::Acquire),
-            ResourceSnafu {
-                message: "callback RPC previously failed"
-            }
-        );
-        Ok(())
+    #[cfg(not(unix))]
+    pub fn claim() -> Result<Self, StreamError> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "runner stdio requires Linux or macOS",
+        ))
+        .context(StdioSnafu)
     }
 
     pub fn write_output(
@@ -254,7 +198,6 @@ impl RunnerStdio {
         values: crate::NodeValues,
         cancellation: &StreamCancellation,
     ) -> Result<(), StreamError> {
-        self.check_rpc()?;
         let mut bytes = serde_json::to_vec(&values).context(OutputEncodeSnafu)?;
         bytes.push(b'\n');
         let mut remaining = bytes.as_slice();
@@ -293,8 +236,6 @@ impl RunnerStdio {
                 }
             }
         }
-        let summary = instance.join()?;
-        self.check_rpc()?;
-        Ok(summary)
+        instance.join()
     }
 }

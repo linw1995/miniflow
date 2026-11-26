@@ -210,6 +210,7 @@ fn rejects_invalid_versions_and_duplicate_members_with_json_sources() {
     for invalid in [
         payload.replace("2026-11-27", "2099-01-01"),
         payload.replace("2026-11-27", "2026-11-26"),
+        payload.replace("2026-11-27", "2026-11-25"),
         payload.replace("2026-11-27", "2026-11-18"),
         payload.replacen("{", "{\"version\":\"2026-11-27\",", 1),
         payload.replace("\"required\":false", "\"required\":false,\"required\":true"),

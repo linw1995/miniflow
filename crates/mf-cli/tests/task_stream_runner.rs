@@ -67,7 +67,7 @@ fn count_flow(streaming: bool, gate: Option<&Path>, marker: Option<&Path>) -> se
 #[test]
 fn installed_finite_runner_calls_a_native_host_without_chat_or_flow_sources() {
     use mf_runtime::callback::{CallbackReply, HostCallback, HostCallbacks};
-    use mf_tui::runner::{PreparedRunner, RunnerInvocation};
+    use mf_runtime::callback_rpc::host::Listener;
     use std::io::Write;
     use std::sync::{
         Arc,
@@ -96,8 +96,7 @@ fn installed_finite_runner_calls_a_native_host_without_chat_or_flow_sources() {
         serde_json::from_slice::<serde_json::Value>(&normal.stdout).unwrap(),
         json!({"type":"local"})
     );
-    let runner = PreparedRunner::load(&executable, 1024).unwrap();
-    assert_eq!(runner.manifest().descriptor.callbacks["lookup"], ["lookup"]);
+    let sites = [("lookup".into(), vec!["lookup".into()])].into();
     let committed = Arc::new(AtomicUsize::new(0));
     let capture = committed.clone();
     let handler = HostCallback::new(move |args, _| {
@@ -114,63 +113,40 @@ fn installed_finite_runner_calls_a_native_host_without_chat_or_flow_sources() {
     });
     let callbacks: HostCallbacks = [("lookup".into(), handler)].into();
     let run = |callbacks| {
-        RunnerInvocation {
-            runner: &runner,
-            arguments: &Default::default(),
-            verbose: 0,
-            snapshots: false,
-        }
-        .run_with_callbacks(
-            callbacks,
-            Default::default(),
-            |_| {},
-            |records| {
-                assert!(records.next().is_none());
-                Ok::<_, std::convert::Infallible>(())
-            },
-            || false,
-        )
+        let mut command = Command::new(&executable);
+        let listener = Listener::prepare(&mut command, &sites, callbacks)?;
+        let mut child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let (errors, reported) = std::sync::mpsc::channel();
+        let server = match listener
+            .unwrap()
+            .start(child.id(), &Default::default(), move |error| {
+                errors.send(error).unwrap();
+            }) {
+            Ok(server) => server,
+            Err(error) => {
+                let _ = child.kill();
+                child.wait().unwrap();
+                return Err(error);
+            }
+        };
+        let output = child.wait_with_output().unwrap();
+        drop(server);
+        assert!(reported.try_recv().is_err());
+        Ok::<_, mf_runtime::callback::CallbackError>(output)
     };
-    let finished = run(callbacks.clone()).unwrap().outcome;
-    assert!(finished.status.success(), "{:?}", finished.capture_error);
+    let finished = run(callbacks.clone()).unwrap();
+    assert!(finished.status.success(), "{finished:?}");
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&finished.stdout).unwrap(),
         json!({"type":"call"})
     );
     assert_eq!(committed.load(Ordering::SeqCst), 1);
     assert!(run([("other".into(), callbacks["lookup"].clone())].into()).is_err());
-    // Even a live keyboard or a pipe which never reaches EOF is not a workflow input.
-    let (open_input, _writer) = std::io::pipe().unwrap();
-    let pty = nix::pty::openpty(None, None).unwrap();
-    for input in [
-        Stdio::from(open_input),
-        Stdio::from(pty.slave),
-        Stdio::null(),
-    ] {
-        let mut child = Command::new(&executable)
-            .stdin(input)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while child.try_wait().unwrap().is_none() {
-            if std::time::Instant::now() >= deadline {
-                child.kill().unwrap();
-                child.wait().unwrap();
-                panic!("bare runner waited for user input");
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        let result = child.wait_with_output().unwrap();
-        assert!(result.status.success(), "{result:?}");
-        assert_eq!(result.stdout, normal.stdout);
-    }
-    let null_output = Command::new(&executable)
-        .stdout(Stdio::null())
-        .status()
-        .unwrap();
-    assert!(null_output.success());
     use mf_runtime::callback_rpc::LAUNCH_ENV;
     let path = root.path().join("rpc");
     let grant = |bindings: &[&str]| {

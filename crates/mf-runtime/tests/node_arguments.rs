@@ -95,7 +95,7 @@ fn selection_preserves_values_types_presence_and_normal_arguments() {
 }
 
 #[test]
-fn runner_reserves_stdin_even_without_callback_bindings() {
+fn runner_rejects_an_active_business_stdin_requirement() {
     let schema: WorkflowInputSchema =
         serde_json::from_value(json!({"inputs":{}, "stdin":{"reader":"always"}})).unwrap();
     assert!(

@@ -126,9 +126,18 @@ fn run(#[cfg(unix)] signals: &mut mf_runtime::RunnerSignals) -> Result<(), Box<d
     let cancellation = mf_runtime::StreamCancellation::default();
     #[cfg(unix)]
     signals.bind(cancellation.clone())?;
-    let (invocation, stdio, callbacks) = mf_runtime::RunnerStdio::launch(command, &descriptor.callbacks)?;
-    let mut registry = mf_runtime::NodeRegistry::from_inventory()?;
-    registry.bind_callbacks(&descriptor.callbacks, &[], &callbacks)?;
+    let stdio = mf_runtime::RunnerStdio::claim()?;
+    let invocation = command.resolve()?;
+    let registry = mf_runtime::NodeRegistry::from_inventory()?;
+    #[cfg(unix)]
+    let registry = {
+        let mut registry = registry;
+        let isolated = Default::default();
+        let sites = if invocation.node.is_some() { &isolated } else { &descriptor.callbacks };
+        let callbacks = mf_runtime::callback_rpc::from_env(sites, &cancellation)?;
+        registry.bind_callbacks(sites, &[], &callbacks)?;
+        registry
+    };
     if let Some(id) = invocation.node.as_deref() {
         let target = mf_runtime::NodeTarget::find(&targets, id)?;
         return execute_selected(target, invocation.inputs, invocation.context, invocation.verbose, registry, stdio, cancellation);

@@ -470,7 +470,7 @@ fn tui_retains_parallel_pips_briefly_after_the_nodes_finish() {
     write_runner_with_manifest(
         &runner,
         format!(
-            r#"[ -z "${{MF_RUNNER_RPC_V1+x}}" ] && [ "$#" -eq 0 ] || exit 17
+            r#"[ "$#" -eq 0 ] || exit 17
 if read -r unexpected; then exit 18; fi
 python3 -I -S - <<'TELEMETRY'
 import os

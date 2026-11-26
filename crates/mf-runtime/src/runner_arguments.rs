@@ -53,7 +53,7 @@ impl RunnerInvocation {
 pub struct RunnerCommand<'a> {
     matches: ArgMatches,
     schema: &'a WorkflowInputSchema,
-    pub target: Option<&'a NodeTarget>,
+    target: Option<&'a NodeTarget>,
 }
 
 impl<'a> RunnerCommand<'a> {

@@ -1,5 +1,8 @@
 //! Invocation-scoped callback RPC over a local Unix socket. Direction determines the message schema.
 
+#[cfg(feature = "callback-host")]
+pub mod host;
+
 use crate::{StreamCancellation, WorkflowArguments, callback::*};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use snafu::{OptionExt, ResultExt, ensure};
@@ -7,10 +10,7 @@ use std::{
     io::{self, BufRead, BufReader, Write},
     os::unix::net::UnixStream,
     path::PathBuf,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -219,7 +219,7 @@ pub fn serve(
 pub fn connect(
     grant: Grant,
     sites: &CallbackSites,
-    failed: &Arc<AtomicBool>,
+    execution: &StreamCancellation,
 ) -> Result<HostCallbacks, CallbackError> {
     use std::collections::BTreeSet;
     let mut seen = BTreeSet::new();
@@ -246,24 +246,30 @@ pub fn connect(
         .into_iter()
         .map(|name| {
             let channel = channel.clone();
-            let failed = failed.clone();
+            let execution = execution.clone();
             (
                 name.clone(),
                 HostCallback::new(move |args, cancel| {
                     let mut channel = channel.lock().unwrap();
-                    ensure!(
-                        !failed.load(Ordering::Acquire),
-                        ProtocolSnafu {
-                            reason: "callback RPC previously failed"
-                        }
-                    );
+                    if let Some(error) = execution.failure() {
+                        return Err(error.into());
+                    }
+                    // A capturing Call cannot turn an interrupted exchange into a successful run.
+                    let execution = execution.clone();
+                    let poison = move || {
+                        execution.cancel(
+                            crate::StreamExecutionSnafu {
+                                message: "callback RPC previously failed",
+                            }
+                            .build(),
+                        )
+                    };
                     let reply = channel
                         .call(&name, args, cancel)
-                        .inspect_err(|_| failed.store(true, Ordering::Release))?;
-                    let failed = failed.clone();
+                        .inspect_err(|_| poison())?;
                     Ok(reply.on_delivery(move |valid| {
                         if !valid {
-                            failed.store(true, Ordering::Release);
+                            poison();
                         }
                     }))
                 }),
@@ -272,9 +278,10 @@ pub fn connect(
         .collect())
 }
 
-pub(super) fn from_env(
+/// Consume only a grant issued by this executable's immediate parent.
+pub fn from_env(
     sites: &CallbackSites,
-    failed: &Arc<AtomicBool>,
+    execution: &StreamCancellation,
 ) -> Result<HostCallbacks, CallbackError> {
     use std::os::unix::ffi::OsStrExt;
     let Some(value) = std::env::var_os(LAUNCH_ENV) else {
@@ -285,5 +292,5 @@ pub(super) fn from_env(
     if grant.parent != unsafe { libc::getppid() } as u32 {
         return Ok(Default::default());
     }
-    connect(grant, sites, failed)
+    connect(grant, sites, execution)
 }

@@ -375,6 +375,33 @@ claim on delivery or restore it on abandonment. Reuse the plan, not a registry c
 invocation's callbacks. A standalone runner needs no host. Granted executable callbacks use the
 [local RPC protocol](workflows.md#host-callback-rpc); native embedding needs no transport.
 
+For a compiled child, enable the `callback-host` feature of `mf-runtime`. The launcher owns the
+child process and selects the handlers; the runtime owns the private listener, grant, peer PID
+check, request dispatch, cancellation, and socket cleanup. Prepare before spawning so no other
+process is given the grant, then start serving with the PID returned by `spawn`:
+
+```rust
+use mf_runtime::callback_rpc::host::Listener;
+
+let mut command = std::process::Command::new(executable);
+let listener = Listener::prepare(&mut command, &manifest.descriptor.callbacks, callbacks)?;
+let mut child = command.spawn()?;
+let server = match listener.map(|l| l.start(child.id(), &cancellation, report_error)).transpose() {
+    Ok(server) => server,
+    Err(error) => {
+        let _ = child.kill();
+        child.wait()?;
+        return Err(error.into());
+    }
+};
+let status = child.wait()?;
+drop(server);
+```
+
+Keep the server alive for the run. Route `report_error` to the supervisor so an RPC failure cannot
+be reported as success. An empty binding set clears any inherited grant and creates no listener.
+Standalone runners do not enable `callback-host`.
+
 ## Forwarding finite child emissions
 
 `Flow::with_stream_outputs` installs compiler-resolved `SubgraphStreamOutput` bindings. Each binding

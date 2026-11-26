@@ -170,7 +170,7 @@ fn missing_or_invalid_manifests_fail_without_executing_the_file() {
             "obsolete" => {
                 let mut bytes = manifest().to_bytes().unwrap();
                 let pos = bytes.windows(10).position(|w| w == b"2026-11-27").unwrap();
-                bytes[pos..pos + 10].copy_from_slice(b"2026-11-18");
+                bytes[pos..pos + 10].copy_from_slice(b"2026-11-25");
                 write_runner(&runner, Some(&bytes));
             }
             _ => unreachable!(),

@@ -60,17 +60,6 @@ pub fn sample_manifest() -> WorkflowManifest {
     .unwrap()
 }
 
-pub fn runner_description(streaming: bool) -> mf_telemetry::description::WorkflowDescription {
-    use mf_telemetry::description::{ExecutionDescription, ExecutionMode};
-    let mut description = sample_manifest().description().unwrap();
-    if streaming {
-        description.execution = Some(ExecutionDescription {
-            mode: ExecutionMode::Stream,
-        });
-    }
-    description
-}
-
 pub fn put16(bytes: &mut [u8], offset: usize, value: u16) {
     bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
 }

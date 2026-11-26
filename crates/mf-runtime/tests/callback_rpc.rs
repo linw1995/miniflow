@@ -10,10 +10,7 @@ use std::{
     io::{BufRead, BufReader, Write},
     net::Shutdown,
     os::unix::net::{UnixListener, UnixStream},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex},
     thread,
     time::Duration,
 };
@@ -125,7 +122,7 @@ fn a_failed_or_abandoned_client_reply_permanently_poisons_the_grant() {
             );
             socket.write_all(response.as_bytes()).unwrap();
         });
-        let failed = Arc::new(AtomicBool::new(false));
+        let execution = StreamCancellation::default();
         let callbacks = connect(
             Grant {
                 parent: std::process::id(),
@@ -133,20 +130,18 @@ fn a_failed_or_abandoned_client_reply_permanently_poisons_the_grant() {
                 bindings: vec!["lookup".into()],
             },
             &[("lookup".into(), vec!["site".into()])].into(),
-            &failed,
+            &execution,
         )
         .unwrap();
         let call = || callbacks["lookup"].call(&WorkflowArguments::default(), &Default::default());
         let reply = call();
         assert_eq!(reply.is_ok(), valid);
         drop(reply);
-        assert!(failed.load(Ordering::Acquire));
-        assert!(matches!(
-            call(),
-            Err(CallbackError::Protocol {
-                reason: "callback RPC previously failed"
-            })
-        ));
+        assert!(execution.failure().is_some());
+        let Err(error) = call() else {
+            panic!("poisoned session dispatched a second call")
+        };
+        assert!(error.to_string().contains("callback RPC previously failed"));
         server.join().unwrap();
     }
 }

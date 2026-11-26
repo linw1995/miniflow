@@ -1,11 +1,13 @@
 //! A private callback listener for exactly one supervised child process.
 
-use mf_runtime::{
+use super::{Grant, LAUNCH_ENV, serve};
+use crate::{
     StreamCancellation,
-    callback::{CallbackError, CodecSnafu, HostCallbacks, TransportSnafu},
-    callback_rpc::{self, Grant, LAUNCH_ENV},
+    callback::{
+        CallbackError, CallbackSites, CodecSnafu, HostCallbacks, ProtocolSnafu, TransportSnafu,
+    },
 };
-use snafu::ResultExt;
+use snafu::{ResultExt, ensure};
 use std::{
     fs::Permissions,
     io,
@@ -25,14 +27,22 @@ pub struct Listener {
 }
 
 impl Listener {
+    /// Configure the child's grant before spawning it. An unbound launch opens no socket.
     pub fn prepare(
         command: &mut Command,
+        sites: &CallbackSites,
         callbacks: HostCallbacks,
     ) -> Result<Option<Self>, CallbackError> {
         command.env_remove(LAUNCH_ENV);
         if callbacks.is_empty() {
             return Ok(None);
         }
+        ensure!(
+            callbacks.keys().all(|name| sites.contains_key(name)),
+            ProtocolSnafu {
+                reason: "callback not declared by the workflow"
+            }
+        );
         // sockaddr_un is short even when the workspace or TMPDIR is deeply nested.
         let directory = tempfile::Builder::new()
             .prefix("mf-rpc-")
@@ -58,6 +68,7 @@ impl Listener {
         }))
     }
 
+    /// Bind the prepared listener to the PID returned by this command's spawn.
     pub fn start(
         self,
         pid: u32,
@@ -92,7 +103,7 @@ impl Listener {
                     // The grant cannot be reconnected to, even by descendants of the runner.
                     drop(self.socket);
                     drop(self.directory);
-                    return callback_rpc::serve(stream, &self.callbacks, cancel);
+                    return serve(stream, &self.callbacks, cancel);
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(5))
@@ -128,7 +139,7 @@ pub struct Server {
 impl Server {
     pub fn cancel(&self) {
         self.cancellation.cancel(
-            mf_runtime::StreamExecutionSnafu {
+            crate::StreamExecutionSnafu {
                 message: "callback listener stopped",
             }
             .build(),

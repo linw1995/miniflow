@@ -26,13 +26,14 @@ mf compile flow.json --output ./flow --locked
 
 The output directory must exist. A successful first build creates `flow.lock`. See [workflow definitions](workflows.md) for dependency sources, features, and lock behavior. Native libraries required by plugins must be installed separately.
 
-`./flow` runs standalone, without a host, handshake, or terminal. `mf run ./flow` validates the
-embedded manifest and launches the same executable without callback authority. Both write business
-results directly to stdout (one JSON object or ordered JSON Lines); diagnostics stay on stderr.
-An application host can grant declared callbacks using [local RPC](workflows.md#host-callback-rpc).
+`./flow` runs standalone without a terminal. `mf run ./flow` validates the embedded manifest and
+launches the same executable. Both write business results directly to stdout (one JSON object or
+ordered JSON Lines); diagnostics stay on stderr.
 Neither `producer | ./flow` nor `producer | mf run ./flow` supplies workflow data.
 Pass startup arguments or an explicit source file instead. Recompile older runners before running them:
 `mf run` requires a current embedded manifest and will not launch a script or fall back to inherited stdio.
+An embedding host can bind declared Calls through [local callback RPC](workflows.md#host-callback-rpc);
+standalone execution does not start a listener or perform a handshake.
 Generated Unix runners handle SIGINT and SIGTERM by cancelling the active run, including
 streaming and `--node` execution. Cooperative nodes can release their resources before
 the runner exits with status 130 (SIGINT) or 143 (SIGTERM). A second interrupt forces

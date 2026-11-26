@@ -35,7 +35,7 @@ prost.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
 
 # Runner process control, signal handling, and output buffering.
-nix = { workspace = true, features = ["fs", "signal", "process", "socket"] }
+nix = { workspace = true, features = ["fs", "signal", "process"] }
 process-wrap = { workspace = true, features = ["std", "process-group", "job-object"] }
 signal-hook.workspace = true
 tempfile.workspace = true

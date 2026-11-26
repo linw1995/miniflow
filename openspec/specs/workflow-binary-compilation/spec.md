@@ -773,7 +773,7 @@ result delivery remains incremental and backpressured.
 
 #### Scenario: Execute without a business input stream
 
-- **WHEN** a user launches an autonomous producer with valid startup parameters and no RPC listener
+- **WHEN** a user launches an autonomous producer with valid startup parameters and a pipe that remains open
 - **THEN** the runner emits its complete result sequence without reading stdin
 
 #### Scenario: Reject an unresolved stdin requirement
@@ -967,13 +967,12 @@ Cargo diagnostics. Build validation MUST NOT invoke business logic.
 `mf run <executable>` SHALL run without a terminal or telemetry receiver. It SHALL validate the current embedded
 manifest before launch, forward workflow arguments without shell interpretation, and preserve child exit
 codes (on Unix, `128 + signal` for signal termination). Launch and wait failures SHALL retain typed I/O causes.
-It SHALL launch without callback authority, preserve ordinary business stdout and diagnostic stderr,
-and never forward user stdin.
+It SHALL preserve ordinary business stdout and diagnostic stderr and never forward user stdin.
 
 #### Scenario: Ignore user stdin for a compiled runner
 
-- **WHEN** the user pipes text or a protocol-looking grant into `mf run ./workflow`
-- **THEN** it supplies neither workflow data nor callback authority
+- **WHEN** the user pipes text into `mf run ./workflow`
+- **THEN** it does not reach any node, provider, or workflow input file
 
 #### Scenario: Reject incompatible executables before launch
 
@@ -1002,35 +1001,31 @@ selected build options, successful elapsed time, and retained generated-project 
 
 ### Requirement: Invoke declared host callbacks over local RPC
 
-A host granting callbacks SHALL listen on a private Unix socket for its launched runner. Only that child
-may connect and dispatch uniquely declared bindings. Each LF-terminated request carries an ID, binding
-and arguments; each response carries the matching ID and value. The socket MUST NOT carry workflow
-outputs, telemetry, or unsolicited control messages. Callback IDs SHALL start at one and be serial.
+The runtime SHALL provide both sides of invocation-scoped callback RPC without a terminal dependency.
+A launcher granting callbacks SHALL use a private Unix listener for its launched runner. Only that child
+may dispatch uniquely declared bindings. Each LF-terminated request carries an ID, binding and arguments;
+each response carries the matching ID and value. IDs start at one and are serial. The socket MUST NOT
+carry business outputs, telemetry, or unsolicited messages.
 
-#### Scenario: Invoke a callback without application-specific transport
+#### Scenario: Host a runner without a terminal
 
-- **WHEN** a finite `callback:<name>` Call has a unique static site and a host selects its v1 binding
-- **THEN** the same scoped inputs and outputs apply in native embedding and in the executable
-- **AND** protocol identifiers, control frames and queued host state are not business outputs
+- **WHEN** a native host binds a finite `callback:<name>` and launches the runner using an ordinary process command
+- **THEN** the runtime authenticates the launched PID and dispatches the scoped inputs to the handler
+- **AND** the same Call uses its authored body without a connection when no binding is granted
 
 #### Scenario: Reject incomplete delivery
 
-- **WHEN** a response is only partially written or a runner reads an unmatched result ID
-- **THEN** execution fails without retry, and a partial write is not a delivery receipt
-
-#### Scenario: Run without a host
-
-- **WHEN** a standalone runner has no grant, even if it declares callbacks
-- **THEN** local Call bodies run unchanged, without a handshake or RPC connection, and stdout contains ordinary business JSON
+- **WHEN** a response is only partially written or a runner receives an unmatched ID
+- **THEN** execution fails without retry or fallback, and a partial write is not a delivery receipt
 
 #### Scenario: Reject an invalid grant
 
-- **WHEN** the launcher grants an unknown or duplicate binding, supplies a grant for an isolated Task, or its socket is unavailable
-- **THEN** execution fails without falling back to the local body or retrying on another transport
+- **WHEN** a grant names an unknown binding or an isolated Task, or its socket is unavailable
+- **THEN** the runner fails without starting any workflow node
 
 ### Requirement: Separate definition resources from inspection projections
 
-Manifest `2026-11-27` SHALL identify standalone business stdout and optional callback RPC and retain original definition resources and a public inspection descriptor containing
+Manifest `2026-11-27` SHALL retain original definition resources, declared callback sites, and a public inspection descriptor containing
 observation descriptions, workflow identity, actual execution mode, and prepared startup inputs. It MUST NOT persist
 compiler graphs, execution relationships, scheduling layouts, or typed optimization evidence. Provider-declared types,
 bindings, and stdin constraints SHALL remain readable without invoking providers or executing the runner. Full static
@@ -1049,7 +1044,8 @@ configuration is included; invocation values MUST NOT be materialized. Existing 
 ### Requirement: Derive manifest views without replanning
 
 Runtime helpers SHALL derive graph, interface, and identity views without replanning or invoking providers. They SHALL
-borrow nodes by exact root ID and expose definition and input schema directly. Readers SHALL accept only the current manifest layout, without inferring transport from callback names. Invalid observation orders, inconsistent input contracts, missing facts, and unknown payload properties MUST
+borrow nodes by exact root ID and expose definition and input schema directly. Readers SHALL accept only the current
+manifest layout. Invalid observation orders, inconsistent input contracts, missing facts, and unknown payload properties MUST
 fail validation.
 
 #### Scenario: Read original node configuration
@@ -1143,5 +1139,5 @@ Executable chat streaming SHALL use ordinary native JSONL records and the existi
 
 #### Scenario: Preserve the existing record consumer
 
-- **WHEN** a streaming executable also invokes a granted callback
-- **THEN** its consumer receives ordinary business records on stdout with no callback envelope to decode
+- **WHEN** a compiled streaming workflow is launched with process stdin left open
+- **THEN** its consumer still receives ordinary business records on stdout without waiting for stdin EOF

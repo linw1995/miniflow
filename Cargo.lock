@@ -1830,6 +1830,7 @@ dependencies = [
  "libc",
  "mf-runtime-derive",
  "mf-telemetry",
+ "nix",
  "opentelemetry",
  "rpds",
  "serde",
