@@ -1,3 +1,6 @@
+#[cfg(unix)]
+#[path = "support/runner_fixture.rs"]
+mod runner_fixture;
 use std::process::Command;
 
 #[test]
@@ -67,18 +70,35 @@ fn invalid_arguments_report_diagnostics_on_stderr() {
 
 #[cfg(unix)]
 #[test]
-fn direct_run_preserves_stdin_arguments_output_and_exit_status() {
-    use std::{fs, io::Write, os::unix::fs::PermissionsExt, process::Stdio};
+fn direct_run_preserves_arguments_business_output_and_exit_status_without_forwarding_stdin() {
+    use serde_json::json;
+    use std::{io::Write, process::Stdio};
 
     let root = tempfile::tempdir().unwrap();
     let runner = root.path().join("runner with spaces");
-    fs::write(&runner, "#!/bin/sh\nIFS= read -r line\nprintf '%s\\n' \"$line\" \"$@\"\nprintf 'runner diagnostic\\n' >&2\nexit 37\n").unwrap();
-    fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
+    let manifest = mf_runtime::WorkflowManifest::from_graph(&mf_runtime::CompiledGraph {
+        definition: serde_json::from_value(json!({"version":"2026-10-03","dependencies":{},"nodes":[{"id":"read","kind":"test.read"}]})).unwrap(),
+        execution_order: vec!["read".into()], relations: Default::default(), children: Default::default()
+    }, serde_json::from_value(json!({"inputs":{"read":{"path":{"type":"string","required":false}}},"stdin":{}})).unwrap()).unwrap();
+    runner_fixture::write(
+        &runner,
+        Some(&manifest.to_bytes().unwrap()),
+        r#"
+[ -z "${MF_RUNNER_RPC_V1+x}" ] || exit 71
+if read -r unexpected; then exit 72; fi
+if [ "$1" = --read.path=signal ]; then kill -TERM $$; fi
+python3 -c 'import json,sys;print(json.dumps({"args":sys.argv[1:]}))' "$@"
+printf 'runner diagnostic\n' >&2
+exit 37
+"#,
+    );
     for (flags, expected) in [
         (
             vec!["--read.path", "file with spaces"],
             "--read.path\nfile with spaces\n",
         ),
+        (vec!["--read.path", "-h"], "--read.path\n-h\n"),
+        (vec!["--read.path=--help"], "--read.path=--help\n"),
         (vec!["-v", "--inputs", "{}"], "--verbose\n--inputs\n{}\n"),
         (
             vec!["-vv", "--read.path", "-vvv"],
@@ -97,6 +117,7 @@ fn direct_run_preserves_stdin_arguments_output_and_exit_status() {
             .arg("run")
             .arg(&runner)
             .args(flags)
+            .env("MF_RUNNER_RPC_V1", "must not reach the child")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -111,8 +132,8 @@ fn direct_run_preserves_stdin_arguments_output_and_exit_status() {
         let output = child.wait_with_output().unwrap();
         assert_eq!(output.status.code(), Some(37));
         assert_eq!(
-            String::from_utf8(output.stdout).unwrap(),
-            format!("piped input\n{expected}")
+            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+            json!({"args":expected.lines().collect::<Vec<_>>()})
         );
         assert_eq!(output.stderr, b"runner diagnostic\n");
     }
@@ -124,11 +145,14 @@ fn direct_run_preserves_stdin_arguments_output_and_exit_status() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(37));
-    assert_eq!(output.stdout, b"\n--verbose\n--verbose\n--verbose\n");
-    fs::write(&runner, "#!/bin/sh\nkill -TERM $$\n").unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+        json!({"args":["--verbose","--verbose","--verbose"]})
+    );
     let output = Command::new(env!("CARGO_BIN_EXE_mf"))
         .arg("run")
         .arg(&runner)
+        .arg("--read.path=signal")
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(143));
@@ -144,5 +168,5 @@ fn direct_run_reports_launch_failure() {
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("could not run workflow"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("could not inspect workflow"));
 }

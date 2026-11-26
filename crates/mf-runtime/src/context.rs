@@ -1073,7 +1073,9 @@ impl ExecutionContext {
             }
             WorkflowRunError::WorkflowInputs { .. } => (None, FailurePhase::Dependency),
             WorkflowRunError::NodeTarget { .. } => (None, FailurePhase::Dependency),
-            WorkflowRunError::WorkerPool { .. } => (None, FailurePhase::Execution),
+            WorkflowRunError::WorkerPool { .. } | WorkflowRunError::HostCallback { .. } => {
+                (None, FailurePhase::Execution)
+            }
         };
         observation.select_failure(node, phase, error.to_string());
     }

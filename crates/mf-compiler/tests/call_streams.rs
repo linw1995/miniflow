@@ -260,6 +260,44 @@ fn wired_child(config: Value) -> Value {
 }
 
 #[test]
+fn callback_bindings_replace_a_scheduled_body_only_when_its_public_interface_is_finite() {
+    let mut registry = NodeRegistry::from_inventory().unwrap();
+    let mut document = caller(wired_child(json!({})));
+    let config = &mut document["nodes"][0]["config"];
+    config["flow"] = json!("callback:count");
+    let parse = |document: &Value| serde_json::from_value(document.clone()).unwrap();
+    let error = compile_definition(&parse(&document), &registry).unwrap_err();
+    assert!(error.to_string().contains("finite interface"), "{error}");
+
+    document["nodes"][0]["config"]["body"]["outputs"]
+        .as_array_mut()
+        .unwrap()
+        .remove(0);
+    document["outputs"].as_array_mut().unwrap().remove(0);
+    let plan = compile_definition(&parse(&document), &registry).unwrap();
+    let run = |registry: &NodeRegistry| {
+        mf_compiler::execute_compiled_with_inputs(
+            &plan,
+            registry,
+            arguments("invoke.step.count"),
+            None,
+        )
+        .unwrap()["count"]
+            .clone()
+    };
+    assert_eq!(run(&registry), json!(2));
+    let sites = plan.manifest(&registry).unwrap().descriptor.callbacks;
+    let callback = mf_runtime::callback::HostCallback::new(|args, _| {
+        assert_eq!(args.0["step.count"], json!(2));
+        Ok(mf_runtime::Outputs::from([("count".into(), 17_u64.into())]).into())
+    });
+    registry
+        .bind_callbacks(&sites, &[], &[("count".into(), callback)].into())
+        .unwrap();
+    assert_eq!(run(&registry), json!(17));
+}
+
+#[test]
 fn callable_stream_edges_flush_before_return_and_isolate_concurrent_invocations() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(

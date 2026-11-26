@@ -7,6 +7,10 @@ use std::{
     collections::VecDeque,
     fs::File,
     io::{self, Read, Write},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 #[derive(Debug)]
@@ -131,6 +135,13 @@ fn wait_ready(file: &File, writing: bool, cancellation: &StreamCancellation) -> 
             continue;
         }
         if descriptor.revents & libc::POLLNVAL != 0 {
+            // Darwin reports POLLNVAL for valid character devices such as /dev/null.
+            #[cfg(target_os = "macos")]
+            if writing
+                && std::os::unix::fs::FileTypeExt::is_char_device(&file.metadata()?.file_type())
+            {
+                return Ok(());
+            }
             return Err(io::Error::other("stream descriptor is invalid"));
         }
         if writing && descriptor.revents & (libc::POLLERR | libc::POLLHUP) != 0 {
@@ -150,69 +161,127 @@ fn wait_ready(_: &File, _: bool, _: &StreamCancellation) -> io::Result<()> {
     ))
 }
 
-pub struct StreamStdio {
-    input: Option<TextInput>,
-    output: File,
+#[derive(Debug, snafu::Snafu)]
+pub enum RunnerLaunchError {
+    #[snafu(transparent)]
+    Arguments { source: crate::RunnerArgumentError },
+    #[snafu(transparent)]
+    Protocol {
+        source: crate::callback::CallbackError,
+    },
+    #[snafu(transparent)]
+    Stdio { source: StreamError },
 }
 
-impl StreamStdio {
+pub struct RunnerStdio {
+    output: File,
+    rpc_failed: Arc<AtomicBool>,
+}
+
+impl RunnerStdio {
     #[cfg(unix)]
-    pub fn claim() -> Result<Self, StreamError> {
+    fn claim() -> Result<File, StreamError> {
         use std::os::fd::{AsRawFd, FromRawFd};
-        fn duplicate(fd: libc::c_int) -> io::Result<File> {
-            let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
-            if duplicate < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(unsafe { File::from_raw_fd(duplicate) })
-        }
-        fn redirect(source: libc::c_int, target: libc::c_int) -> io::Result<()> {
-            if unsafe { libc::dup2(source, target) } < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        }
-        let claim = || -> io::Result<Self> {
+        let reserve = || -> io::Result<File> {
             io::stdout().flush()?;
-            let input = TextInput::new(duplicate(libc::STDIN_FILENO)?);
-            let output = duplicate(libc::STDOUT_FILENO)?;
+            let fd = unsafe { libc::fcntl(libc::STDOUT_FILENO, libc::F_DUPFD_CLOEXEC, 3) };
+            if fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let output = unsafe { File::from_raw_fd(fd) };
             let null = File::open("/dev/null")?;
-            redirect(null.as_raw_fd(), libc::STDIN_FILENO)?;
-            redirect(libc::STDERR_FILENO, libc::STDOUT_FILENO)?;
-            Ok(Self {
-                input: Some(input),
-                output,
-            })
+            if unsafe { libc::dup2(null.as_raw_fd(), libc::STDIN_FILENO) } < 0
+                || unsafe { libc::dup2(libc::STDERR_FILENO, libc::STDOUT_FILENO) } < 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(output)
         };
-        claim().context(StdioSnafu)
+        reserve().context(StdioSnafu)
     }
 
-    #[cfg(not(unix))]
-    pub fn claim() -> Result<Self, StreamError> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "stream stdio requires Linux or macOS",
-        ))
-        .context(StdioSnafu)
+    pub fn launch(
+        command: crate::RunnerCommand<'_>,
+        sites: &crate::callback::CallbackSites,
+    ) -> Result<
+        (
+            crate::RunnerInvocation,
+            Self,
+            crate::callback::HostCallbacks,
+        ),
+        RunnerLaunchError,
+    > {
+        #[cfg(unix)]
+        {
+            // Do not expose inherited stdin even during --inputs-file or --context-file resolution.
+            let output = Self::claim()?;
+            let invocation = command.resolve()?;
+            let isolated = Default::default();
+            let rpc_failed = Arc::new(AtomicBool::new(false));
+            let callbacks = crate::callback_rpc::from_env(
+                if invocation.node.is_some() {
+                    &isolated
+                } else {
+                    sites
+                },
+                &rpc_failed,
+            )?;
+            Ok((invocation, Self { output, rpc_failed }, callbacks))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (command, sites);
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "runner stdio requires Linux or macOS",
+            ))
+            .context(StdioSnafu)?
+        }
     }
 
-    pub fn take_input(&mut self) -> Option<TextInput> {
-        self.input.take()
+    fn check_rpc(&self) -> Result<(), StreamError> {
+        snafu::ensure!(
+            !self.rpc_failed.load(Ordering::Acquire),
+            ResourceSnafu {
+                message: "callback RPC previously failed"
+            }
+        );
+        Ok(())
     }
 
-    pub fn write_json(&mut self, value: &impl serde::Serialize) -> Result<(), StreamError> {
-        serde_json::to_writer(&mut self.output, value).context(OutputEncodeSnafu)?;
-        self.output
-            .write_all(b"\n")
-            .and_then(|()| self.output.flush())
-            .context(OutputWriteSnafu)
+    pub fn write_output(
+        &self,
+        values: crate::NodeValues,
+        cancellation: &StreamCancellation,
+    ) -> Result<(), StreamError> {
+        self.check_rpc()?;
+        let mut bytes = serde_json::to_vec(&values).context(OutputEncodeSnafu)?;
+        bytes.push(b'\n');
+        let mut remaining = bytes.as_slice();
+        let mut file = &self.output;
+        while !remaining.is_empty() {
+            wait_ready(file, true, cancellation).context(OutputWriteSnafu)?;
+            if let Some(error) = cancellation.failure() {
+                return Err(error);
+            }
+            let written = match file.write(&remaining[..remaining.len().min(512)]) {
+                Ok(0) => {
+                    return Err(io::Error::from(io::ErrorKind::WriteZero))
+                        .context(OutputWriteSnafu);
+                }
+                Ok(written) => written,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(source) => return Err(source).context(OutputWriteSnafu),
+            };
+            remaining = &remaining[written..];
+        }
+        file.flush().context(OutputWriteSnafu)
     }
 
-    pub fn run(mut self, instance: StreamInstance) -> Result<StreamSummary, StreamError> {
+    pub fn run(self, instance: StreamInstance) -> Result<StreamSummary, StreamError> {
         let cancellation = instance.cancellation();
         while let Ok(Some(delivery)) = instance.receive() {
-            let result = write_record(&mut self.output, delivery.output(), &cancellation);
-            match result {
+            match self.write_output(delivery.output().outputs.clone(), &cancellation) {
                 Ok(()) => {
                     if delivery.acknowledge().is_err() {
                         break;
@@ -224,32 +293,8 @@ impl StreamStdio {
                 }
             }
         }
-        instance.join()
+        let summary = instance.join()?;
+        self.check_rpc()?;
+        Ok(summary)
     }
-}
-
-fn write_record(
-    file: &mut File,
-    output: &crate::StreamOutput,
-    cancellation: &StreamCancellation,
-) -> Result<(), StreamError> {
-    let mut bytes = serde_json::to_vec(&output.outputs).context(OutputEncodeSnafu)?;
-    bytes.push(b'\n');
-    let mut remaining = bytes.as_slice();
-    while !remaining.is_empty() {
-        wait_ready(file, true, cancellation).context(OutputWriteSnafu)?;
-        if let Some(error) = cancellation.failure() {
-            return Err(error);
-        }
-        let written = match file.write(&remaining[..remaining.len().min(512)]) {
-            Ok(0) => {
-                return Err(io::Error::from(io::ErrorKind::WriteZero)).context(OutputWriteSnafu);
-            }
-            Ok(written) => written,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(source) => return Err(source).context(OutputWriteSnafu),
-        };
-        remaining = &remaining[written..];
-    }
-    file.flush().context(OutputWriteSnafu)
 }

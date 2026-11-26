@@ -290,7 +290,7 @@ parameters. Workflows with active stdin requirements MUST fail preflight before 
 #### Scenario: Reject missing source input
 
 - **WHEN** a readline node omits its file path and therefore requires stdin
-- **THEN** TUI preflight rejects execution and reports that the source needs workflow parameters or direct execution
+- **THEN** TUI preflight rejects execution; supplying the file path as a workflow parameter resolves the requirement
 
 #### Scenario: Identify an older streaming runner
 

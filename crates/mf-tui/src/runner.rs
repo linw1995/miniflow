@@ -5,10 +5,7 @@ use crate::{
     run::{LocalObservation, LocalOutcome, LocalRun, RunError},
 };
 use mf_runtime::{NodeValues, StreamCancellation, WorkflowArguments, WorkflowManifest};
-use mf_telemetry::{
-    description::{ExecutionMode, WorkflowDescription},
-    identity::RunId,
-};
+use mf_telemetry::{description::WorkflowDescription, identity::RunId};
 use snafu::{ResultExt, Snafu, ensure};
 use std::{
     path::{Path, PathBuf},
@@ -39,6 +36,8 @@ pub enum RunnerError {
         operation: &'static str,
         source: std::io::Error,
     },
+    #[snafu(display("runner does not declare the requested v1 host callback"))]
+    UnboundCallback,
     #[snafu(display("could not encode runner arguments: {source}"))]
     Arguments { source: serde_json::Error },
 }
@@ -70,11 +69,7 @@ impl PreparedRunner {
         })?;
         let manifest = read_manifest(&executable)?;
         let description = manifest.description()?;
-        let output = if description
-            .execution
-            .as_ref()
-            .is_some_and(|execution| execution.mode == ExecutionMode::Stream)
-        {
+        let output = if description.is_streaming() {
             RunnerOutput::Records
         } else {
             RunnerOutput::Finite {
@@ -102,7 +97,7 @@ impl PreparedRunner {
     }
 
     pub fn is_streaming(&self) -> bool {
-        matches!(self.output, RunnerOutput::Records)
+        self.description.is_streaming()
     }
 }
 
@@ -147,6 +142,23 @@ impl RunnerInvocation<'_> {
     /// Consume available records in wire order without waiting for another record to fill a batch.
     pub fn run_batches<E>(
         self,
+        cancellation: StreamCancellation,
+        observe: impl FnOnce(LocalObservation),
+        consume: impl FnMut(&mut dyn Iterator<Item = NodeValues>) -> Result<(), E>,
+        should_cancel: impl FnMut() -> bool,
+    ) -> Result<RunnerCompletion<E>, RunnerError> {
+        self.run_with_callbacks(
+            Default::default(),
+            cancellation,
+            observe,
+            consume,
+            should_cancel,
+        )
+    }
+
+    pub fn run_with_callbacks<E>(
+        self,
+        callbacks: mf_runtime::callback::HostCallbacks,
         cancellation: StreamCancellation,
         observe: impl FnOnce(LocalObservation),
         mut consume: impl FnMut(&mut dyn Iterator<Item = NodeValues>) -> Result<(), E>,
@@ -197,12 +209,20 @@ impl RunnerInvocation<'_> {
         );
         let run_id = RunId::new();
         let description = self.runner.description.clone();
-        let mut run = match self.runner.output {
-            RunnerOutput::Finite { limit } => LocalRun::start(command, description, run_id, limit)?,
-            RunnerOutput::Records => {
-                LocalRun::start_stream(command, description, run_id, cancellation.clone())?
-            }
-        };
+        for name in callbacks.keys() {
+            ensure!(
+                self.runner.manifest.descriptor.callbacks.contains_key(name),
+                UnboundCallbackSnafu
+            );
+        }
+        let mut run = LocalRun::start_with_callbacks(
+            command,
+            description,
+            run_id,
+            cancellation.clone(),
+            callbacks,
+            self.runner.output,
+        )?;
         observe(run.observation());
         let mut protocol_failure = None;
         loop {
@@ -264,7 +284,7 @@ mod tests {
         let marker = root.path().join("executed");
         let manifest = crate::test_support::sample_manifest();
         let script = format!(
-            "#!/bin/sh\nprintf x >> '{}'\nprintf '{{}}'\n",
+            "#!/bin/sh\n[ \"$#\" -eq 2 ] && [ \"$1\" = --inputs-file ] || exit 19\n[ -z \"${{MF_RUNNER_RPC_V1+x}}\" ] || exit 20\nprintf x >> '{}'\nprintf '%s\\n' '{{}}'\n",
             marker.display()
         );
         crate::test_support::write_runner(&path, &manifest, &script);
@@ -310,6 +330,108 @@ mod tests {
             Err(RunnerError::Run { .. })
         ));
         assert_eq!(runner.manifest(), &manifest);
+    }
+
+    #[test]
+    fn only_the_launched_pid_can_invoke_callbacks_and_stdout_is_always_business_data() {
+        use mf_runtime::callback::{CallbackReply, HostCallback};
+        use std::sync::{Arc, Mutex};
+        use std::time::Instant;
+        let delivered = Arc::new(Mutex::new(Vec::new()));
+        let events = delivered.clone();
+        let callbacks = [(
+            "test".into(),
+            HostCallback::new(move |args, _| {
+                let events = events.clone();
+                let size = args.0.get("size").and_then(|n| n.as_u64()).unwrap_or(1) as usize;
+                Ok(
+                    CallbackReply::from(NodeValues::from([("x".into(), "x".repeat(size).into())]))
+                        .on_delivery(move |ok| events.lock().unwrap().push(ok)),
+                )
+            }),
+        )]
+        .into();
+        let run = |script: &str, output| {
+            let mut command = Command::new("python3");
+            command.args([
+                "-c",
+                &format!(
+                    r#"
+import json, os, socket, stat, subprocess, sys
+launch = json.loads(os.environ['MF_RUNNER_RPC_V1'])
+assert launch['bindings'] == ['test'] and launch['parent'] == os.getppid()
+path = launch['socket']
+assert stat.S_IMODE(os.stat(os.path.dirname(path)).st_mode) == 0o700
+assert sys.stdin.read() == ''
+def connect():
+    channel = socket.socket(socket.AF_UNIX)
+    channel.connect(path)
+    return channel.makefile('rwb', buffering=0)
+def call(channel, n, name='test'):
+    request = dict(id=n, binding=name, args=dict(values={{}}))
+    channel.write(json.dumps(request).encode() + b'\n')
+    return channel.readline()
+{script}"#
+                ),
+            ]);
+            let mut run = LocalRun::start_with_callbacks(
+                command,
+                crate::test_support::runner_description(matches!(output, RunnerOutput::Records)),
+                RunId::new(),
+                Default::default(),
+                mf_runtime::callback::HostCallbacks::clone(&callbacks),
+                output,
+            )
+            .unwrap();
+            let start = Instant::now();
+            let mut records = Vec::new();
+            loop {
+                while let Ok(record) = run.try_record() {
+                    records.push(record);
+                }
+                if let Some(outcome) = run.poll().unwrap() {
+                    while let Ok(record) = run.try_record() {
+                        records.push(record);
+                    }
+                    break (outcome, records);
+                }
+                assert!(start.elapsed() < Duration::from_secs(10));
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let request = json!({"id":1,"binding":"test","args":{"values":{}}});
+        let script = format!(
+            r#"
+foreign = "import socket,sys;s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[1]);s.sendall(sys.argv[2].encode());assert not s.recv(1)"
+subprocess.run([sys.executable,'-c',foreign,path,{line:?}], stderr=subprocess.DEVNULL)
+channel = connect()
+print({line:?}, end='', flush=True)
+for n in [1,2]:
+    assert json.loads(call(channel,n)) == dict(id=n,value=dict(values=dict(x='x')))
+print('{{"type":"result"}}')"#,
+            line = format!("{request}\n")
+        );
+        let (outcome, records) = run(&script, RunnerOutput::Records);
+        assert!(
+            outcome.status.success() && outcome.capture_error.is_none(),
+            "{} {:?}",
+            outcome.stderr,
+            outcome.capture_error
+        );
+        assert_eq!(
+            serde_json::to_value(&records).unwrap(),
+            json!([request,{"type":"result"}])
+        );
+        assert!(outcome.stdout.is_empty());
+        for (script, diagnostic) in [
+            ("print('bad')", "invalid workflow output record"),
+            ("call(connect(),1,'other')", "unbound callback"),
+            ("call(connect(),2)", "out-of-order"),
+        ] {
+            let (outcome, _) = run(script, RunnerOutput::Records);
+            assert!(outcome.capture_error.unwrap().contains(diagnostic));
+        }
+        assert_eq!(*delivered.lock().unwrap(), [true, true]);
     }
 
     #[test]

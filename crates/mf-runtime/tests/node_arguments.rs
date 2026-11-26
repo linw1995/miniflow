@@ -95,6 +95,18 @@ fn selection_preserves_values_types_presence_and_normal_arguments() {
 }
 
 #[test]
+fn runner_reserves_stdin_even_without_callback_bindings() {
+    let schema: WorkflowInputSchema =
+        serde_json::from_value(json!({"inputs":{}, "stdin":{"reader":"always"}})).unwrap();
+    assert!(
+        RunnerInvocation::parse([], &schema, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("required stdin resource is unavailable")
+    );
+}
+
+#[test]
 fn rejects_invalid_targets_inputs_and_context_controls() {
     let target = target();
     for args in [

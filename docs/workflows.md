@@ -400,6 +400,38 @@ expose `Map(Any)`, with checked edges validating narrower destination types.
 This is general native-value construction, not a tool registry or executable loader. The caller's
 `calculator` key is a business name; it does not create a second callable identity.
 
+### Host callback RPC
+
+A finite `workflow.call` named `callback:<name>` declares an optional host implementation. Its
+ordinary `body` defines the interface and runs unchanged when unbound. The compiled descriptor's
+`callbacks` maps each unambiguous name to its exact static child path. Discovery follows
+static calls and loop/iteration bodies, not tool values, routed copies, or callback implementations.
+Multiple sites with the same name have no implicit winner. Embedders install `HostCallback` values
+with `NodeRegistry::bind_callbacks`; no callback is a JSON startup argument.
+
+A runner with manifest `2026-11-27` works standalone. Without a callback grant, `./flow` and
+`mf run ./flow` use the local bodies and do not open a callback socket. Both disable stdin and
+publish only selected business JSON on stdout (one object or ordered JSON Lines). Pass startup
+parameters or use file sources; diagnostics use stderr. Telemetry uses its separate OTLP endpoint.
+
+On Linux and macOS, a host granting callbacks creates a Unix stream listener in a private directory
+and sets `MF_RUNNER_RPC_V1` for its immediate child to a JSON object such as
+`{"parent":1234,"socket":"/tmp/mf-rpc-example/rpc","bindings":["lookup"]}`. `parent` is the
+launcher's PID. All names must be unique and declared; isolated Tasks cannot receive a grant.
+The runner connects as the client before provider construction. The host checks the kernel-reported
+peer PID against its launched child and removes the listener after accepting that connection.
+Nested executables do not inherit the grant. Normal CLI launches clear any ambient grant.
+
+Only requests and responses travel on this socket, as LF-terminated UTF-8 JSON. Direction determines
+the schema; there is no `type` discriminator, handshake, output, event, cancel, or completion frame.
+For example, the runner writes `{"id":1,"binding":"lookup","args":{"values":{"query.key":"build_id"}}}`
+and the host replies `{"id":1,"value":{"values":{"value":"b42"}}}`. Calls are serial, with one
+shared sequence starting at 1 per connection. Both envelopes preserve sensitivity using optional
+`private` paths inside `args` or `value` (lists of keys or decimal array indices); native handles
+cannot cross the socket. Each message is bounded to 2 MiB including LF. A broken granted connection,
+malformed message, wrong ID, or failed handler fails the invocation without fallback or replay.
+A host delivery receipt means the complete response was written, not that the workflow committed.
+
 ### Supply an already-built runner
 
 Unix hosts can load an existing Linux ELF64 or macOS Mach-O64 runner as the same
@@ -2133,7 +2165,8 @@ task-only graph finishes without external input. A producer reached through star
 Use `builtin.readline` to read UTF-8 text lines from a file or stdin. Its optional string input `path`
 selects a regular text file when supplied, including through a symbolic link to a regular file. FIFO paths,
 directories, devices, and sockets are unsupported and cause execution to fail. A FIFO path is rejected
-without waiting for a writer. Omission selects stdin, which can be a pipe or terminal.
+without waiting for a writer. Omission selects `TextInput` supplied by an embedding host;
+compiled runners require a path because they do not supply business stdin.
 Its string output `line` preserves blank lines and whitespace and strips LF/CRLF delimiters. JSON parsing
 belongs in downstream nodes. Other StreamNodes can
 obtain data from files or services using their startup parameters. Every source is an ordinary declared node;

@@ -630,7 +630,7 @@ Generated runners SHALL retain generated node preparation and fixed port binding
 
 ### Requirement: Deliver streaming results without waiting for EOF
 
-Each selected stream result SHALL be written and flushed as one JSON line without building a final aggregate.
+Each selected stream result SHALL be flushed as one ordinary JSON line, directly or through `mf run`, without building a final aggregate.
 Slow output MUST apply message-count backpressure, and output failure MUST fail execution. In stream mode,
 runner transport MUST reserve result stdout and direct plugin stdout diagnostics to stderr, including
 construction diagnostics.
@@ -643,7 +643,7 @@ construction diagnostics.
 #### Scenario: Preserve result framing with a noisy plugin
 
 - **WHEN** a plugin prints diagnostics during construction and execution
-- **THEN** stdout still contains only workflow result JSON lines and diagnostics appear on stderr
+- **THEN** `mf run` stdout still contains only workflow result JSON lines and diagnostics appear on stderr
 
 #### Scenario: Fail a broken output pipe
 
@@ -767,20 +767,19 @@ Raw transport and canonical JSON MUST each fit 1 MiB. Parameter data MUST remain
 
 ### Requirement: Route only declared input resources
 
-Streaming runners SHALL obtain data through explicit source nodes and SHALL supply only their declared runtime
-input resources. Runners MUST reserve result stdout before plugin construction and isolate diagnostics. A
-workflow with no stdin source MUST start and complete independently of stdin. EOF SHALL close only its owning
-source; result delivery remains incremental and backpressured.
+Generated runners SHALL disable process stdin and reserve business stdout before plugin construction or
+argument-file resolution. File sources and autonomous producers SHALL execute without a host;
+result delivery remains incremental and backpressured.
 
-#### Scenario: Execute with null stdin
+#### Scenario: Execute without a business input stream
 
-- **WHEN** an autonomous file producer has valid startup parameters and no stdin resource requirement
-- **THEN** the standalone runner executes with null stdin and emits its complete result sequence
+- **WHEN** a user launches an autonomous producer with valid startup parameters and no RPC listener
+- **THEN** the runner emits its complete result sequence without reading stdin
 
-#### Scenario: Keep one source active after stdin EOF
+#### Scenario: Reject an unresolved stdin requirement
 
-- **WHEN** a graph has an explicit stdin source and a separate active producer
-- **THEN** stdin EOF drains only that source and does not declare the entire workflow complete
+- **WHEN** a source still requires business stdin after startup inputs are resolved
+- **THEN** the runner rejects execution before starting any node
 
 ### Requirement: Compile provider-dependent stream layout
 
@@ -965,15 +964,21 @@ Cargo diagnostics. Build validation MUST NOT invoke business logic.
 
 ### Requirement: Run existing executables without terminal presentation
 
-`mf run <executable>` SHALL execute an existing workflow binary without requiring `--tui`, an interactive terminal,
-manifest inspection by the CLI, or a telemetry receiver. It SHALL inherit stdin, stdout, and stderr, forward supplied
-workflow parameters without shell interpretation, and preserve ordinary child exit codes. On Unix, child signal
-termination SHALL return `128 + signal`. Launch and wait errors SHALL retain their typed I/O causes.
+`mf run <executable>` SHALL run without a terminal or telemetry receiver. It SHALL validate the current embedded
+manifest before launch, forward workflow arguments without shell interpretation, and preserve child exit
+codes (on Unix, `128 + signal` for signal termination). Launch and wait failures SHALL retain typed I/O causes.
+It SHALL launch without callback authority, preserve ordinary business stdout and diagnostic stderr,
+and never forward user stdin.
 
-#### Scenario: Run a workflow with piped input
+#### Scenario: Ignore user stdin for a compiled runner
 
-- **WHEN** the user pipes data into `mf run ./workflow` without `--tui`
-- **THEN** the workflow receives that input and writes its results and diagnostics to the inherited streams
+- **WHEN** the user pipes text or a protocol-looking grant into `mf run ./workflow`
+- **THEN** it supplies neither workflow data nor callback authority
+
+#### Scenario: Reject incompatible executables before launch
+
+- **WHEN** the target is a script or its manifest is missing, invalid, or obsolete
+- **THEN** the CLI reports an inspection failure without launching it or falling back to inherited stdio
 
 #### Scenario: Forward named and JSON parameters
 
@@ -995,9 +1000,37 @@ selected build options, successful elapsed time, and retained generated-project 
 - **WHEN** the user invokes `mf compile flow.json --output ./flow --verbose`
 - **THEN** stderr includes compilation options and a successful completion summary without changing build validation
 
+### Requirement: Invoke declared host callbacks over local RPC
+
+A host granting callbacks SHALL listen on a private Unix socket for its launched runner. Only that child
+may connect and dispatch uniquely declared bindings. Each LF-terminated request carries an ID, binding
+and arguments; each response carries the matching ID and value. The socket MUST NOT carry workflow
+outputs, telemetry, or unsolicited control messages. Callback IDs SHALL start at one and be serial.
+
+#### Scenario: Invoke a callback without application-specific transport
+
+- **WHEN** a finite `callback:<name>` Call has a unique static site and a host selects its v1 binding
+- **THEN** the same scoped inputs and outputs apply in native embedding and in the executable
+- **AND** protocol identifiers, control frames and queued host state are not business outputs
+
+#### Scenario: Reject incomplete delivery
+
+- **WHEN** a response is only partially written or a runner reads an unmatched result ID
+- **THEN** execution fails without retry, and a partial write is not a delivery receipt
+
+#### Scenario: Run without a host
+
+- **WHEN** a standalone runner has no grant, even if it declares callbacks
+- **THEN** local Call bodies run unchanged, without a handshake or RPC connection, and stdout contains ordinary business JSON
+
+#### Scenario: Reject an invalid grant
+
+- **WHEN** the launcher grants an unknown or duplicate binding, supplies a grant for an isolated Task, or its socket is unavailable
+- **THEN** execution fails without falling back to the local body or retrying on another transport
+
 ### Requirement: Separate definition resources from inspection projections
 
-Manifest `2026-11-18` SHALL retain original definition resources and a public inspection descriptor containing
+Manifest `2026-11-27` SHALL identify standalone business stdout and optional callback RPC and retain original definition resources and a public inspection descriptor containing
 observation descriptions, workflow identity, actual execution mode, and prepared startup inputs. It MUST NOT persist
 compiler graphs, execution relationships, scheduling layouts, or typed optimization evidence. Provider-declared types,
 bindings, and stdin constraints SHALL remain readable without invoking providers or executing the runner. Full static
@@ -1016,8 +1049,7 @@ configuration is included; invocation values MUST NOT be materialized. Existing 
 ### Requirement: Derive manifest views without replanning
 
 Runtime helpers SHALL derive graph, interface, and identity views without replanning or invoking providers. They SHALL
-borrow nodes by exact root ID and expose definition and input schema directly. Readers SHALL accept only the current
-manifest layout. Invalid observation orders, inconsistent input contracts, missing facts, and unknown payload properties MUST
+borrow nodes by exact root ID and expose definition and input schema directly. Readers SHALL accept only the current manifest layout, without inferring transport from callback names. Invalid observation orders, inconsistent input contracts, missing facts, and unknown payload properties MUST
 fail validation.
 
 #### Scenario: Read original node configuration
@@ -1108,3 +1140,8 @@ execution. The runtime SHALL own queue capacity, acknowledgment, cancellation, a
 ### Requirement: Use standard Stream records for executable chat
 
 Executable chat streaming SHALL use ordinary native JSONL records and the existing manifest. Business interpretation SHALL belong to the conversation contract. Runtime MUST NOT introduce a separate live publisher, bounded live channel, scoped export schema, or versioned live envelope. Finite and isolated Task JSON execution SHALL remain available.
+
+#### Scenario: Preserve the existing record consumer
+
+- **WHEN** a streaming executable also invokes a granted callback
+- **THEN** its consumer receives ordinary business records on stdout with no callback envelope to decode

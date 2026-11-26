@@ -269,6 +269,7 @@ enum PreparedSubgraphBody {
     Flow(Flow),
     Scheduled(Arc<crate::callable_stream::CallableStream>),
     Finite(Arc<SubgraphBody>),
+    Callback(crate::callback::HostCallback),
     Event(Arc<dyn Fn() -> Result<crate::PreparedStream, WorkflowRunError> + Send + Sync>),
 }
 
@@ -443,6 +444,7 @@ impl PreparedSubgraph {
             PreparedSubgraphBody::Flow(flow) => Ok(flow),
             PreparedSubgraphBody::Scheduled(_)
             | PreparedSubgraphBody::Finite(_)
+            | PreparedSubgraphBody::Callback(_)
             | PreparedSubgraphBody::Event(_) => crate::NodeInvalidSubgraphSnafu {
                 message: "prepared body is not backed by a compiled finite Flow",
             }
@@ -533,6 +535,13 @@ impl PreparedSubgraph {
                     context,
                 )
             }
+            PreparedSubgraphBody::Callback(_) => {
+                let body = self.clone();
+                crate::FlowInvocation::start_body(
+                    Arc::new(move |state, sink| body.execute_with_sink(state, sink)),
+                    context,
+                )
+            }
             PreparedSubgraphBody::Finite(body) => {
                 crate::FlowInvocation::start_body(body.clone(), context)
             }
@@ -601,6 +610,11 @@ impl PreparedSubgraph {
             .map(|scope| &scope.input)
     }
 
+    pub(super) fn with_callback(mut self, handler: crate::callback::HostCallback) -> Self {
+        self.body = PreparedSubgraphBody::Callback(handler);
+        self
+    }
+
     /// Sets a manually supplied flat schema without inferring independent Flows.
     pub fn with_input_schema(mut self, inputs: crate::WorkflowInputSchema) -> Self {
         self.inputs = inputs;
@@ -660,6 +674,16 @@ impl PreparedSubgraph {
             PreparedSubgraphBody::Flow(flow) => flow.execute_with_sink(state, sink),
             PreparedSubgraphBody::Scheduled(graph) => graph.execute(state, sink),
             PreparedSubgraphBody::Finite(body) => body(state, sink),
+            PreparedSubgraphBody::Callback(handler) => {
+                let args = crate::resolve_workflow_inputs(
+                    &self.inputs,
+                    state.workflow_arguments(),
+                    |name| std::env::var_os(name),
+                )?;
+                let reply = handler.call(&args, &state.cancellation())?;
+                reply.validate(&self.outputs)?;
+                Ok(reply.delivered())
+            }
             PreparedSubgraphBody::Event(_) => {
                 let context = state.fork_domain_with_observation(state.observation().cloned());
                 let invocation = self.start_in_context(context)?;

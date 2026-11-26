@@ -127,9 +127,53 @@ impl std::fmt::Debug for RegisteredFlow {
 pub struct NodeRegistry {
     registrations: BTreeMap<&'static str, &'static NodeRegistration>,
     flows: BTreeMap<String, RegisteredFlow>,
+    callbacks: BTreeMap<Vec<String>, (String, crate::callback::HostCallback)>,
 }
 
 impl NodeRegistry {
+    /// Install only the selected artifact's declared call sites. A composed embedded
+    /// child can have an additional definition prefix in its parent's observation graph.
+    pub fn bind_callbacks(
+        &mut self,
+        sites: &crate::callback::CallbackSites,
+        prefix: &[String],
+        callbacks: &crate::callback::HostCallbacks,
+    ) -> Result<(), crate::callback::CallbackError> {
+        let mut bindings = BTreeMap::new();
+        for (name, callback) in callbacks {
+            let path = sites.get(name).ok_or_else(|| {
+                crate::callback::ProtocolSnafu {
+                    reason: "callback not declared by the workflow",
+                }
+                .build()
+            })?;
+            let path = [prefix, path].concat();
+            snafu::ensure!(
+                !self.callbacks.contains_key(&path)
+                    && bindings
+                        .insert(path, (name.clone(), callback.clone()))
+                        .is_none(),
+                crate::callback::ProtocolSnafu {
+                    reason: "callback site already bound"
+                }
+            );
+        }
+        self.callbacks.extend(bindings);
+        Ok(())
+    }
+
+    pub fn bind_callback_body(
+        &self,
+        path: &[String],
+        name: &str,
+        body: crate::PreparedSubgraph,
+    ) -> crate::PreparedSubgraph {
+        match self.callbacks.get(path) {
+            Some((binding, handler)) if binding == name => body.with_callback(handler.clone()),
+            _ => body,
+        }
+    }
+
     /// Binds a named, frozen Flow to a host executor without requiring its node providers.
     /// The executor may be shared by multiple call sites and must isolate per-call state.
     pub fn register_flow(

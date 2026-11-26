@@ -119,22 +119,26 @@ fn main() -> std::process::ExitCode {
 }
 
 fn run(#[cfg(unix)] signals: &mut mf_runtime::RunnerSignals) -> Result<(), Box<dyn std::error::Error>> {
-    let targets = workflow_manifest()?.descriptor.node_targets;
-    let invocation = mf_runtime::RunnerInvocation::parse(
-        std::env::args_os().skip(1), &workflow::compiled_input_schema(), &targets,
-    )?;
+    let descriptor = workflow_manifest()?.descriptor;
+    let targets = descriptor.node_targets;
+    let schema = workflow::compiled_input_schema();
+    let command = mf_runtime::RunnerCommand::parse(std::env::args_os().skip(1), &schema, &targets)?;
+    let cancellation = mf_runtime::StreamCancellation::default();
+    #[cfg(unix)]
+    signals.bind(cancellation.clone())?;
+    let (invocation, stdio, callbacks) = mf_runtime::RunnerStdio::launch(command, &descriptor.callbacks)?;
+    let mut registry = mf_runtime::NodeRegistry::from_inventory()?;
+    registry.bind_callbacks(&descriptor.callbacks, &[], &callbacks)?;
     if let Some(id) = invocation.node.as_deref() {
         let target = mf_runtime::NodeTarget::find(&targets, id)?;
-        return execute_selected(target, invocation.inputs, invocation.context, invocation.verbose, #[cfg(unix)] signals);
+        return execute_selected(target, invocation.inputs, invocation.context, invocation.verbose, registry, stdio, cancellation);
     }
-    let arguments = invocation.inputs;
     #[cfg(mf_streaming)]
-    { execute_stream(arguments, invocation.verbose, #[cfg(unix)] signals) }
+    { execute_stream(invocation.inputs, invocation.verbose, registry, stdio, cancellation) }
     #[cfg(not(mf_streaming))]
     {
-        let outputs = execute(arguments, invocation.verbose, #[cfg(unix)] signals)?;
-        println!("{}", serde_json::to_string(&outputs)?);
-        Ok(())
+        let outputs = execute(invocation.inputs, invocation.verbose, &registry, &cancellation)?;
+        Ok(stdio.write_output(outputs, &cancellation)?)
     }
 }
 
@@ -143,9 +147,10 @@ fn execute_selected(
     inputs: mf_runtime::WorkflowArguments,
     context: mf_runtime::WorkflowArguments,
     verbose: u8,
-    #[cfg(unix)] signals: &mut mf_runtime::RunnerSignals,
+    registry: mf_runtime::NodeRegistry,
+    stdio: mf_runtime::RunnerStdio,
+    cancellation: mf_runtime::StreamCancellation,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut stdio = mf_runtime::StreamStdio::claim()?;
     #[cfg(feature = "telemetry")]
     let providers = match mf_telemetry::otlp::TelemetryProviders::from_env() {
         Ok(providers) => providers,
@@ -176,13 +181,8 @@ fn execute_selected(
         None
     };
     let result = mf_runtime::ExecutionContext::run(observation, |state| -> Result<(), Box<dyn std::error::Error>> {
-        #[cfg(unix)]
-        signals.bind(state.cancellation())?;
-        if target.inputs.stdin_owner(&inputs)?.is_some() {
-            if let Some(input) = stdio.take_input() { state.set_stdin(input); }
-        }
+        state.set_cancellation(cancellation.clone());
         if let Some(snapshots) = &snapshots { state.set_snapshot_recorder(snapshots.recorder()); }
-        let registry = mf_runtime::NodeRegistry::from_inventory()?;
         #[cfg(mf_streaming)]
         let outputs = {
             let prepared = workflow::prepare_stream(&registry).inspect_err(|error| {
@@ -199,7 +199,7 @@ fn execute_selected(
             let task = target.bind_flow(&flow, workflow::compiled_node_index(&target.id)?)?;
             mf_runtime::FlowRuntime::default().execute_target_in_context(&task, state, inputs, context)?
         };
-        stdio.write_json(&outputs).inspect_err(|error| {
+        stdio.write_output(outputs, &cancellation).inspect_err(|error| {
             if let Some(observation) = state.observation_mut() { observation.output_selection_failed(error.to_string()); }
         })?;
         Ok(())
@@ -216,8 +216,7 @@ fn execute_selected(
 }
 
 #[cfg(mf_streaming)]
-fn execute_stream(arguments: mf_runtime::WorkflowArguments, verbose: u8, #[cfg(unix)] signals: &mut mf_runtime::RunnerSignals) -> Result<(), Box<dyn std::error::Error>> {
-    let mut stdio = mf_runtime::StreamStdio::claim()?;
+fn execute_stream(arguments: mf_runtime::WorkflowArguments, verbose: u8, registry: mf_runtime::NodeRegistry, stdio: mf_runtime::RunnerStdio, cancellation: mf_runtime::StreamCancellation) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "telemetry")]
     let providers = match mf_telemetry::otlp::TelemetryProviders::from_env() {
         Ok(providers) => providers,
@@ -255,17 +254,12 @@ fn execute_stream(arguments: mf_runtime::WorkflowArguments, verbose: u8, #[cfg(u
     };
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         let _context = observation.as_ref().map(mf_runtime::StreamObservation::enter);
-        let registry = mf_runtime::NodeRegistry::from_inventory()?;
         let prepared = workflow::prepare_stream(&registry).inspect_err(|error| {
             if let Some(observation) = &observation { observation.preparation_failed(error.to_string()); }
         })?;
         workflow_manifest()?.validate_prepared_schema(prepared.plan().input_schema())?;
         prepared.plan().input_schema().validate(&arguments)?;
-        let needs_stdin = prepared.plan().input_schema().stdin_owner(&arguments)?.is_some();
-        let stdin = if needs_stdin { stdio.take_input() } else { None };
-        let instance = mf_runtime::FlowRuntime::default().start_stream(prepared, mf_runtime::StreamOptions { observation: observation.clone(), snapshots: snapshots.as_ref().map(SnapshotExport::recorder), arguments, stdin, ..Default::default() })?;
-        #[cfg(unix)]
-        signals.bind(instance.cancellation())?;
+        let instance = mf_runtime::FlowRuntime::default().start_stream(prepared, mf_runtime::StreamOptions { observation: observation.clone(), snapshots: snapshots.as_ref().map(SnapshotExport::recorder), arguments, cancellation, ..Default::default() })?;
         stdio.run(instance)?;
         Ok(())
     })();
@@ -303,7 +297,7 @@ fn capture_requested() -> bool {
 }
 
 #[cfg(not(mf_streaming))]
-fn execute(arguments: mf_runtime::WorkflowArguments, verbose: u8, #[cfg(unix)] signals: &mut mf_runtime::RunnerSignals) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
+fn execute(arguments: mf_runtime::WorkflowArguments, verbose: u8, registry: &mf_runtime::NodeRegistry, cancellation: &mf_runtime::StreamCancellation) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
     #[cfg(feature = "telemetry")]
     let providers = match mf_telemetry::otlp::TelemetryProviders::from_env() {
         Ok(providers) => providers,
@@ -322,7 +316,7 @@ fn execute(arguments: mf_runtime::WorkflowArguments, verbose: u8, #[cfg(unix)] s
                 #[cfg(not(feature = "telemetry"))]
                 eprintln!("data history unavailable: recompile the runner without --no-telemetry");
             }
-            return execute_workflow(None, None, arguments, #[cfg(unix)] signals);
+            return execute_workflow(None, None, arguments, registry, cancellation);
         };
         let description = workflow_manifest()?.description()?;
         #[cfg(feature = "telemetry")]
@@ -349,7 +343,7 @@ fn execute(arguments: mf_runtime::WorkflowArguments, verbose: u8, #[cfg(unix)] s
             if capture_requested() { eprintln!("data history unavailable: recompile the runner without --no-telemetry"); }
             None
         };
-        execute_workflow(observation, snapshots, arguments, #[cfg(unix)] signals)
+        execute_workflow(observation, snapshots, arguments, registry, cancellation)
     })();
     #[cfg(feature = "telemetry")]
     if let Some(providers) = providers {
@@ -385,22 +379,12 @@ fn snapshot_recorder_for_id(workflow_id: mf_telemetry::identity::WorkflowId, run
 }
 
 #[cfg(not(mf_streaming))]
-fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: Option<SnapshotExport>, arguments: mf_runtime::WorkflowArguments, #[cfg(unix)] signals: &mut mf_runtime::RunnerSignals) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
+fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: Option<SnapshotExport>, arguments: mf_runtime::WorkflowArguments, registry: &mf_runtime::NodeRegistry, cancellation: &mf_runtime::StreamCancellation) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
     let result = mf_runtime::ExecutionContext::run(observation, |state| -> Result<_, Box<dyn std::error::Error>> {
-        #[cfg(unix)]
-        signals.bind(state.cancellation())?;
+        state.set_cancellation(cancellation.clone());
         state.set_workflow_arguments(arguments);
-        #[cfg(unix)]
-        {
-            let manifest = workflow_manifest()?;
-            let definition = &manifest.definition;
-            if definition.version.supports_startup_inputs() {
-                state.set_stdin(mf_runtime::TextInput::claim()?);
-            }
-        }
         if let Some(snapshots) = &snapshots { state.set_snapshot_recorder(snapshots.recorder()); }
-        let registry = mf_runtime::NodeRegistry::from_inventory()?;
-        let flow = workflow::prepare_workflow(&registry, state.observation_mut())?;
+        let flow = workflow::prepare_workflow(registry, state.observation_mut())?;
         workflow_manifest()?.validate_prepared_schema(flow.input_schema())?;
         Ok(mf_runtime::FlowRuntime::default().execute_in_context(&flow, state)?)
     });

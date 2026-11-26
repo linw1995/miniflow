@@ -1,6 +1,7 @@
 //! Supervision and terminal presentation for one locally launched workflow.
 
 mod pips;
+mod rpc;
 
 use pips::{PipGrid, PipScene, PipSurface};
 
@@ -73,6 +74,10 @@ const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Snafu)]
 pub enum RunError {
+    #[snafu(transparent)]
+    Callback {
+        source: mf_runtime::callback::CallbackError,
+    },
     #[snafu(transparent)]
     StreamTransport { source: mf_runtime::StreamError },
     #[snafu(display("TUI requires terminal stdin and stderr"))]
@@ -197,6 +202,11 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
     let manifest = read_manifest(path).context(ManifestSnafu)?;
     let arguments = options.workflow_arguments(&manifest.descriptor.input_schema)?;
     let description = manifest.description()?;
+    let arguments = mf_runtime::resolve_workflow_inputs(
+        &manifest.descriptor.input_schema,
+        &arguments,
+        |name| std::env::var_os(name),
+    )?;
     let needs_stdin = manifest
         .descriptor
         .input_schema
@@ -204,7 +214,7 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
         .is_some();
     if needs_stdin {
         return option_error(
-            "TUI execution cannot supply workflow stdin; provide source parameters or run the executable directly",
+            "TUI execution cannot supply workflow stdin; provide source parameters",
         );
     }
     let arguments = if !arguments.0.is_empty() {
@@ -447,6 +457,13 @@ pub struct LocalOutcome {
 
 #[derive(Debug, Snafu)]
 pub enum CaptureFailure {
+    #[snafu(display("runner callback failed: {source}"))]
+    Callback {
+        #[snafu(source(from(mf_runtime::callback::CallbackError, Arc::new)))]
+        source: Arc<mf_runtime::callback::CallbackError>,
+    },
+    #[snafu(display("workflow output record exceeds the size limit"))]
+    OversizedRecord,
     #[snafu(display("invalid workflow output record: {source}"))]
     OutputRecord { source: serde_json::Error },
     #[snafu(display("workflow output consumer disconnected: {source}"))]
@@ -483,10 +500,15 @@ impl NativeOutputDecoder {
         bytes: &[u8],
         emit: &mut impl FnMut(mf_runtime::NodeValues) -> Result<(), CaptureFailure>,
     ) -> Result<(), CaptureFailure> {
-        self.pending.extend_from_slice(bytes);
-        while let Some(end) = self.pending.iter().position(|byte| *byte == b'\n') {
-            let line: Vec<_> = self.pending.drain(..=end).collect();
-            Self::record(&line, emit)?;
+        for part in bytes.split_inclusive(|byte| *byte == b'\n') {
+            ensure!(
+                self.pending.len() + part.len() <= MAX_STDOUT_BYTES as usize,
+                OversizedRecordSnafu
+            );
+            self.pending.extend_from_slice(part);
+            if part.ends_with(b"\n") {
+                Self::record(&std::mem::take(&mut self.pending), emit)?;
+            }
         }
         Ok(())
     }
@@ -517,6 +539,7 @@ struct StreamCaptureState {
 pub struct LocalRun {
     records: Option<std::sync::mpsc::Receiver<mf_runtime::NodeValues>>,
     child: ChildGuard,
+    rpc: Option<rpc::Server>,
     capture: CaptureWorker,
     receiver: LoopbackReceiver,
     started: Instant,
@@ -534,7 +557,16 @@ impl LocalRun {
         run_id: RunId,
         stdout_limit: u64,
     ) -> Result<Self, RunError> {
-        Self::start_inner(command, description, run_id, stdout_limit, None)
+        Self::start_with_callbacks(
+            command,
+            description,
+            run_id,
+            Default::default(),
+            Default::default(),
+            crate::runner::RunnerOutput::Finite {
+                limit: stdout_limit,
+            },
+        )
     }
 
     pub fn start_stream(
@@ -543,22 +575,31 @@ impl LocalRun {
         run_id: RunId,
         cancellation: mf_runtime::StreamCancellation,
     ) -> Result<Self, RunError> {
-        Self::start_inner(
+        Self::start_with_callbacks(
             command,
             description,
             run_id,
-            MAX_STDOUT_BYTES,
-            Some(cancellation),
+            cancellation,
+            Default::default(),
+            crate::runner::RunnerOutput::Records,
         )
     }
 
-    fn start_inner(
+    pub fn start_with_callbacks(
         mut command: Command,
         description: WorkflowDescription,
         run_id: RunId,
-        stdout_limit: u64,
-        stream: Option<mf_runtime::StreamCancellation>,
+        cancellation: mf_runtime::StreamCancellation,
+        callbacks: mf_runtime::callback::HostCallbacks,
+        output: crate::runner::RunnerOutput,
     ) -> Result<Self, RunError> {
+        if let Some(error) = cancellation.failure() {
+            return Err(error.into());
+        }
+        let (stdout_limit, stream) = match output {
+            crate::runner::RunnerOutput::Finite { limit } => (limit, None),
+            crate::runner::RunnerOutput::Records => (MAX_STDOUT_BYTES, Some(cancellation.clone())),
+        };
         let (records, stream) = stream
             .map(|cancellation| {
                 let (sender, receiver) = std::sync::mpsc::sync_channel(64);
@@ -572,12 +613,7 @@ impl LocalRun {
                 )
             })
             .unzip();
-        if let Some(error) = stream
-            .as_ref()
-            .and_then(|stream| stream.cancellation.failure())
-        {
-            return Err(error.into());
-        }
+        let listener = rpc::Listener::prepare(&mut command, callbacks)?;
         let receiver = LoopbackReceiver::bind(description, run_id).context(ReceiverSnafu)?;
         let capture = Arc::new(Mutex::new(Capture::new().context(SpoolSnafu)?));
         capture.lock().expect("capture lock was not poisoned").limit =
@@ -608,6 +644,17 @@ impl LocalRun {
         let mut command = CommandWrap::from(command);
         command.wrap(ProcessGroup::leader());
         let mut child = ChildGuard::new(command.spawn().context(SpawnSnafu { path })?);
+        let diagnostics = capture.clone();
+        let rpc = listener
+            .map(|listener| {
+                listener.start(child.child.id(), &cancellation, move |error| {
+                    diagnostics
+                        .lock()
+                        .unwrap()
+                        .record_failure(CallbackSnafu.into_error(error));
+                })
+            })
+            .transpose()?;
         capture
             .lock()
             .expect("capture lock was not poisoned")
@@ -618,6 +665,7 @@ impl LocalRun {
         Ok(Self {
             records,
             child,
+            rpc,
             capture: match stream {
                 Some(stream) => CaptureWorker::start_with_stream(capture, Some(stream)),
                 None => CaptureWorker::start(capture),
@@ -650,6 +698,9 @@ impl LocalRun {
     pub fn cancel(&mut self) {
         if !self.finished && self.interrupted_at.is_none() {
             self.capture.cancel();
+            if let Some(rpc) = &self.rpc {
+                rpc.cancel();
+            }
             let _ = nix::sys::signal::killpg(
                 nix::unistd::Pid::from_raw(self.child.child.id() as i32),
                 Signal::SIGINT,
@@ -708,6 +759,7 @@ impl LocalRun {
         // Reap descendants even when they have already closed their inherited streams.
         let _ = self.child.child.start_kill();
         self.capture.stop();
+        self.rpc.take();
         let mut capture = self
             .capture
             .capture

@@ -103,6 +103,13 @@ fn compiles_a_runner_without_telemetry_and_preserves_execution() {
             .nodes
             .is_empty()
     );
+    let via_path = Command::new(env!("CARGO_BIN_EXE_mf"))
+        .args(["run", "workflow"])
+        .env("PATH", temporary.path())
+        .output()
+        .unwrap();
+    assert!(via_path.status.success(), "{via_path:?}");
+    assert_eq!(via_path.stdout, execution.stdout);
     let requested = Command::new(&output)
         .env("MF_CAPTURE_SNAPSHOTS", "1")
         .output()

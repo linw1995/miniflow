@@ -127,7 +127,7 @@ Graph-relative event validation checks workflow/node identity, position, sequenc
 
 ## Embedded manifest format
 
-Manifest payload version `2026-11-18` separates original definition resources from a public inspection projection.
+Manifest payload version `2026-11-27` separates original definition resources from a public inspection projection.
 `definition` retains the root declaration; `entry` and `sources` identify the captured UTF-8 definition resources.
 The `descriptor` contains the validated observation `description` and prepared `input_schema`, including workflow identity,
 actual execution mode, child observation scopes, provider-declared types, bindings, and conditional stdin ownership.
@@ -138,7 +138,7 @@ Compiler IR, graph relationships, scheduling layouts, and typed optimization evi
 The definition contains full static configuration, including private literals, parameter defaults, and dependencies.
 Configuration expressions remain unresolved; invocation values and environment-derived values are not materialized.
 Execution descriptions store the mode; `event_schema_version()` derives the event protocol without a duplicate field.
-Since miniflow has not released, older manifest layouts are unsupported and require recompilation. Invalid orders,
+Declared callbacks use optional local RPC, independent of stdout and OTLP. Older manifest versions require recompilation. Invalid orders,
 inconsistent input contracts, missing required facts, and unexpected properties fail validation.
 The combined UTF-8 JSON payload remains limited to 16 MiB.
 New Linux and macOS runners embed these bytes in `.mf_manifest` (ELF) or `__DATA,__mf_manifest` (Mach-O), respectively.
@@ -671,14 +671,13 @@ Pass startup arguments directly as `--node.port VALUE` after the TUI options. Th
 named parameters. Inputs accept at most 1 MiB. The CLI validates parameters and forwards a canonical
 copy through a private temporary file kept alive for the child.
 
-TUI children receive null stdin so terminal input remains available for controls. Preflight rejects workflows
-with an active stdin requirement. Supply a source file path through workflow parameters for TUI observation;
-use the standalone executable for stdin ingestion. Resource metadata determines compatibility for all
-registered node kinds.
+The TUI keeps terminal input for controls and launches the child with null stdin.
+File-reading sources therefore need a path.
+Preflight checks the declared resource requirements for built-in and external nodes alike.
 
 ```sh
 mf run ./read-workflow --tui --read.path /data/events.txt
-printf '1\n2\n' | ./stream-batch
+mf run ./stream-batch --feed.path /data/events.txt
 ```
 
 The graph shows the selected connection view, node status, elapsed time, and confirmed branch outcomes.

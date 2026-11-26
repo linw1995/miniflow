@@ -2608,6 +2608,14 @@ fn prepare_node_subgraphs(
             .host
             .as_deref()
             .and_then(|name| preparation.registry.flow(name));
+        let path = |preparation: &GraphPreparation<'_>| {
+            preparation
+                .path
+                .iter()
+                .map(ToString::to_string)
+                .chain(std::iter::once(key.clone()))
+                .collect::<Vec<_>>()
+        };
         let prepared = if let Some(registered) = host {
             let subgraphs = preparation.registry.subgraph_scopes();
             validate_host_flow_binding(
@@ -2624,19 +2632,30 @@ fn prepare_node_subgraphs(
                     message: "host Flow executors cannot be emitted into generated execution plans"
                 }
             );
-            let path = preparation
-                .path
-                .iter()
-                .map(ToString::to_string)
-                .chain(std::iter::once(key))
-                .collect();
             registered
                 .body
                 .clone()
                 .with_relations(body.relations.clone())
-                .with_origin_source(preparation.origin_identity.clone(), path)
+                .with_origin_source(preparation.origin_identity.clone(), path(preparation))
         } else {
             prepare_subgraph_body(node, name, preparation, body)?
+        };
+        let prepared = if let Some(callback) = body.relations.callback_name() {
+            ensure!(
+                !callback.trim().is_empty()
+                    && !prepared.is_event_stream()
+                    && prepared.stream_outputs.is_empty()
+                    && prepared.inputs.stdin.is_empty(),
+                InvalidGraphSnafu {
+                    definition_id: node.id.clone(),
+                    message: "host callbacks require a name and a finite interface without stdin"
+                }
+            );
+            preparation
+                .registry
+                .bind_callback_body(&path(preparation), callback, prepared)
+        } else {
+            prepared
         };
         ensure!(
             prepared.stream_outputs.is_empty() || definition.version.supports_child_streams(),

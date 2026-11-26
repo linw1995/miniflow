@@ -65,6 +65,192 @@ fn count_flow(streaming: bool, gate: Option<&Path>, marker: Option<&Path>) -> se
 }
 
 #[test]
+fn installed_finite_runner_calls_a_native_host_without_chat_or_flow_sources() {
+    use mf_runtime::callback::{CallbackReply, HostCallback, HostCallbacks};
+    use mf_tui::runner::{PreparedRunner, RunnerInvocation};
+    use std::io::Write;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let root = tempfile::tempdir().unwrap();
+    let executable = compile(
+        root.path(),
+        json!({
+            "version":"2026-11-13", "dependencies":{"core":{"package":"mfn-core","path":crates_dir().join("builtin-nodes/core")}},
+            "nodes":[{"id":"lookup","kind":"workflow.call","config":{"flow":"callback:lookup","body":{
+                "nodes":[{"id":"query","kind":"builtin.parameters","config":{"parameters":{"key":{"type":"string","default":"local"}}}}],
+                "outputs":[{"name":"value","node":"query","port":"key"}]
+            }}}],"outputs":[{"name":"type","node":"lookup","port":"value"}]
+        }),
+    );
+    fs::remove_file(root.path().join("flow.json")).unwrap();
+    fs::remove_dir_all(root.path().join("build")).unwrap();
+    let normal = Command::new(env!("CARGO_BIN_EXE_mf"))
+        .arg("run")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(normal.status.success(), "{normal:?}");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&normal.stdout).unwrap(),
+        json!({"type":"local"})
+    );
+    let runner = PreparedRunner::load(&executable, 1024).unwrap();
+    assert_eq!(runner.manifest().descriptor.callbacks["lookup"], ["lookup"]);
+    let committed = Arc::new(AtomicUsize::new(0));
+    let capture = committed.clone();
+    let handler = HostCallback::new(move |args, _| {
+        assert_eq!(args.0["query.key"].as_str(), Some("local"));
+        assert!(args.0["query.key"].is_secret());
+        let capture = capture.clone();
+        Ok(
+            CallbackReply::from(mf_runtime::Outputs::from([("value".into(), "call".into())]))
+                .on_delivery(move |ok| {
+                    assert!(ok);
+                    capture.fetch_add(1, Ordering::SeqCst);
+                }),
+        )
+    });
+    let callbacks: HostCallbacks = [("lookup".into(), handler)].into();
+    let run = |callbacks| {
+        RunnerInvocation {
+            runner: &runner,
+            arguments: &Default::default(),
+            verbose: 0,
+            snapshots: false,
+        }
+        .run_with_callbacks(
+            callbacks,
+            Default::default(),
+            |_| {},
+            |records| {
+                assert!(records.next().is_none());
+                Ok::<_, std::convert::Infallible>(())
+            },
+            || false,
+        )
+    };
+    let finished = run(callbacks.clone()).unwrap().outcome;
+    assert!(finished.status.success(), "{:?}", finished.capture_error);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&finished.stdout).unwrap(),
+        json!({"type":"call"})
+    );
+    assert_eq!(committed.load(Ordering::SeqCst), 1);
+    assert!(run([("other".into(), callbacks["lookup"].clone())].into()).is_err());
+    // Even a live keyboard or a pipe which never reaches EOF is not a workflow input.
+    let (open_input, _writer) = std::io::pipe().unwrap();
+    let pty = nix::pty::openpty(None, None).unwrap();
+    for input in [
+        Stdio::from(open_input),
+        Stdio::from(pty.slave),
+        Stdio::null(),
+    ] {
+        let mut child = Command::new(&executable)
+            .stdin(input)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while child.try_wait().unwrap().is_none() {
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("bare runner waited for user input");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let result = child.wait_with_output().unwrap();
+        assert!(result.status.success(), "{result:?}");
+        assert_eq!(result.stdout, normal.stdout);
+    }
+    let null_output = Command::new(&executable)
+        .stdout(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(null_output.success());
+    use mf_runtime::callback_rpc::LAUNCH_ENV;
+    let path = root.path().join("rpc");
+    let grant = |bindings: &[&str]| {
+        json!({"parent":std::process::id(),"socket":path,"bindings":bindings}).to_string()
+    };
+    for (args, config, message) in [
+        (vec![], grant(&["other"]), "unknown or duplicate"),
+        (vec![], grant(&["lookup", "lookup"]), "unknown or duplicate"),
+        (
+            vec!["--node=lookup"],
+            grant(&["lookup"]),
+            "unknown or duplicate",
+        ),
+        (vec![], grant(&["lookup"]), "I/O failed"),
+        (vec![], String::from("{"), "encoding failed"),
+    ] {
+        let output = Command::new(&executable)
+            .args(args)
+            .env(LAUNCH_ENV, config)
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success() && output.stdout.is_empty(),
+            "{output:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(message),
+            "{output:?}"
+        );
+    }
+    let foreign = Command::new(&executable)
+        .env(
+            LAUNCH_ENV,
+            json!({"parent":0,"socket":path,"bindings":["lookup"]}).to_string(),
+        )
+        .output()
+        .unwrap();
+    assert!(foreign.status.success() && foreign.stdout == normal.stdout);
+    let server = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    for (response, diagnostic) in [
+        ("", "host closed without a result"),
+        ("{", "incomplete RPC"),
+        (
+            "{\"id\":2,\"value\":{\"values\":{}}}\n",
+            "unexpected callback result ID",
+        ),
+        (
+            "{\"id\":1,\"value\":{\"values\":{}}}\n",
+            "missing callback output",
+        ),
+    ] {
+        let child = Command::new(&executable)
+            .env(LAUNCH_ENV, grant(&["lookup"]))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let (mut peer, _) = server.accept().unwrap();
+        let mut line = String::new();
+        BufReader::new(&peer).read_line(&mut line).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&line).unwrap(),
+            json!({"id":1,"binding":"lookup","args":{"values":{"query.key":"local"},"private":[["query.key"]]}})
+        );
+        peer.write_all(response.as_bytes()).unwrap();
+        drop(peer);
+        let result = child.wait_with_output().unwrap();
+        assert!(
+            !result.status.success() && result.stdout.is_empty(),
+            "{result:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(diagnostic),
+            "{result:?}"
+        );
+    }
+}
+
+#[test]
 fn compiled_native_stream_delivers_increments_before_the_terminal_result() {
     let root = tempfile::tempdir().unwrap();
     let gate = root.path().join("release");

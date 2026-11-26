@@ -98,6 +98,10 @@ impl GraphRelations {
         }
     }
 
+    pub fn callback_name(&self) -> Option<&str> {
+        self.host.as_deref()?.strip_prefix("callback:")
+    }
+
     pub fn is_callable(&self) -> bool {
         self.scope.is_none()
     }
