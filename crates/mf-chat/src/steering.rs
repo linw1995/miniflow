@@ -1,26 +1,31 @@
-//! Turn-scoped input for the Agent's next complete reply boundary.
+//! Turn-scoped host implementation of the Agent's ordinary reply-boundary call.
 
-use crate::{ChatError, ChatMessage, Invocation, error::*};
-use mfn_llm::{
-    CallOutcome,
-    steering::{Boundary, Endpoint, MAX_PENDING_BYTES, MAX_PENDING_MESSAGES},
+use crate::{
+    ChatError, ChatMessage, Invocation, PendingMessageId, error::*, input_queue::PendingMessages,
+};
+use mf_runtime::{
+    OutputValue, ValueRef,
+    callback::{CallbackReply, HostCallback},
 };
 use snafu::{OptionExt, ResultExt, ensure};
 use std::{
-    collections::{HashMap, hash_map::Entry},
-    io::{Read, Write},
-    net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
-    thread::{self, JoinHandle},
-    time::Duration,
+    collections::{HashMap, VecDeque, hash_map::Entry},
+    sync::{Arc, Mutex},
 };
-use uuid::Uuid;
 
 #[cfg(test)]
+use crate::input_queue::{MAX_PENDING_BYTES, MAX_PENDING_MESSAGES};
+#[cfg(test)]
 mod tests;
+
+pub const ON_REPLY: &str = "on_reply";
+
+#[derive(Clone, Copy)]
+enum PullMode {
+    Open,
+    Last,
+    Close,
+}
 
 /// Clones share only this invocation's FIFO. Closing admission never submits a new turn.
 #[derive(Clone)]
@@ -32,7 +37,7 @@ pub struct SteeringInbox {
 #[derive(Default)]
 struct State {
     closed: bool,
-    pending: Vec<String>,
+    pending: PendingMessages,
 }
 
 impl SteeringInbox {
@@ -42,138 +47,214 @@ impl SteeringInbox {
             state: Arc::default(),
         }
     }
-
     pub fn invocation(&self) -> &Invocation {
         &self.invocation
     }
-
-    pub fn submit(&self, text: String) -> Result<(), ChatError> {
+    pub fn submit(&self, text: String) -> Result<PendingMessageId, ChatError> {
         let mut state = self.state.lock().unwrap();
         ensure!(!state.closed, SteeringClosedSnafu);
-        ensure!(
-            !text.trim().is_empty(),
-            InvalidSnafu {
-                field: "steering",
-                reason: "must contain nonblank text"
-            }
-        );
-        ensure!(
-            state.pending.len() < MAX_PENDING_MESSAGES
-                && text
-                    .len()
-                    .saturating_add(state.pending.iter().map(String::len).sum())
-                    <= MAX_PENDING_BYTES,
-            InvalidSnafu {
-                field: "steering inbox",
-                reason: "pending input exceeds its message or byte limit"
-            }
-        );
-        state.pending.push(text);
-        Ok(())
+        state.pending.push(text)
     }
-
+    /// Withdrawal and claiming a boundary batch linearize under the same lock.
+    pub fn withdraw(&self, id: PendingMessageId) -> Option<String> {
+        self.state.lock().unwrap().pending.withdraw(id)
+    }
+    pub fn withdraw_last(&self) -> Option<String> {
+        self.state.lock().unwrap().pending.pop_back()
+    }
     pub fn close(&self) {
         self.state.lock().unwrap().closed = true;
     }
-
     /// Retrieve undelivered input for editing, never for automatic replay.
     pub fn take_unsent(&self) -> Vec<String> {
         let mut state = self.state.lock().unwrap();
         if state.closed {
-            std::mem::take(&mut state.pending)
+            state.pending.drain().collect()
         } else {
             Vec::new()
         }
     }
-
-    fn take_at(&self, outcome: CallOutcome) -> Result<Vec<String>, ChatError> {
+    fn take_at(&self, mode: PullMode) -> Result<VecDeque<(PendingMessageId, String)>, ChatError> {
         let mut state = self.state.lock().unwrap();
         ensure!(!state.closed, SteeringClosedSnafu);
-        match outcome {
-            CallOutcome::ToolCalls => {}
-            CallOutcome::Completed if !state.pending.is_empty() => {}
+        match mode {
+            PullMode::Open => {}
+            PullMode::Last if !state.pending.0.is_empty() => {}
             _ => {
                 state.closed = true;
-                return Ok(Vec::new());
+                return Ok(VecDeque::new());
             }
         }
-        Ok(std::mem::take(&mut state.pending))
+        Ok(std::mem::take(&mut state.pending.0))
     }
 }
 
-struct DeliveryLog {
+pub struct DeliveryLog {
     inbox: SteeringInbox,
+    in_flight: std::sync::atomic::AtomicBool,
     messages: Mutex<Vec<(i64, String)>>,
 }
 
 impl DeliveryLog {
-    fn deliver(&self, boundary: Boundary, mut stream: impl Write) -> Result<(), ChatError> {
-        let mut batch = self.inbox.take_at(boundary.outcome)?;
-        // The listener is the only writer. Publish the receipt before closing the reply socket,
-        // but never authorize an input whose frame could not be written.
+    pub fn new(inbox: SteeringInbox) -> Arc<Self> {
+        Arc::new(Self {
+            inbox,
+            in_flight: Default::default(),
+            messages: Mutex::default(),
+        })
+    }
+
+    pub fn callback(self: &Arc<Self>) -> HostCallback {
+        let log = self.clone();
+        HostCallback::new(move |args, _| {
+            let run = || -> Result<CallbackReply, ChatError> {
+                use mf_runtime::InputValue;
+                let invalid = || InvalidSnafu {
+                    field: "reply boundary",
+                    reason: "requires reply.position and reply.outcome",
+                };
+                ensure!(args.0.len() == 2, invalid());
+                let position = args
+                    .0
+                    .get("reply.position")
+                    .and_then(ValueRef::as_i64)
+                    .with_context(invalid)?;
+                let outcome = args.0.get("reply.outcome").cloned().with_context(invalid)?;
+                let mode = match mfn_llm::CallOutcome::decode(outcome).context(ReplyValueSnafu)? {
+                    mfn_llm::CallOutcome::ToolCalls => PullMode::Open,
+                    mfn_llm::CallOutcome::Completed => PullMode::Last,
+                    _ => PullMode::Close,
+                };
+                log.claim(mode, position)
+            };
+            run().boxed().context(mf_runtime::callback::HandlerSnafu)
+        })
+    }
+
+    fn claim(self: &Arc<Self>, mode: PullMode, position: i64) -> Result<CallbackReply, ChatError> {
+        use std::sync::atomic::Ordering;
+        ensure!(
+            !self.in_flight.swap(true, Ordering::AcqRel),
+            InvalidSnafu {
+                field: "reply boundary",
+                reason: "a previous delivery is still in flight"
+            }
+        );
+        let mut batch = match self.inbox.take_at(mode) {
+            Ok(batch) => batch,
+            Err(error) => {
+                self.in_flight.store(false, Ordering::Release);
+                return Err(error);
+            }
+        };
         let result = (|| {
+            let receipts = self.messages.lock().unwrap();
+            ensure!(
+                position >= 0
+                    && (batch.is_empty()
+                        || position > 0
+                            && receipts.last().is_none_or(|(last, _)| *last < position)),
+                InvalidSnafu {
+                    field: "steering position",
+                    reason: "must advance past the previous delivery at a completed reply"
+                }
+            );
             if !batch.is_empty() {
-                ensure!(
-                    boundary.position > 0
-                        && self
-                            .messages
-                            .lock()
-                            .unwrap()
-                            .last()
-                            .is_none_or(|(last, _)| *last < boundary.position),
-                    InvalidSnafu {
-                        field: "steering position",
-                        reason: "must advance past the previous delivery at a completed reply"
-                    }
-                );
-                boundary
-                    .position
+                position
                     .checked_add((batch.len() - 1) as i64)
                     .context(ArithmeticSnafu {
                         operation: "position steering messages",
                     })?;
             }
-            let frame = serde_json::to_vec(&batch).context(JsonSnafu)?;
-            stream.write_all(&frame).context(SteeringIoSnafu)?;
-            if !batch.is_empty() {
-                self.messages.lock().unwrap().extend(
-                    batch
-                        .drain(..)
-                        .enumerate()
-                        .map(|(i, text)| (boundary.position + i as i64, text)),
-                );
-            }
-            Ok(())
+            let values = batch
+                .iter()
+                .map(|(_, text)| {
+                    ChatMessage::User {
+                        content: text.clone(),
+                        metadata: None,
+                    }
+                    .encode()
+                    .map(ValueRef::into_secret)
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .context(ReplyValueSnafu)?;
+            Ok(CallbackReply::from(
+                [("messages".into(), ValueRef::array(values))]
+                    .into_iter()
+                    .collect::<mf_runtime::FlowOutputs>(),
+            ))
         })();
-        if result.is_err() {
-            let mut state = self.inbox.state.lock().unwrap();
-            state.closed = true;
-            batch.append(&mut state.pending);
-            state.pending = batch;
+        match result {
+            Ok(reply) if batch.is_empty() => {
+                self.in_flight.store(false, Ordering::Release);
+                Ok(reply)
+            }
+            Ok(reply) => {
+                let log = self.clone();
+                Ok(reply.on_delivery(move |delivered| {
+                    if delivered {
+                        log.messages.lock().unwrap().extend(
+                            batch
+                                .drain(..)
+                                .enumerate()
+                                .map(|(i, (_, text))| (position + i as i64, text)),
+                        );
+                    } else {
+                        log.restore(batch);
+                    }
+                    log.in_flight.store(false, Ordering::Release);
+                }))
+            }
+            Err(error) => {
+                self.restore(batch);
+                self.in_flight.store(false, Ordering::Release);
+                Err(error)
+            }
         }
-        result
+    }
+
+    fn restore(&self, mut batch: VecDeque<(PendingMessageId, String)>) {
+        let mut state = self.inbox.state.lock().unwrap();
+        state.closed = true;
+        batch.append(&mut state.pending.0);
+        state.pending.0 = batch;
     }
 }
 
-/// Shared only by one database owner and its host calls. Keep receipts while a call can still
-/// be saved or abandoned, including when its runner or job handle no longer exists.
+/// Receipts survive a save-only retry in the owning host, never a restart.
 #[derive(Default)]
 pub struct Deliveries {
     calls: Mutex<HashMap<String, Arc<DeliveryLog>>>,
 }
 
 impl Deliveries {
-    fn register(&self, inbox: &SteeringInbox) -> Result<Arc<DeliveryLog>, ChatError> {
-        let id = &inbox.invocation.call_id;
-        match self.calls.lock().unwrap().entry(id.clone()) {
-            Entry::Vacant(slot) => Ok(slot
-                .insert(Arc::new(DeliveryLog {
-                    inbox: inbox.clone(),
-                    messages: Mutex::default(),
-                }))
-                .clone()),
-            Entry::Occupied(_) => ConflictSnafu { id }.fail(),
+    pub fn with_active<T>(
+        &self,
+        invocation: &Invocation,
+        log: Option<&Arc<DeliveryLog>>,
+        run: impl FnOnce() -> Result<T, ChatError>,
+    ) -> Result<T, ChatError> {
+        let Some(log) = log else { return run() };
+        ensure!(
+            log.inbox.invocation() == invocation,
+            ConflictSnafu {
+                id: &invocation.call_id
+            }
+        );
+        match self.calls.lock().unwrap().entry(invocation.call_id.clone()) {
+            Entry::Vacant(slot) => {
+                slot.insert(log.clone());
+            }
+            Entry::Occupied(_) => {
+                return ConflictSnafu {
+                    id: &invocation.call_id,
+                }
+                .fail();
+            }
         }
+        let result = run();
+        log.inbox.close();
+        result
     }
 
     pub fn validate(&self, call_id: &str, display: &[ChatMessage]) -> Result<(), ChatError> {
@@ -196,116 +277,9 @@ impl Deliveries {
         );
         Ok(())
     }
-
     pub fn forget(&self, call_id: &str) {
         if let Some(log) = self.calls.lock().unwrap().remove(call_id) {
             log.inbox.close();
         }
     }
-}
-
-/// Only this pull capability crosses the executable boundary. The runner never receives the
-/// database path, application identity, or a channel for submitting user input.
-struct Listener {
-    address: SocketAddr,
-    stopped: Arc<AtomicBool>,
-    worker: Option<JoinHandle<Result<(), ChatError>>>,
-    inbox: SteeringInbox,
-    endpoint: Endpoint,
-}
-
-impl Listener {
-    fn start(
-        deliveries: &Deliveries,
-        invocation: &Invocation,
-        inbox: &SteeringInbox,
-    ) -> Result<Self, ChatError> {
-        ensure!(
-            inbox.invocation() == invocation,
-            ConflictSnafu {
-                id: &invocation.call_id
-            }
-        );
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).context(SteeringIoSnafu)?;
-        let address = listener.local_addr().context(SteeringIoSnafu)?;
-        let token = Uuid::new_v4();
-        let endpoint = Endpoint {
-            port: address.port().into(),
-            token: token.to_string(),
-        };
-        let stopped = Arc::new(AtomicBool::new(false));
-        let stop = stopped.clone();
-        let log = deliveries.register(inbox)?;
-        let worker = thread::Builder::new()
-            .name("mf-steering".into())
-            .spawn(move || {
-                for stream in listener.incoming() {
-                    if stop.load(Ordering::Acquire) {
-                        break;
-                    }
-                    let mut stream = stream.context(SteeringIoSnafu)?;
-                    // Reject other local clients before decoding anything or touching the inbox.
-                    let timeout = Some(Duration::from_secs(1));
-                    let mut auth = [0; 16];
-                    if stream.set_read_timeout(timeout).is_err()
-                        || stream.set_write_timeout(timeout).is_err()
-                        || stream.read_exact(&mut auth).is_err()
-                        || auth != *token.as_bytes()
-                    {
-                        continue;
-                    }
-                    let mut frame = Vec::new();
-                    if (&stream).take(257).read_to_end(&mut frame).is_err() || frame.len() > 256 {
-                        continue;
-                    }
-                    let Ok(boundary) = serde_json::from_slice(&frame) else {
-                        continue;
-                    };
-                    log.deliver(boundary, stream)?;
-                }
-                Ok(())
-            })
-            .context(WorkerSpawnSnafu)?;
-        Ok(Self {
-            address,
-            stopped,
-            worker: Some(worker),
-            inbox: inbox.clone(),
-            endpoint,
-        })
-    }
-    fn finish(&mut self) -> Result<(), ChatError> {
-        let Some(worker) = self.worker.take() else {
-            return Ok(());
-        };
-        self.inbox.close();
-        self.stopped.store(true, Ordering::Release);
-        let _ = TcpStream::connect_timeout(&self.address, Duration::from_secs(1));
-        match worker.join() {
-            Ok(result) => result,
-            Err(_) => WorkerPanicSnafu {
-                id: "steering channel",
-            }
-            .fail(),
-        }
-    }
-}
-
-impl Drop for Listener {
-    fn drop(&mut self) {
-        let _ = self.finish();
-    }
-}
-
-pub fn with_endpoint<T>(
-    deliveries: &Deliveries,
-    invocation: &Invocation,
-    inbox: Option<&SteeringInbox>,
-    run: impl FnOnce(Option<Endpoint>) -> Result<T, ChatError>,
-) -> Result<T, ChatError> {
-    let Some(inbox) = inbox else { return run(None) };
-    let mut listener = Listener::start(deliveries, invocation, inbox)?;
-    let result = run(Some(listener.endpoint.clone()));
-    listener.finish()?;
-    result
 }

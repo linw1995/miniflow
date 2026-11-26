@@ -448,9 +448,11 @@ pub fn run_chat(path: &Path, options: ChatOptions) -> Result<u8, ChatRunError> {
                 controller.cancel();
             }
             view.draw(&mut terminal)?;
-            if !event::poll(Duration::from_millis(50)).context(IoSnafu {
-                operation: "poll terminal",
-            })? {
+            if !event::poll(view.inspector.frame_wait(Duration::from_millis(50))).context(
+                IoSnafu {
+                    operation: "poll terminal",
+                },
+            )? {
                 continue;
             }
             match event::read().context(IoSnafu {
@@ -723,6 +725,18 @@ impl PresentedResult {
     }
 }
 
+enum Admission {
+    Editor(u64),
+    Queued,
+    Retry,
+}
+
+#[derive(Clone, Copy)]
+enum InputQueue {
+    NextTurn,
+    Steering,
+}
+
 struct ChatView {
     session: Option<Session>,
     page: Option<display::Page>,
@@ -742,7 +756,7 @@ struct ChatView {
     models: Option<Vec<mf_chat::ModelInfo>>,
     models_error: Option<String>,
     model_filter: String,
-    pending: Option<Option<u64>>,
+    pending: Option<Admission>,
     /// The turn being presented until its authoritative messages reload.
     active: Option<(Invocation, String)>,
     /// Whether that turn is still executing, separate from what is presented.
@@ -1012,7 +1026,9 @@ impl ChatView {
                 invocation,
                 prompt,
             } => {
-                if self.pending.take() == Some(Some(self.editor.revision)) {
+                if let Some(Admission::Editor(revision)) = self.pending.take()
+                    && revision == self.editor.revision
+                {
                     self.editor = Editor::default();
                 }
                 self.transcript.get_mut().clear_images();
@@ -1052,6 +1068,19 @@ impl ChatView {
                     self.host_compacting = active;
                 }
             }
+            ChatEvent::NextTurnClaimed { .. } => self.pending = Some(Admission::Queued),
+            ChatEvent::UnsentNextTurns {
+                session_id,
+                prompts,
+            } => {
+                if self
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| session.id == session_id)
+                {
+                    self.restore_input(prompts);
+                }
+            }
             ChatEvent::UnsentSteering {
                 invocation,
                 prompts,
@@ -1061,13 +1090,7 @@ impl ChatView {
                     .as_ref()
                     .is_some_and(|(id, _)| id == &invocation)
                 {
-                    let mut restored = prompts.join("\n\n");
-                    if !self.editor.text.is_empty() {
-                        restored.push_str("\n\n");
-                        restored.push_str(&self.editor.text);
-                    }
-                    self.editor = Editor::default();
-                    self.editor.insert(&restored);
+                    self.restore_input(prompts);
                 }
             }
             ChatEvent::Observing(observation) => self.observation = Some(observation),
@@ -1095,7 +1118,10 @@ impl ChatView {
                 }
                 self.running = false;
                 self.host_compacting = false;
-                self.pending = None;
+                let handing_off = matches!(self.pending, Some(Admission::Queued));
+                if !handing_off {
+                    self.pending = None;
+                }
                 self.retained = false;
                 self.reply = None;
                 self.latest_invocation = Some(invocation);
@@ -1177,14 +1203,17 @@ impl ChatView {
                     append_diagnostic(&mut self.outcome, &stderr);
                 }
                 self.earlier = false;
-                self.load(controller, None);
+                if !handing_off {
+                    self.load(controller, None);
+                }
             }
             ChatEvent::Error { admission, source } => {
                 let detail = source.to_string();
                 if admission {
                     self.pending = None;
-                    self.running = false;
+                    let was_running = std::mem::take(&mut self.running);
                     if let Some((_, prompt)) = self.active.take()
+                        && was_running
                         && self.editor.text.is_empty()
                     {
                         self.editor.insert(&prompt);
@@ -1298,7 +1327,7 @@ impl ChatView {
                 if let Some(turn_id) = self.retry_turn()
                     && self.send(controller, ChatCommand::Retry { turn_id })
                 {
-                    self.pending = Some(None);
+                    self.pending = Some(Admission::Retry);
                     self.observation = None;
                     self.notice = "Starting retry...".into();
                 }
@@ -1329,20 +1358,88 @@ impl ChatView {
         }
         false
     }
+    fn restore_input(&mut self, prompts: Vec<String>) {
+        if prompts.is_empty() {
+            return;
+        }
+        // Admission already bounded each side. Do not discard accepted text when their sum
+        // exceeds the limit for a new edit.
+        let mut restored = prompts.join("\n\n");
+        if !self.editor.text.is_empty() {
+            restored.push_str("\n\n");
+        }
+        self.editor.cursor += restored.len();
+        restored.push_str(&self.editor.text);
+        self.editor.text = restored;
+        self.editor.revision = self.editor.revision.wrapping_add(1);
+    }
+
+    fn withdraw_last(&mut self, controller: &ChatController, queue: InputQueue) {
+        let (text, label) = match queue {
+            InputQueue::NextTurn => (
+                self.session
+                    .as_ref()
+                    .and_then(|s| controller.withdraw_last_next(&s.id)),
+                "next-turn input",
+            ),
+            InputQueue::Steering => (
+                self.active
+                    .as_ref()
+                    .and_then(|(id, _)| controller.steering(id))
+                    .and_then(|inbox| inbox.withdraw_last()),
+                "steering input",
+            ),
+        };
+        if let Some(text) = text {
+            self.restore_input(vec![text]);
+            self.notice = format!("Withdrew {label}");
+        } else {
+            self.notice = format!("No pending {label} to withdraw");
+        }
+    }
+
+    fn enqueue(&mut self, controller: &ChatController, queue: InputQueue) {
+        if self.editor.text.trim().is_empty() {
+            return;
+        }
+        let text = self.editor.text.clone();
+        let result = match queue {
+            InputQueue::NextTurn => self
+                .session
+                .as_ref()
+                .context(NextTurnClosedSnafu)
+                .and_then(|s| controller.queue_next(&s.id, text))
+                .map(|_| "Message queued for the next turn"),
+            InputQueue::Steering => self
+                .active
+                .as_ref()
+                .context(SteeringClosedSnafu)
+                .and_then(|(id, _)| controller.steer(id, text))
+                .map(|_| "Steering queued for the current reply boundary"),
+        };
+        match result {
+            Ok(notice) => {
+                self.editor = Editor::default();
+                self.notice = notice.into();
+            }
+            Err(error) => self.notice = error.to_string(),
+        }
+    }
+
     fn submit(&mut self, controller: &ChatController) {
         if self.editor.text.trim().is_empty() {
             return;
         }
-        if self.running && self.supports_steering {
-            if let Some((invocation, _)) = &self.active {
-                match controller.steer(invocation, self.editor.text.clone()) {
-                    Ok(()) => {
-                        self.editor = Editor::default();
-                        self.notice = "Steering queued for the current reply boundary".into();
-                    }
-                    Err(error) => self.notice = error.to_string(),
-                }
-            }
+        if matches!(self.pending, Some(Admission::Queued)) {
+            self.enqueue(controller, InputQueue::NextTurn);
+            return;
+        }
+        if self.pending.is_some() || self.retained {
+            self.notice = ChatRunError::Busy.to_string();
+            return;
+        }
+        if self.running || controller.busy() {
+            self.enqueue(controller, InputQueue::NextTurn);
             return;
         }
         if self.send(
@@ -1352,7 +1449,7 @@ impl ChatView {
                 prompt: self.editor.text.clone(),
             },
         ) {
-            self.pending = Some(Some(self.editor.revision));
+            self.pending = Some(Admission::Editor(self.editor.revision));
             self.observation = None;
             self.outcome.clear();
             self.mode = Mode::Input;
@@ -1690,6 +1787,18 @@ impl ChatView {
             }
             Mode::Input => match key.code {
                 KeyCode::Esc => self.mode = Mode::Browse,
+                KeyCode::Up
+                    if (self.running || matches!(self.pending, Some(Admission::Queued)))
+                        && key.modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    self.withdraw_last(controller, InputQueue::NextTurn)
+                }
+                KeyCode::Down if self.running && key.modifiers.contains(KeyModifiers::ALT) => {
+                    self.withdraw_last(controller, InputQueue::Steering)
+                }
+                KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::ALT) => {
+                    self.enqueue(controller, InputQueue::Steering)
+                }
                 KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
                     self.submit(controller)
                 }
@@ -1897,10 +2006,12 @@ impl ChatView {
             if let Some(observation) = &self.observation {
                 self.inspector.render_execution(frame, inner, observation);
             } else {
+                self.inspector.hide_pips();
                 frame.render_widget(Paragraph::new("Flow: Starting..."), inner);
             }
             chat
         } else {
+            self.inspector.hide_pips();
             body
         };
         let mut transcript = self.transcript.borrow_mut();
@@ -2126,7 +2237,10 @@ impl ChatView {
         drop(transcript);
         let hint = match self.mode {
             Mode::Input if self.running && self.supports_steering => {
-                " Alt+Enter steer | Enter newline | Esc browse "
+                " Alt+Enter queue | Alt+S steer | Alt+Up undo next | Alt+Down undo steer "
+            }
+            Mode::Input if self.running || matches!(self.pending, Some(Admission::Queued)) => {
+                " Alt+Enter queue | Alt+Up undo next | Enter newline "
             }
             Mode::Input => " Alt+Enter send | Enter newline | Esc browse ",
             Mode::Browse => " Enter send | i edit | j/k tool | Space fold | arrows scroll ",
@@ -3466,10 +3580,10 @@ mod tests {
         let mut view = ChatView::new(launch.runner.description()).unwrap();
         view.editor.insert("Draft for the next turn");
         assert!(!render(&view, 180, 40).contains("Flow execution"));
-        view.pending = Some(None);
+        view.pending = Some(Admission::Retry);
         assert!(render(&view, 180, 40).contains("Flow: Starting..."));
         let mut command = Command::new("sh");
-        command.args(["-c", "sleep 0.1"]);
+        command.args(["-c", "sleep 0.1 && printf '%s\\n' '{}'"]);
         let mut run = LocalRun::start(
             command,
             launch.runner.description().clone(),
@@ -3788,8 +3902,10 @@ mod tests {
         view.editor.insert(" + new draft");
         pump(&mut view, &controller, |view| view.active.is_some());
         assert!(view.editor.text.ends_with(" + new draft"));
+        let edited = view.editor.text.clone();
         view.submit(&controller);
-        assert!(view.notice.contains("current turn"));
+        assert_eq!(view.notice, "Message queued for the next turn");
+        assert!(view.editor.text.is_empty());
         let session = view.session.as_ref().unwrap().id.clone();
         view.key(
             KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
@@ -3830,7 +3946,8 @@ mod tests {
         );
         pump(&mut view, &controller, |view| view.page.is_some());
         assert_eq!(view.session.as_ref().unwrap().id, session);
-        assert!(view.editor.text.ends_with(" + new draft"));
+        assert_eq!(view.editor.text, edited);
+        assert!(controller.withdraw_last_next(&session).is_none());
         controller.close().unwrap();
     }
 
@@ -4168,6 +4285,88 @@ mod tests {
     }
 
     #[test]
+    fn failed_followup_admission_restores_the_entire_queue_and_newer_edits() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
+        let gate = root.path().join("release");
+        std::fs::write(launch.runner.executable().with_extension("script"), format!("#!/bin/sh\nwhile ! test -f '{}'; do sleep 0.02; done\nprintf '%s\\n' '{{\"append\":{{\"status\":\"succeeded\",\"messages\":[{{\"role\":\"assistant\",\"content\":\"done\"}}],\"usages\":[]}}}}'\n", gate.display())).unwrap();
+        let controller = ChatController::open(launch).unwrap();
+        view.editor.insert("original");
+        view.submit(&controller);
+        pump(&mut view, &controller, |v| v.running);
+        for text in ["first", "second"] {
+            view.editor.insert(text);
+            view.submit(&controller);
+        }
+        view.editor.insert("draft");
+        let id = &view.session.as_ref().unwrap().id;
+        controller._database.archive_session(id).unwrap();
+        std::fs::write(gate, "").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while controller.busy() {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+        // The worker already stopped, but delayed presentation must keep this session selected
+        // across its predecessor's Finished event until the admission error restores the draft.
+        loop {
+            let event = super::super::tests::next(&controller);
+            let handoff = matches!(event, ChatEvent::Finished { .. });
+            let failed = matches!(
+                event,
+                ChatEvent::Error {
+                    admission: true,
+                    ..
+                }
+            );
+            view.event(event, &controller);
+            if handoff {
+                assert!(matches!(view.pending, Some(Admission::Queued)));
+                view.act(Action::New, &controller);
+                assert!(view.session.is_some());
+                view.submit(&controller);
+                assert_eq!(view.editor.text, "draft");
+                assert_eq!(view.notice, ChatRunError::NextTurnClosed.to_string());
+            }
+            if failed {
+                break;
+            }
+        }
+        assert_eq!(view.editor.text, "first\n\nsecond\n\ndraft");
+        assert!(view.pending.is_none());
+        controller.close().unwrap();
+    }
+
+    #[test]
+    fn cancelling_a_followup_queue_restores_even_a_full_editor_without_resubmitting() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
+        let controller = ChatController::open(launch).unwrap();
+        view.editor.insert("initial");
+        view.submit(&controller);
+        pump(&mut view, &controller, |v| v.running);
+        view.withdraw_last(&controller, InputQueue::NextTurn);
+        assert_eq!(view.notice, "No pending next-turn input to withdraw");
+        view.editor.insert("queued");
+        view.submit(&controller);
+        let draft = "x".repeat(MAX_EDITOR_BYTES);
+        view.editor.insert(&draft);
+        view.editor.cursor = 1;
+        view.key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &controller,
+        );
+        view.submit(&controller);
+        assert_eq!(view.notice, ChatRunError::Cancelled.to_string());
+        pump(&mut view, &controller, |v| !v.running);
+        assert_eq!(view.editor.text, format!("queued\n\n{draft}"));
+        assert_eq!(view.editor.cursor, 9);
+        controller.close().unwrap();
+    }
+
+    #[test]
     fn raw_result_recovery_keeps_discard_available_after_storage_queries_fail() {
         let root = tempfile::tempdir().unwrap();
         let mut launch = super::super::tests::launch(root.path());
@@ -4175,15 +4374,21 @@ mod tests {
         let offline = root.path().join("offline");
         launch.options.database_path = state.join("chat.sqlite");
         let path = launch.options.database_path.clone();
-        std::fs::write(launch.runner.executable().with_extension("script"), "#!/bin/sh\nsleep 0.3\nprintf '%s' '{\"append\":{\"status\":\"succeeded\",\"messages\":[{\"role\":\"assistant\",\"content\":\"paid reply\"}],\"usages\":[]}}'\necho 'runner diagnostic' >&2\nkill -TERM $$\n").unwrap();
+        std::fs::write(launch.runner.executable().with_extension("script"), "#!/bin/sh\nsleep 0.3\nprintf '%s\\n' '{\"append\":{\"status\":\"succeeded\",\"messages\":[{\"role\":\"assistant\",\"content\":\"paid reply\"}],\"usages\":[]}}'\necho 'runner diagnostic' >&2\nkill -TERM $$\n").unwrap();
         let mut view = ChatView::new(launch.runner.description()).unwrap();
         let controller = ChatController::open(launch).unwrap();
         view.editor.insert("question");
         view.submit(&controller);
         pump(&mut view, &controller, |v| v.observation.is_some());
+        view.editor.insert("wait for a commit");
+        view.submit(&controller);
+        view.editor.insert("new draft");
         std::fs::rename(&state, &offline).unwrap();
         std::fs::write(&state, "unavailable").unwrap();
         pump(&mut view, &controller, |v| v.retained);
+        assert_eq!(view.editor.text, "wait for a commit\n\nnew draft");
+        view.submit(&controller);
+        assert_eq!(view.notice, ChatRunError::Busy.to_string());
         assert!(controller.busy());
         assert!(view.outcome.contains("runner diagnostic"));
         assert!(render(&view, 80, 24).contains("recover reply"));
@@ -4214,7 +4419,7 @@ mod tests {
             .create_session("default", None, None)
             .unwrap();
         let invocation = admitted(&controller._database, &session.id, "hello");
-        view.pending = Some(None);
+        view.pending = Some(Admission::Retry);
         assert!(render(&view, 100, 30).contains(LOADING_FRAMES));
         view.event(
             ChatEvent::Submitted {

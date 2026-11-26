@@ -97,7 +97,7 @@ pub struct StreamPlan {
 }
 
 pub struct PreparedStream {
-    plan: StreamPlan,
+    plan: Arc<StreamPlan>,
     operator_states: OperatorStates,
 }
 
@@ -202,6 +202,10 @@ impl PreparedStream {
             generated_domains: BTreeMap::new(),
             emission_nodes,
         };
+        Self::from_parts(Arc::new(plan), operator_states)
+    }
+
+    pub(super) fn from_parts(plan: Arc<StreamPlan>, operator_states: OperatorStates) -> Self {
         Self {
             plan,
             operator_states,
@@ -212,7 +216,10 @@ impl PreparedStream {
         mut self,
         domains: impl IntoIterator<Item = (usize, Arc<GeneratedStreamDomainExecutor>)>,
     ) -> Self {
-        self.plan.generated_domains.extend(domains);
+        Arc::get_mut(&mut self.plan)
+            .expect("bind domains before sharing the plan")
+            .generated_domains
+            .extend(domains);
         self
     }
 
@@ -220,7 +227,7 @@ impl PreparedStream {
         &self.plan
     }
 
-    pub(super) fn into_parts(self) -> (StreamPlan, OperatorStates) {
+    pub(super) fn into_parts(self) -> (Arc<StreamPlan>, OperatorStates) {
         (self.plan, self.operator_states)
     }
 }

@@ -3,8 +3,10 @@
 ### Requirement: Bind configuration separately from conversation inputs
 
 The backend SHALL bind one unambiguous required `messages` startup input with the shared
-`List(Object)` message contract and optional application-owned `context` and `steering`. A steering
-port SHALL be private, nullable object, default null, without an environment binding. Input messages SHALL be
+`List(Object)` message contract and optional application-owned `context`. The host MAY bind a declared
+`on_reply` callback for this invocation. It SHALL deliver input only on demand; admission and
+withdrawal remain host-owned until the batch is claimed. The callback SHALL NOT expose the separate
+next-turn queue. Input messages SHALL be
 the admitted model context plus the current user exactly once. Effective context SHALL incorporate
 successful explicit replacements, not an unconditional replay of all displayed messages. Remaining
 inputs SHALL use ordinary parameter resolution. Conversation inputs MUST NOT be overridable as

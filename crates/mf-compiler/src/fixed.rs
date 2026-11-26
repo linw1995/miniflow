@@ -4,7 +4,9 @@ use crate::{DefinitionId, PlanError};
 use mf_runtime::{CompiledGraph, ScopeInstruction};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+pub type ScheduledScopes = BTreeSet<Vec<String>>;
 
 pub fn scope(
     graph: &CompiledGraph,
@@ -12,9 +14,15 @@ pub fn scope(
     path: &[String],
     constructors: &BTreeMap<DefinitionId, TokenStream>,
     bind_flow: bool,
+    scheduled: &ScheduledScopes,
     error_override: Option<&TokenStream>,
 ) -> Result<(Vec<TokenStream>, Vec<syn::Ident>, syn::Ident), PlanError> {
     let mut preparation = Vec::new();
+    let operators = format_ident!("operators_{name}");
+    if scheduled.contains(path) {
+        preparation
+            .push(quote!(let mut #operators = mf_runtime::StreamOperatorFactories::default();));
+    }
     let mut nodes = Vec::new();
     let flow = format_ident!("flow_{name}");
     let path_json = serde_json::to_string(path).expect("scope paths serialize");
@@ -105,39 +113,59 @@ pub fn scope(
                     .as_ref()
                     .is_some_and(|frame| !frame.is_stateful())
                     .then(|| report.clone());
-                let (steps, _, child_flow) = scope(
+                let wired = scheduled.contains(&child_path);
+                let (steps, child_nodes, child_flow) = scope(
                     child,
                     &child_name,
                     &child_path,
                     &BTreeMap::new(),
-                    true,
+                    !wired,
+                    scheduled,
                     override_report.as_ref(),
                 )?;
-                let exports = format_ident!("bind_stream_outputs_{child_name}");
                 let body_name = format_ident!("body_{child_name}");
-                let interface = format_ident!("interface_{child_name}");
                 let relations = crate::literals::relations(&child.relations);
                 let identities = child.definition.nodes.iter().filter(|node| child.relations.scope.as_ref().is_none_or(|frame| frame.input != node.id)).map(|node| {
                     let id = node.id.as_str(); let kind = &node.kind;
                     quote!(mf_runtime::NodeIdentity { id: #id.into(), kind: #kind.into(), path: Vec::new() })
                 });
+                let child_body = if wired {
+                    let build = format_ident!("bind_child_{child_name}");
+                    let factories = format_ident!("operators_{child_name}");
+                    quote!(#build(vec![#(#child_nodes),*], #factories, vec![#(#identities),*])?)
+                } else {
+                    let exports = format_ident!("bind_stream_outputs_{child_name}");
+                    let interface = format_ident!("interface_{child_name}");
+                    quote!(mf_runtime::PreparedSubgraph::from_plan(#exports(#child_flow)?, vec![#(#identities),*], #interface()))
+                };
                 let origin_path = &child_path;
+                let bind_callback = child.relations.callback_name().map(|name| quote! {
+                    let #body_name = registry.bind_callback_body(&[#(#origin_path.into()),*], #name, #body_name);
+                });
                 bodies.push(quote! {
                     let #body_name = (|| -> Result<mf_runtime::PreparedSubgraph, mf_runtime::generated::BindError> {
                         #(#steps)*
-                        let child_flow = #exports(#child_flow)?;
-                        Ok(mf_runtime::PreparedSubgraph::from_plan(child_flow, vec![#(#identities),*], #interface())
+                        Ok(#child_body
                             .with_relations(#relations)
                             .with_origin(mf_compiled_flow_origin(vec![#(#origin_path.into()),*])?))
                     })().context(mf_runtime::generated::ChildSnafu { definition_id: mf_runtime::DefinitionId::from(#physical_id) })?;
+                    #bind_callback
                 });
                 entries.push(quote!((#binding.into(), #body_name)));
             }
+            let instantiate = if !scheduled.contains(path) {
+                quote!(mf_runtime::generated::instantiate(registration, #physical_id, config, std::collections::BTreeMap::from([#(#entries),*]))?)
+            } else {
+                quote!({
+                    let id = mf_runtime::DefinitionId::from(#physical_id);
+                    let prepared = #operators.prepare(registration, &id, &config, std::collections::BTreeMap::from([#(#entries),*])).context(mf_runtime::generated::NodeSnafu { definition_id: id.clone() })?;
+                    mf_runtime::FlowNode::new(id, prepared)
+                })
+            };
             quote! {{
                 let (registration, config) = mf_runtime::generated::configuration(registry, #physical_id, #kind, #config, &[#(#bindings),*])?;
                 #(#bodies)*
-                mf_runtime::generated::instantiate(registration, #physical_id, config,
-                    std::collections::BTreeMap::from([#(#entries),*]))?
+                #instantiate
             }}
         };
         preparation.push(quote! {
@@ -169,13 +197,17 @@ pub fn scope(
     Ok((preparation, nodes, flow))
 }
 
-pub fn stream_preparation(workflow: &crate::CompiledWorkflow) -> Result<TokenStream, PlanError> {
+pub fn stream_preparation(
+    workflow: &crate::CompiledWorkflow,
+    scheduled: &ScheduledScopes,
+) -> Result<TokenStream, PlanError> {
     let (preparation, nodes, _) = scope(
         &workflow.graph,
         "stream",
         &[],
         &BTreeMap::new(),
         false,
+        scheduled,
         None,
     )?;
     let limits = &workflow

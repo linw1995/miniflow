@@ -176,44 +176,17 @@ fn argument_transports_and_invalid_chat_options_fail_before_database_ownership()
 }
 
 #[test]
-fn steering_ports_are_host_owned_and_must_not_bind_ambient_or_public_values() {
-    let port = |binding| {
-        serde_json::from_value(
-            json!({"type":{"nullable":"object"},"required":true,"binding":binding}),
-        )
-        .unwrap()
-    };
-    let mut manifest = chat_manifest();
-    for binding in [
-        json!({"secret":false,"default":null}),
-        json!({"secret":true,"env":"STEERING","default":null}),
-        json!({"secret":true,"default":{}}),
-    ] {
-        manifest
-            .descriptor
-            .input_schema
-            .inputs
-            .get_mut("start")
-            .unwrap()
-            .insert("steering".into(), port(binding));
-        assert!(ChatContract::from_manifest(&manifest).is_err());
-    }
-    manifest
-        .descriptor
-        .input_schema
-        .inputs
-        .get_mut("start")
-        .unwrap()
-        .insert(
-            "steering".into(),
-            port(json!({"secret":true,"default":null})),
-        );
+fn callbacks_do_not_become_configurable_chat_arguments() {
+    let manifest = chat_manifest();
     let contract = ChatContract::from_manifest(&manifest).unwrap();
-    assert_eq!(contract.steering_input.as_deref(), Some("start.steering"));
-    assert!(!contract.parameters.inputs["start"].contains_key("steering"));
+    assert!(!contract.supports_steering);
+    assert_eq!(
+        contract.input_targets().collect::<Vec<_>>(),
+        ["start.messages"]
+    );
     assert!(
         RunOptions {
-            arguments: vec!["--start.steering={}".into()],
+            arguments: vec!["--host-stdio-v1=on_reply".into()],
             ..Default::default()
         }
         .parsed_workflow_arguments(&contract.parameters)
@@ -285,6 +258,90 @@ fn one_execution_lane_rejects_queued_submissions_and_cancels_without_switching()
 }
 
 #[test]
+fn queued_turns_run_without_a_view_and_withdrawal_is_scoped_to_the_session() {
+    let root = tempfile::tempdir().unwrap();
+    let gate = root.path().join("release");
+    let script = format!(
+        "#!/bin/sh\nwhile ! test -f '{}'; do sleep 0.02; done\nprintf '%s\\n' '{{\"append\":{{\"status\":\"succeeded\",\"messages\":[{{\"role\":\"assistant\",\"content\":\"ok\"}}],\"usages\":[]}}}}'\n",
+        gate.display()
+    );
+    let controller =
+        ChatController::open(launch_runner(root.path(), &chat_manifest(), &script)).unwrap();
+    controller
+        .send(ChatCommand::Submit {
+            session_id: None,
+            prompt: "first".into(),
+        })
+        .unwrap();
+    let ChatEvent::Submitted { session, .. } = next(&controller) else {
+        panic!("missing admission")
+    };
+    assert!(matches!(
+        controller.queue_next("other", "wrong session".into()),
+        Err(ChatRunError::NextTurnClosed)
+    ));
+    let removed = controller
+        .queue_next(&session.id, "removed".into())
+        .unwrap();
+    let kept = controller.queue_next(&session.id, "second".into()).unwrap();
+    assert!(controller.withdraw_next("other", removed).is_none());
+    assert_eq!(
+        controller.withdraw_next(&session.id, removed).as_deref(),
+        Some("removed")
+    );
+    fs::write(gate, "").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while controller.busy() {
+        assert!(
+            Instant::now() < deadline,
+            "the worker waited for the view to schedule its next turn"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(controller.withdraw_next(&session.id, kept).is_none());
+    assert!(matches!(
+        controller.queue_next(&session.id, "too late".into()),
+        Err(ChatRunError::NextTurnClosed)
+    ));
+    let page = controller
+        ._database
+        .messages(&session.id, 20, None)
+        .unwrap();
+    assert_eq!(page.messages.len(), 4);
+    assert_eq!(page.messages[2].message.content(), "second");
+    assert_ne!(
+        page.messages[0].message.turn_id,
+        page.messages[2].message.turn_id
+    );
+    let mut order = Vec::new();
+    let mut claimed = None;
+    while order.len() < 5 {
+        match next(&controller) {
+            ChatEvent::NextTurnClaimed { id, invocation } => {
+                assert_eq!(id, kept);
+                claimed = Some(invocation);
+                order.push("claimed");
+            }
+            ChatEvent::Finished { .. } => order.push("finished"),
+            ChatEvent::Loaded { page, .. } => {
+                assert_eq!(page.messages.len(), 2);
+                order.push("history");
+            }
+            ChatEvent::Submitted { invocation, .. } => {
+                assert_eq!(claimed.as_ref(), Some(&invocation));
+                order.push("submitted");
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        order,
+        ["claimed", "finished", "history", "submitted", "finished"]
+    );
+    controller.close().unwrap();
+}
+
+#[test]
 fn captured_results_keep_the_lane_reserved_until_save_or_discard_without_resending() {
     for abandon in [false, true] {
         let root = tempfile::tempdir().unwrap();
@@ -298,7 +355,7 @@ fn captured_results_keep_the_lane_reserved_until_save_or_discard_without_resendi
         fs::write(
             prepared.runner.executable().with_extension("script"),
             format!(
-                "#!/bin/sh\nprintf x >> '{}'\nsleep 0.3\nprintf '%s' '{}'\n",
+                "#!/bin/sh\nprintf x >> '{}'\nsleep 0.3\nprintf '%s\\n' '{}'\n",
                 count.display(),
                 result
             ),
@@ -578,12 +635,13 @@ if mode == 'both': records[-1].update(replacement)
 if mode == 'null': records.append({{'append': None}})
 if mode == 'malformed': records.append({{'append': {{'status': 'succeeded', 'messages': None, 'usages': []}}}})
 split = 0 if mode == 'empty' else 1
-for record in records[:split]:
-    print(json.dumps(record), flush=True)
+assert sys.stdin.read() == ''
+def emit(record): print(json.dumps(record), flush=True)
+for record in records[:split]: emit(record)
 if mode in ('gated', 'gated_tool_call'):
     while not os.path.exists({gate:?}): time.sleep(0.01)
 if mode == 'prefix': sys.exit(2)
-for record in records[split:]: print(json.dumps(record), flush=True)
+for record in records[split:]: emit(record)
 if mode == 'late':
     print('late diagnostic', flush=True)
     sys.exit(13)

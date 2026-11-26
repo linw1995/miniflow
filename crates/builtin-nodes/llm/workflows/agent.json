@@ -47,12 +47,6 @@
             "type": "string",
             "env": "OPENAI_API_KEY"
           },
-          "steering": {
-            "type": {
-              "nullable": "object"
-            },
-            "default": null
-          },
           "tool_properties": {
             "type": {
               "map": "object"
@@ -88,9 +82,6 @@
           "api_key": "string",
           "base_url": "string",
           "model": "string",
-          "steering": {
-            "nullable": "object"
-          },
           "tool_definitions": {
             "list": "object"
           },
@@ -277,7 +268,8 @@
                   }
                 },
                 "code": {
-                  "generated": "generated + additions"
+                  "generated": "generated + additions",
+                  "position": "size(generated) + size(additions)"
                 }
               },
               "inputs": {
@@ -336,6 +328,7 @@
                   }
                 },
                 "code": {
+                  "position": "size(generated) + size(results)",
                   "generated": "generated + results.map(result, dyn({'role':'tool','tool_call_id':result.tool_call_id,'content':result.content}))"
                 }
               },
@@ -356,9 +349,29 @@
             },
             {
               "id": "finished_generated",
-              "kind": "builtin.identity",
+              "kind": "builtin.parameters",
+              "config": {
+                "parameters": {
+                  "generated": {
+                    "type": {
+                      "list": "object"
+                    },
+                    "secret": false
+                  },
+                  "position": {
+                    "type": "int",
+                    "secret": false
+                  }
+                }
+              },
               "inputs": {
-                "input": {
+                "position": {
+                  "from": {
+                    "node": "append_assistant",
+                    "port": "position"
+                  }
+                },
+                "generated": {
                   "from": {
                     "node": "append_assistant",
                     "port": "generated"
@@ -367,10 +380,96 @@
               }
             },
             {
-              "id": "generated",
-              "kind": "llm.steering",
+              "id": "on_reply",
+              "kind": "workflow.call",
+              "config": {
+                "flow": "callback:on_reply",
+                "body": {
+                  "nodes": [
+                    {
+                      "id": "reply",
+                      "kind": "builtin.parameters",
+                      "config": {
+                        "parameters": {
+                          "position": {
+                            "type": "int",
+                            "secret": false
+                          },
+                          "outcome": {
+                            "type": "string",
+                            "secret": false
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "id": "empty",
+                      "kind": "builtin.constant",
+                      "config": {
+                        "value": []
+                      }
+                    },
+                    {
+                      "id": "result",
+                      "kind": "builtin.parameters",
+                      "config": {
+                        "parameters": {
+                          "messages": {
+                            "type": {
+                              "list": "object"
+                            },
+                            "secret": false
+                          }
+                        }
+                      },
+                      "inputs": {
+                        "messages": {
+                          "from": {
+                            "node": "empty",
+                            "port": "value"
+                          }
+                        }
+                      }
+                    }
+                  ],
+                  "outputs": [
+                    {
+                      "name": "messages",
+                      "node": "result",
+                      "port": "messages"
+                    }
+                  ]
+                }
+              },
               "inputs": {
-                "generated": {
+                "reply.position": {
+                  "exclusive": [
+                    {
+                      "node": "append_tool_results",
+                      "port": "position"
+                    },
+                    {
+                      "node": "finished_generated",
+                      "port": "position"
+                    }
+                  ]
+                },
+                "reply.outcome": {
+                  "from": {
+                    "node": "turn",
+                    "port": "outcome"
+                  }
+                }
+              }
+            },
+            {
+              "id": "generated",
+              "kind": "workflow.call",
+              "config": {
+                "flow": "agent-request"
+              },
+              "inputs": {
+                "params.prefix": {
                   "exclusive": [
                     {
                       "node": "append_tool_results",
@@ -378,20 +477,14 @@
                     },
                     {
                       "node": "finished_generated",
-                      "port": "value"
+                      "port": "generated"
                     }
                   ]
                 },
-                "endpoint": {
+                "params.generated": {
                   "from": {
-                    "node": "%loop",
-                    "port": "steering"
-                  }
-                },
-                "outcome": {
-                  "from": {
-                    "node": "turn",
-                    "port": "outcome"
+                    "node": "on_reply",
+                    "port": "messages"
                   }
                 }
               }
@@ -402,18 +495,20 @@
               "config": {
                 "language": "cel",
                 "inputs": {
-                  "received": "bool",
+                  "additions": {
+                    "list": "object"
+                  },
                   "outcome": "string"
                 },
                 "code": {
-                  "outcome": "outcome == 'tool_calls' || (outcome == 'completed' && received) ? 'continue' : outcome"
+                  "outcome": "outcome == 'tool_calls' || (outcome == 'completed' && size(additions) > 0) ? 'continue' : outcome"
                 }
               },
               "inputs": {
-                "received": {
+                "additions": {
                   "from": {
-                    "node": "generated",
-                    "port": "received"
+                    "node": "on_reply",
+                    "port": "messages"
                   }
                 },
                 "outcome": {
@@ -463,6 +558,7 @@
                 "collect_usages",
                 "append_tool_results",
                 "finished_generated",
+                "on_reply",
                 "generated",
                 "advance"
               ]
@@ -472,7 +568,7 @@
             {
               "name": "generated",
               "node": "generated",
-              "port": "generated"
+              "port": "messages"
             },
             {
               "name": "usages",
@@ -513,12 +609,6 @@
           "from": {
             "node": "params",
             "port": "messages"
-          }
-        },
-        "steering": {
-          "from": {
-            "node": "params",
-            "port": "steering"
           }
         },
         "tool_definitions": {
@@ -607,7 +697,6 @@
       }
     }
   ],
-  "edges": [],
   "clusters": [
     {
       "label": "Prepare agent",

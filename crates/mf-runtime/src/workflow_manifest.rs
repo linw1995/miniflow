@@ -22,8 +22,9 @@ pub const MAX_MANIFEST_SECTION_BYTES: usize =
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkflowManifestVersion {
-    #[serde(rename = "2026-11-18")]
-    V2026_11_18,
+    /// Standalone business stdout with optional invocation-local callback RPC.
+    #[serde(rename = "2026-11-27")]
+    V2026_11_27,
 }
 
 /// Read-only public projection, independent of compiler IR and executable layouts.
@@ -33,6 +34,8 @@ pub struct RunnerDescriptor {
     pub description: WorkflowDescription,
     pub input_schema: WorkflowInputSchema,
     pub node_targets: Vec<crate::NodeTarget>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub callbacks: crate::callback::CallbackSites,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -97,7 +100,7 @@ impl WorkflowManifest {
         input_schema: WorkflowInputSchema,
     ) -> Result<Self, WorkflowManifestError> {
         let manifest = Self {
-            version: WorkflowManifestVersion::V2026_11_18,
+            version: WorkflowManifestVersion::V2026_11_27,
             definition: graph.definition.clone(),
             entry: "workflow.json".into(),
             sources: [(
@@ -109,6 +112,7 @@ impl WorkflowManifest {
                 description: describe_graph(graph).context(GraphSnafu)?,
                 input_schema,
                 node_targets: Vec::new(),
+                callbacks: crate::callback::callback_sites(graph),
             },
         };
         manifest.validate()?;
@@ -247,6 +251,21 @@ impl WorkflowManifest {
             .context(DefinitionSnafu)
             .context(GraphSnafu)?;
         let description = self.description()?;
+        let mut paths = BTreeSet::new();
+        for (name, path) in &self.descriptor.callbacks {
+            ensure!(
+                !name.trim().is_empty()
+                    && !path.is_empty()
+                    && paths.insert(path)
+                    && description
+                        .loop_bodies
+                        .iter()
+                        .any(|body| &body.path == path),
+                ProjectionSnafu {
+                    message: "callback must identify a unique frozen child scope"
+                }
+            );
+        }
         let mut targets = BTreeSet::new();
         for target in &self.descriptor.node_targets {
             let node = description.nodes.iter().find(|node| node.id == target.id);

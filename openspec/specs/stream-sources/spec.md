@@ -53,7 +53,7 @@ consume inputs. Reads MUST check cancellation between reads and during stdin rea
 
 #### Scenario: Read stdin text
 
-- **WHEN** path is omitted and stdin is supplied, including a pipe or terminal
+- **WHEN** path is omitted and an embedding host supplies `TextInput`, including a pipe or terminal
 - **THEN** the source emits text lines including blank lines, and EOF drains its branch
 
 #### Scenario: Cancel regular-file input
@@ -70,8 +70,9 @@ consume inputs. Reads MUST check cancellation between reads and during stdin rea
 
 Launchers SHALL derive stdin requirements from prepared metadata, data bindings, and validated startup
 arguments. A file-bound source SHALL not require stdin. Multiple active stdin consumers or a missing required
-stdin resource MUST fail before execution. TUI launch SHALL reject active stdin requirements and retain terminal keyboard ownership. File mode SHALL
-launch through workflow parameters; standalone runners SHALL support stdin ingestion.
+stdin resource MUST fail before execution. Current generated runners SHALL disable process stdin,
+including under `mf run`, and reject active business stdin requirements. The TUI SHALL retain terminal
+keyboard ownership. File mode SHALL launch through workflow parameters; native embedding MAY provide explicit stdin.
 
 #### Scenario: Run two file sources
 

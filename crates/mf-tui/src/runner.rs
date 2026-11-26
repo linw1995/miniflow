@@ -149,6 +149,23 @@ impl RunnerInvocation<'_> {
         self,
         cancellation: StreamCancellation,
         observe: impl FnOnce(LocalObservation),
+        consume: impl FnMut(&mut dyn Iterator<Item = NodeValues>) -> Result<(), E>,
+        should_cancel: impl FnMut() -> bool,
+    ) -> Result<RunnerCompletion<E>, RunnerError> {
+        self.run_with_callbacks(
+            Default::default(),
+            cancellation,
+            observe,
+            consume,
+            should_cancel,
+        )
+    }
+
+    pub fn run_with_callbacks<E>(
+        self,
+        callbacks: mf_runtime::callback::HostCallbacks,
+        cancellation: StreamCancellation,
+        observe: impl FnOnce(LocalObservation),
         mut consume: impl FnMut(&mut dyn Iterator<Item = NodeValues>) -> Result<(), E>,
         mut should_cancel: impl FnMut() -> bool,
     ) -> Result<RunnerCompletion<E>, RunnerError> {
@@ -197,12 +214,14 @@ impl RunnerInvocation<'_> {
         );
         let run_id = RunId::new();
         let description = self.runner.description.clone();
-        let mut run = match self.runner.output {
-            RunnerOutput::Finite { limit } => LocalRun::start(command, description, run_id, limit)?,
-            RunnerOutput::Records => {
-                LocalRun::start_stream(command, description, run_id, cancellation.clone())?
-            }
-        };
+        let mut run = LocalRun::start_with_callbacks(
+            command,
+            description,
+            run_id,
+            cancellation.clone(),
+            Some((&self.runner.manifest.descriptor.callbacks, callbacks)),
+            self.runner.output,
+        )?;
         observe(run.observation());
         let mut protocol_failure = None;
         loop {

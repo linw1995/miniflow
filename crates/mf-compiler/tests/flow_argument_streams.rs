@@ -289,7 +289,7 @@ fn terminal_task_stream_child_adapts_without_promoting_the_passed_flow_to_stream
 }
 
 #[test]
-fn inferred_stream_and_event_children_are_rejected_as_passed_terminal_flows() {
+fn terminal_only_receiver_rejects_streaming_child_interfaces() {
     let registry = NodeRegistry::from_inventory().unwrap();
     for child in [
         json!({
@@ -314,14 +314,14 @@ fn inferred_stream_and_event_children_are_rejected_as_passed_terminal_flows() {
             "the child itself must infer Stream mode"
         );
         let error = compile_definition(&definition(parent(child)), &registry).unwrap_err();
-        // Inferred children are rejected during synchronous body preparation, rather than
-        // the earlier explicit-execution guard. Retain the typed body-preparation cause.
         assert!(
-            matches!(&error, mf_compiler::WorkflowCompileError::ChildGraph { .. }),
+            matches!(&error, mf_compiler::WorkflowCompileError::NodeConstruction { definition_id, .. } if definition_id.as_str() == OWNER),
             "{error}"
         );
         assert!(
-            error.to_string().contains("requires streaming execution"),
+            error
+                .to_string()
+                .contains("consumer requires exactly its local terminal Flow handle"),
             "{error}"
         );
     }

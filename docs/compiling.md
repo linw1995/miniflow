@@ -26,7 +26,14 @@ mf compile flow.json --output ./flow --locked
 
 The output directory must exist. A successful first build creates `flow.lock`. See [workflow definitions](workflows.md) for dependency sources, features, and lock behavior. Native libraries required by plugins must be installed separately.
 
-`mf run ./flow` inherits stdin, stdout, and stderr and returns the runner's exit status. It requires no terminal.
+`./flow` runs standalone without a terminal. `mf run ./flow` validates the embedded manifest and
+launches the same executable. Both write business results directly to stdout (one JSON object or
+ordered JSON Lines); diagnostics stay on stderr.
+Neither `producer | ./flow` nor `producer | mf run ./flow` supplies workflow data.
+Pass startup arguments or an explicit source file instead. Recompile older runners before running them:
+`mf run` requires a current embedded manifest and will not launch a script or fall back to inherited stdio.
+An embedding host can bind declared Calls through [local callback RPC](workflows.md#host-callback-rpc);
+standalone execution does not start a listener or perform a handshake.
 Generated Unix runners handle SIGINT and SIGTERM by cancelling the active run, including
 streaming and `--node` execution. Cooperative nodes can release their resources before
 the runner exits with status 130 (SIGINT) or 143 (SIGTERM). A second interrupt forces
@@ -213,7 +220,7 @@ and exit with status 2; input, context, and execution validation errors remain f
 `mf run ./flow --help` (or `-h`) combines CLI help with workflow help generated from the existing
 embedded `input_schema`. It reads the binary without executing it, preparing providers, reading
 input files, or entering TUI/chat mode; executable permission and a terminal are not required.
-Both Linux ELF64 and macOS Mach-O64 files can be inspected, with no manifest format changes.
+Both Linux ELF64 and macOS Mach-O64 runners can be inspected.
 The native runner's Task target list comes from separate execution metadata and is omitted from
 this schema-based help. `mf run --help` shows only CLI help.
 
@@ -272,15 +279,17 @@ example declares `builtin.readline` with string output `line`:
 ```sh
 nix develop --command cargo run -p mf-cli --features development-support -- \
   compile examples/stream-batch.json --output target/stream-batch
-printf '1\n2\n3\n4\n5\n' | target/stream-batch
+printf '1\n2\n3\n4\n5\n' > target/stream-input.txt
+nix develop --command cargo run -p mf-cli --features development-support -- \
+  run ./target/stream-batch --feed.path target/stream-input.txt
 ```
 
-The result is one object per batch, such as `{"batch":["1","2","3"]}` followed by `{"batch":["4","5"]}`.
-Results are written as they become available, including timer flushes while stdin remains open. Readline
+The result is one object per batch, such as `{"batch":[1,2,3]}` followed by `{"batch":[4,5]}`.
+Results are written as they become available. Readline
 preserves blank lines and whitespace, accepts LF/CRLF and a final unterminated line, and rejects invalid UTF-8
 with a line number. It does not interpret text as JSON. EOF closes only that source.
 
-Autonomous sources run with null stdin. For an initial file-reading node exposing `path`, pass startup values:
+Autonomous sources do not need business stdin. For an initial file-reading node exposing `path`, pass startup values:
 
 ```sh
 ./read-workflow --read.path /data/lines.txt
@@ -294,7 +303,7 @@ keys. Parameter files are ordinary JSON documents. The embedded manifest exposes
 and input resource requirements with the workflow identity. Inspection reads executable metadata without preparing
 providers, reading source data, or initializing telemetry.
 
-Streaming execution reserves protocol descriptors before plugin construction and routes plugin stdout to
+Streaming execution reserves business stdout before plugin construction and routes plugin stdout to
 stderr. Private descriptors are not inherited by plugin subprocesses. Slow output backpressures production;
 a broken output pipe fails execution and interrupts runtime-owned input waits. The final result must be
 acknowledged before successful completion. Complete earlier output lines remain effective on failure.
@@ -302,14 +311,14 @@ acknowledged before successful completion. Complete earlier output lines remain 
 New graph descriptions use version `2026-10-03` and explicitly declare execution mode, lifecycle protocol, and
 interface inspection. Both ordinary and `--no-telemetry` builds retain one-build validation and installation.
 Use `mf run ./workflow --tui --inputs-file ./parameters.json` to observe autonomous streams.
-The TUI owns terminal stdin and launches the child with null stdin. It validates parameters and rejects
-workflows that still require stdin. Supply a readline `path` through startup arguments for TUI execution;
-run the executable directly to read piped text. Startup options also work with new finite runners.
+The TUI keeps the keyboard and gives the runner null stdin. Both standalone and supervised runners
+reject active workflow stdin requirements. Supply a readline `path`; only an embedding host can
+explicitly supply `TextInput` instead.
 
 ### Migrate an older streaming definition
 
-Update the version, remove `execution.input_type`, and declare a source node. For pipe-driven workflows use
-`builtin.readline` and connect its `line` output wherever the former synthetic source was referenced.
+Update the version, remove `execution.input_type`, and declare a source node. For text sources use
+`builtin.readline` with a file path and connect its `line` output wherever the former synthetic source was referenced.
 Parse text explicitly downstream when typed values are needed. Application-specific producers use ordinary
 StreamNode implementations. Initial producers receive their requirements through workflow parameters.
 The old input mechanism and its dedicated validation rules are removed; fields and graph endpoints follow

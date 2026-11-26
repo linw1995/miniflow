@@ -118,12 +118,20 @@ stream ports. Nested calls and exported Loop streams compose through these same 
 without an additional export map on the call. A child may declare its stream interface using an
 earlier workflow version; the caller must support child streams.
 
-Connected calls forward increments synchronously with the normal backpressure, cancellation,
-guards, snapshots, and typed error chains. Without a stream consumer, the child runs terminal-only.
-Each source keeps its emission packets; multiple sources produce sparse packets and their selected
-workflow outputs require `optional: true` where appropriate. Child Event/Stream producers and internal
-stream dataflow edges remain unsupported in these finite bodies. The parent owns stream scheduling
-and limits; a child's explicit `execution` configuration does not create a nested stream runtime.
+Connected calls forward increments with backpressure, cancellation, snapshots, and typed error chains.
+A callable body can also **consume** stream ports using ordinary node-local `inputs` or output-gated `edges`.
+For example, connect a producer's `delta` to `builtin.batch.item`, then `builtin.batch.items` to
+`builtin.identity.input`. Selecting the identity's `value` exports one batch per emission, even though
+Identity is an ordinary Task. Selecting the producer's terminal `total` returns one value **after**
+the child finishes, including downstream processing and the nonempty tail. An error while draining
+prevents that terminal result; already delivered batches are provisional.
+
+Internal stream edges and Event/Stream operators use the same message-domain scheduler and resource
+limits as a root streaming graph. Each invocation has fresh stateful operators. Ports selected from one
+emitted frame travel together; ports from other domains are absent from that packet. Joining independent
+message domains (including a startup value and an emission) is still invalid. Without an external
+subscriber the graph still drives its internal consumers. A body that only forwards TaskStream ports
+keeps its synchronous fast path and need not produce unobserved increments.
 
 All referenced providers join the root dependency build and adjacent lock. Each child's provider paths
 resolve against its own file. Compatible declarations of the same package combine features and default
@@ -235,18 +243,15 @@ including unselected ones. Metadata inspection and child preparation never execu
 Generated runners construct prepared children from compiled plans without loading source files or
 interpreting executable JSON at runtime. Runtime selector data cannot add children or discover unpassed
 global registrations. Explicit host-executor bindings retain the existing frozen-definition checks and
-cannot be emitted into standalone runners. The current authored/compiler-prepared child path supports
-finite callable bodies, including compatible TaskStream forwarding, but does not prepare autonomous
-Event/Stream children. The runtime separately supports factory-backed Event handles through
-`PreparedSubgraph::from_stream_factory` and the shared `FlowInvocation` lifecycle. That runtime capability
-does not itself add authored Event-child preparation or generated fresh-state factories.
+cannot be emitted into standalone runners. Callable children with internal stream wiring use the
+same frozen stream plans in interpreted and generated execution. In contrast, a native
+`PreparedSubgraph::from_stream_factory` exposes all selections as emissions and has no terminal map.
 
 Fixed child configuration does not itself add runtime-selected call targets or prescribe routers.
 Flow-valued edges below add explicit callable transport without a standard argument/result envelope.
 Call, Loop, Iteration, and custom nodes share one declared-child preparation and map-based factory contract. Every body uses the same complete Flow definition format under
 ordinary configuration; no legacy Loop/Iteration body adapter is retained. Per-pass/per-item scope
-and lifecycle semantics remain distinct. This does not wrap loops in Calls or expand child
-Event/Stream scheduler support. See
+and lifecycle semantics remain distinct. See
 [node development](node-development.md#receive-and-execute-passed-subgraphs) for the public APIs.
 
 ### Pass callable Flow values over edges
@@ -394,6 +399,38 @@ expose `Map(Any)`, with checked edges validating narrower destination types.
 
 This is general native-value construction, not a tool registry or executable loader. The caller's
 `calculator` key is a business name; it does not create a second callable identity.
+
+### Host callback RPC
+
+A finite `workflow.call` named `callback:<name>` declares an optional host implementation. Its
+ordinary `body` defines the interface and runs unchanged when unbound. The compiled descriptor's
+`callbacks` maps each unambiguous name to its exact static child path. Discovery follows
+static calls and loop/iteration bodies, not tool values, routed copies, or callback implementations.
+Multiple sites with the same name have no implicit winner. Embedders install `HostCallback` values
+with `NodeRegistry::bind_callbacks`; no callback is a JSON startup argument.
+
+A runner with manifest `2026-11-27` works standalone. Without a callback grant, `./flow` and
+`mf run ./flow` use the local bodies and do not open a callback socket. Both disable stdin and
+publish only selected business JSON on stdout (one object or ordered JSON Lines). Pass startup
+parameters or use file sources; diagnostics use stderr. Telemetry uses its separate OTLP endpoint.
+
+On Linux and macOS, a host granting callbacks creates a Unix stream listener in a private directory
+and sets `MF_RUNNER_RPC_V1` for its immediate child to a JSON object such as
+`{"parent":1234,"socket":"/tmp/mf-rpc-example/rpc","bindings":["lookup"]}`. `parent` is the
+launcher's PID. All names must be unique and declared; isolated Tasks cannot receive a grant.
+The runner connects as the client before provider construction. The host checks the kernel-reported
+peer PID against its launched child and removes the listener after accepting that connection.
+Nested executables do not inherit the grant. Normal CLI launches clear any ambient grant.
+
+Only requests and responses travel on this socket, as LF-terminated UTF-8 JSON. Direction determines
+the schema; there is no `type` discriminator, handshake, output, event, cancel, or completion frame.
+For example, the runner writes `{"id":1,"binding":"lookup","args":{"values":{"query.key":"build_id"}}}`
+and the host replies `{"id":1,"value":{"values":{"value":"b42"}}}`. Calls are serial, with one
+shared sequence starting at 1 per connection. Both envelopes preserve sensitivity using optional
+`private` paths inside `args` or `value` (lists of keys or decimal array indices); native handles
+cannot cross the socket. Each message is bounded to 2 MiB including LF. A broken granted connection,
+malformed message, wrong ID, or failed handler fails the invocation without fallback or replay.
+A host delivery receipt means the complete response was written, not that the workflow committed.
 
 ### Supply an already-built runner
 
@@ -549,9 +586,13 @@ unchanged.
 
 The Agent accepts complete `params.messages` as a read-only Loop prefix and calls `mfn-llm.tool-catalog`
 once before the first request. The Loop carries only the generated suffix and continues while the
-model requests tools or a [steering message](chat.md#steering-a-running-agent) arrives at a complete
-reply boundary, without a fixed round limit. The private optional `params.steering` endpoint defaults
-to `null`; it is not part of the tool catalog or request history. The
+model requests tools or a [steering message](chat.md#queuing-and-steering) arrives at a complete
+reply boundary, without a fixed round limit. `callback:on_reply` is a finite host-bindable Call,
+not a transport endpoint or model tool. After collecting the reply and all its tool results, the Agent
+calls it with `reply.position: Int` (the length of the generated suffix) and `reply.outcome: String`.
+The source returns only new `messages: List(Object)`; it never receives or rewrites the transcript.
+A completed text answer continues only on nonempty input; a failed outcome never continues. Without
+a caller source the local default returns an empty list, leaving the suffix unchanged. The
 [request Flow](../crates/builtin-nodes/llm/workflows/agent-request.json) forwards the prefix unchanged
 when the suffix is empty, avoiding CEL conversion of the request history on the first model request.
 After a completed tool round, it joins the prefix and the generated messages with CEL, while the
@@ -1839,7 +1880,8 @@ Add the map alongside `mode`, `on_error`, and `body`, then select `iteration.ans
 output or connect it to a stream consumer. Export names must be nonblank and distinct from `results`.
 The body still requires an ordinary terminal `result`; incremental outputs cannot replace it.
 Each export preserves its source value type and packet ownership, including sparse packets from
-different children. Nested stream dataflow and free-running Event/Stream children remain unsupported.
+different children. Direct Loop/Iteration frame bodies remain synchronous; call a separate Flow
+when an item needs internal stream wiring.
 
 Sequential items forward increments synchronously. Parallel items remain concurrent and forward
 increments in arrival order; terminal `results` retain input order. Values are forwarded unchanged,
@@ -2129,7 +2171,8 @@ task-only graph finishes without external input. A producer reached through star
 Use `builtin.readline` to read UTF-8 text lines from a file or stdin. Its optional string input `path`
 selects a regular text file when supplied, including through a symbolic link to a regular file. FIFO paths,
 directories, devices, and sockets are unsupported and cause execution to fail. A FIFO path is rejected
-without waiting for a writer. Omission selects stdin, which can be a pipe or terminal.
+without waiting for a writer. Omission selects `TextInput` supplied by an embedding host;
+compiled runners require a path because they do not supply business stdin.
 Its string output `line` preserves blank lines and whitespace and strips LF/CRLF delimiters. JSON parsing
 belongs in downstream nodes. Other StreamNodes can
 obtain data from files or services using their startup parameters. Every source is an ordinary declared node;

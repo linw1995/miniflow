@@ -1,6 +1,6 @@
 use crate::{
-    ChatDatabase, ChatError, Completion, Invocation, ModelIdentity, ToolExecutionMetrics,
-    UncommittedCompletion,
+    ChatDatabase, ChatError, Completion, Invocation, ModelIdentity, NextTurnQueue,
+    PendingMessageId, ToolExecutionMetrics, UncommittedCompletion,
     error::*,
     nodes::{BeginTurnInputs, RecoveryInputs, RecoveryOutputs},
     workflow::ConversationPresentation,
@@ -14,7 +14,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
     sync::{
         Arc, Mutex,
-        mpsc::{self, Receiver, TryRecvError},
+        mpsc::{self, Receiver, Sender, TryRecvError},
     },
     thread::{self, JoinHandle},
 };
@@ -44,10 +44,94 @@ impl HostConfig {
     }
 }
 
-struct Active {
+#[derive(Clone)]
+struct JobControl {
     steering: Option<crate::SteeringInbox>,
     invocation: Invocation,
     cancellation: StreamCancellation,
+    completed: Arc<AtomicBool>,
+    tool_metrics: ToolExecutionMetrics,
+}
+
+impl JobControl {
+    fn new(invocation: Invocation, steering: bool) -> Self {
+        Self {
+            steering: steering.then(|| crate::SteeringInbox::new(invocation.clone())),
+            invocation,
+            cancellation: StreamCancellation::default(),
+            completed: Arc::default(),
+            tool_metrics: ToolExecutionMetrics::default(),
+        }
+    }
+}
+
+type JobResult = Result<Completion, ChatError>;
+type JobParts = (JobControl, Receiver<JobResult>);
+
+struct QueuedRequest {
+    prompt: String,
+    started: Sender<JobParts>,
+}
+
+impl AsRef<str> for QueuedRequest {
+    fn as_ref(&self) -> &str {
+        &self.prompt
+    }
+}
+
+/// Receipt for one next-turn prompt. Dropping the receipt does not withdraw or cancel it.
+pub struct QueuedTurn {
+    pub id: PendingMessageId,
+    prompt: String,
+    started: Receiver<JobParts>,
+}
+
+impl QueuedTurn {
+    /// Wait for the predecessor to commit and the host to claim this prompt. Like `submit`,
+    /// the returned job reports admission and execution errors through `join`.
+    pub fn wait(self) -> Result<ChatJob, ChatError> {
+        let parts = self.started.recv().ok().context(NextTurnNotStartedSnafu {
+            prompt: self.prompt,
+        })?;
+        Ok(ChatJob::from(parts))
+    }
+}
+
+/// Normal sending starts a turn if idle and otherwise queues one in the same session.
+/// Neither variant steers a runner.
+pub enum PromptSubmission {
+    Started(ChatJob),
+    Queued(QueuedTurn),
+}
+
+impl From<ChatJob> for PromptSubmission {
+    fn from(job: ChatJob) -> Self {
+        Self::Started(job)
+    }
+}
+
+struct Active {
+    control: JobControl,
+    next: NextTurnQueue<QueuedRequest>,
+}
+
+impl Active {
+    fn enqueue(&mut self, prompt: String) -> Result<QueuedTurn, ChatError> {
+        ensure!(
+            self.control.cancellation.failure().is_none(),
+            NextTurnClosedSnafu
+        );
+        let (sender, started) = mpsc::channel();
+        let id = self.next.enqueue(QueuedRequest {
+            prompt: prompt.clone(),
+            started: sender,
+        })?;
+        Ok(QueuedTurn {
+            id,
+            prompt,
+            started,
+        })
+    }
 }
 
 #[derive(Default)]
@@ -69,44 +153,49 @@ pub struct ChatHost {
 }
 
 pub struct ChatJob {
-    invocation: Invocation,
-    cancellation: StreamCancellation,
-    receiver: Receiver<Result<Completion, ChatError>>,
-    ready: Option<Result<Completion, ChatError>>,
-    completed: Arc<AtomicBool>,
-    tool_metrics: ToolExecutionMetrics,
-    steering: Option<crate::SteeringInbox>,
+    control: JobControl,
+    receiver: Receiver<JobResult>,
+    ready: Option<Box<JobResult>>,
+}
+
+impl From<JobParts> for ChatJob {
+    fn from((control, receiver): JobParts) -> Self {
+        Self {
+            control,
+            receiver,
+            ready: None,
+        }
+    }
 }
 
 impl ChatJob {
     pub fn invocation(&self) -> &Invocation {
-        &self.invocation
+        &self.control.invocation
     }
 
     pub fn tool_metrics(&self) -> &ToolExecutionMetrics {
-        &self.tool_metrics
+        &self.control.tool_metrics
     }
 
     /// Keep a handle to recover input not delivered before cancellation or failure.
     pub fn steering(&self) -> Option<&crate::SteeringInbox> {
-        self.steering.as_ref()
+        self.control.steering.as_ref()
     }
 
-    pub fn steer(&self, text: impl Into<String>) -> Result<(), ChatError> {
-        self.steering
-            .as_ref()
+    pub fn steer(&self, text: impl Into<String>) -> Result<crate::PendingMessageId, ChatError> {
+        self.steering()
             .context(SteeringClosedSnafu)?
             .submit(text.into())
     }
 
     pub fn cancel(&self) {
-        if let Some(inbox) = &self.steering {
+        if let Some(inbox) = self.steering() {
             inbox.close();
         }
-        if self.completed.load(Ordering::Acquire) {
+        if self.control.completed.load(Ordering::Acquire) {
             return;
         }
-        self.cancellation.cancel(
+        self.control.cancellation.cancel(
             mf_runtime::StreamExecutionSnafu {
                 message: "chat request cancelled",
             }
@@ -117,15 +206,15 @@ impl ChatJob {
     pub fn poll(&mut self) -> bool {
         if self.ready.is_none() {
             match self.receiver.try_recv() {
-                Ok(result) => self.ready = Some(result),
+                Ok(result) => self.ready = Some(Box::new(result)),
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => {
-                    self.ready = Some(
+                    self.ready = Some(Box::new(
                         WorkerPanicSnafu {
-                            id: &self.invocation.call_id,
+                            id: &self.control.invocation.call_id,
                         }
                         .fail(),
-                    )
+                    ))
                 }
             }
         }
@@ -134,7 +223,7 @@ impl ChatJob {
 
     pub fn join(mut self) -> Result<Completion, ChatError> {
         if let Some(result) = self.ready.take() {
-            return result;
+            return *result;
         }
         self.receiver.recv().context(WorkerReceiveSnafu)?
     }
@@ -191,6 +280,44 @@ impl ChatHost {
         self.start(session_id, prompt, None, None)
     }
 
+    /// Decide between starting and queuing under the same lock as worker handoff.
+    pub fn submit_or_queue(
+        &self,
+        session_id: &str,
+        prompt: &str,
+    ) -> Result<PromptSubmission, ChatError> {
+        self.admit(session_id, prompt, None, None, |active| {
+            active.enqueue(prompt.into()).map(PromptSubmission::Queued)
+        })
+    }
+
+    /// Queue a separate turn in an active session, whether or not its Flow supports steering.
+    pub fn queue_next(
+        &self,
+        session_id: &str,
+        prompt: impl Into<String>,
+    ) -> Result<QueuedTurn, ChatError> {
+        let mut workers = self.inner.workers.lock().unwrap();
+        ensure!(!workers.closed, ClosedSnafu);
+        let active = workers
+            .active
+            .get_mut(session_id)
+            .context(NextTurnClosedSnafu)?;
+        active.enqueue(prompt.into())
+    }
+
+    pub fn withdraw_next(&self, session_id: &str, id: PendingMessageId) -> Option<String> {
+        self.inner
+            .workers
+            .lock()
+            .unwrap()
+            .active
+            .get_mut(session_id)?
+            .next
+            .withdraw(id)
+            .map(|request| request.prompt)
+    }
+
     /// Starts a turn with a bounded, best-effort preview subscription.
     /// Unread or discarded previews do not prevent settlement.
     pub fn submit_stream(
@@ -231,6 +358,19 @@ impl ChatHost {
         retry_of: Option<String>,
         preview: Option<crate::PreviewConsumer>,
     ) -> Result<ChatJob, ChatError> {
+        self.admit(session_id, prompt, retry_of, preview, |_| {
+            SessionBusySnafu { id: session_id }.fail()
+        })
+    }
+
+    fn admit<R: From<ChatJob>>(
+        &self,
+        session_id: &str,
+        prompt: &str,
+        retry_of: Option<String>,
+        preview: Option<crate::PreviewConsumer>,
+        when_busy: impl FnOnce(&mut Active) -> Result<R, ChatError>,
+    ) -> Result<R, ChatError> {
         ensure!(
             !prompt.is_empty(),
             InvalidSnafu {
@@ -249,26 +389,15 @@ impl ChatHost {
                 name: &session.profile,
             })?
             .clone();
-        let invocation = Invocation {
-            session_id: session_id.into(),
-            turn_id: uuid::Uuid::new_v4().to_string(),
-            call_id: uuid::Uuid::new_v4().to_string(),
-        };
-        let cancellation = StreamCancellation::default();
-        let (sender, receiver) = mpsc::channel();
         let mut workers = self
             .inner
             .workers
             .lock()
             .expect("worker state was not poisoned");
         ensure!(!workers.closed, ClosedSnafu);
-        ensure!(
-            !workers
-                .active
-                .values()
-                .any(|active| active.invocation.session_id == session_id),
-            SessionBusySnafu { id: session_id }
-        );
+        if let Some(active) = workers.active.get_mut(session_id) {
+            return when_busy(active);
+        }
         ensure!(
             workers.active.len() < self.inner.config.max_active,
             CapacitySnafu {
@@ -281,19 +410,9 @@ impl ChatHost {
         {
             let _ = handle.join();
         }
-        let steering = profile
-            .backend()
-            .steering_input()
-            .is_some()
-            .then(|| crate::SteeringInbox::new(invocation.clone()));
-        workers.active.insert(
-            invocation.call_id.clone(),
-            Active {
-                steering: steering.clone(),
-                invocation: invocation.clone(),
-                cancellation: cancellation.clone(),
-            },
-        );
+        let invocation = Invocation::new(session_id);
+        let control = JobControl::new(invocation.clone(), profile.backend().supports_steering());
+        let (sender, receiver) = mpsc::channel();
         let inner = Arc::clone(&self.inner);
         let request = BeginTurnInputs {
             database_path: self
@@ -315,93 +434,25 @@ impl ChatHost {
             retry_of,
             result_alternatives: None,
         };
-        let completed = Arc::new(AtomicBool::new(false));
-        let worker_completed = completed.clone();
-        let job_invocation = invocation.clone();
-        let job_cancellation = cancellation.clone();
-        let worker_cancellation = job_cancellation.clone();
-        let tool_metrics = ToolExecutionMetrics::default();
-        let worker_metrics = tool_metrics.clone();
-        let worker_steering = steering.clone();
+        workers.active.insert(
+            session_id.into(),
+            Active {
+                control: control.clone(),
+                next: NextTurnQueue::new(invocation.clone()),
+            },
+        );
+        let worker_control = control.clone();
         let worker = thread::Builder::new()
             .name(format!("mf-chat-{}", invocation.call_id))
-            .spawn(move || {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    inner.conversation(
-                        request,
-                        profile,
-                        job_cancellation,
-                        ConversationPresentation {
-                            preview,
-                            steering: worker_steering.clone(),
-                            tools: Some(worker_metrics.clone()),
-                            context_windows: inner.context_windows.clone(),
-                        },
-                    )
-                }));
-                if let Some(inbox) = worker_steering {
-                    inbox.close();
-                }
-                worker_metrics.close(worker_cancellation.failure().is_some());
-                let result = match result {
-                    Ok(result) => result,
-                    Err(_) => {
-                        let original = WorkerPanicSnafu {
-                            id: &job_invocation.call_id,
-                        }
-                        .build();
-                        let cleanup = inner
-                            .database
-                            .fail_turn(job_invocation.clone(), "failed", "chat worker panicked")
-                            .err()
-                            .map(Box::new);
-                        Err(ExecutionSnafu {
-                            invocation: job_invocation.clone(),
-                            cleanup,
-                        }
-                        .into_error(Box::new(original)))
-                    }
-                };
-                let result = match result {
-                    Err(source)
-                        if !matches!(
-                            &source,
-                            ChatError::Execution { .. } | ChatError::Uncommitted { .. }
-                        ) =>
-                    {
-                        Err(ExecutionSnafu {
-                            invocation: job_invocation.clone(),
-                            cleanup: None,
-                        }
-                        .into_error(Box::new(source)))
-                    }
-                    result => result,
-                };
-                inner
-                    .workers
-                    .lock()
-                    .expect("worker state was not poisoned")
-                    .active
-                    .remove(&job_invocation.call_id);
-                worker_completed.store(true, Ordering::Release);
-                let _ = sender.send(result);
-            });
+            .spawn(move || inner.run_session(request, profile, worker_control, sender, preview));
         match worker {
             Ok(worker) => workers.handles.push(worker),
             Err(source) => {
-                workers.active.remove(&invocation.call_id);
+                workers.active.remove(session_id);
                 return Err(WorkerSpawnSnafu.into_error(source));
             }
         }
-        Ok(ChatJob {
-            invocation,
-            cancellation,
-            receiver,
-            ready: None,
-            completed,
-            steering,
-            tool_metrics,
-        })
+        Ok(ChatJob::from((control, receiver)).into())
     }
 
     pub fn retry_completion(
@@ -448,10 +499,10 @@ impl ChatHost {
             }
             workers.closed = true;
             for active in workers.active.values() {
-                if let Some(inbox) = &active.steering {
+                if let Some(inbox) = &active.control.steering {
                     inbox.close();
                 }
-                active.cancellation.cancel(
+                active.control.cancellation.cancel(
                     mf_runtime::StreamExecutionSnafu {
                         message: "chat host closed",
                     }
@@ -486,10 +537,121 @@ impl Drop for ChatHost {
 }
 
 impl Inner {
+    fn run_session(
+        &self,
+        mut request: BeginTurnInputs,
+        profile: crate::WorkflowProfile,
+        mut control: JobControl,
+        mut sender: Sender<JobResult>,
+        mut preview: Option<crate::PreviewConsumer>,
+    ) {
+        let mut queued = false;
+        loop {
+            let admitted = Arc::new(AtomicBool::new(false));
+            let flag = admitted.clone();
+            let presentation = ConversationPresentation {
+                on_admitted: queued
+                    .then(|| Box::new(move || flag.store(true, Ordering::Release)) as _),
+                preview: preview.take(),
+                steering: control.steering.clone(),
+                tools: Some(control.tool_metrics.clone()),
+                context_windows: self.context_windows.clone(),
+            };
+            let result = self.run_job(request.clone(), &profile, &control, presentation);
+            let result = if queued && !admitted.load(Ordering::Acquire) {
+                result
+                    .map_err(Box::new)
+                    .with_context(|_| NextTurnAdmissionSnafu {
+                        prompt: std::mem::take(&mut request.prompt),
+                    })
+            } else {
+                result
+            };
+            let mut workers = self.workers.lock().unwrap();
+            let may_continue = !workers.closed && control.cancellation.failure().is_none();
+            let active = workers
+                .active
+                .get_mut(&request.session_id)
+                .expect("session worker owns its slot");
+            let next = active
+                .next
+                .advance(result.as_ref().ok().filter(|_| may_continue));
+            control.completed.store(true, Ordering::Release);
+            let _ = sender.send(result);
+            let Some(next) = next else {
+                workers.active.remove(&request.session_id);
+                return;
+            };
+            let invocation = next.invocation;
+            let entry = next.message;
+            queued = true;
+            request.turn_id.clone_from(&invocation.turn_id);
+            request.call_id.clone_from(&invocation.call_id);
+            request.prompt = entry.prompt;
+            request.retry_of = None;
+            control = JobControl::new(invocation, control.steering.is_some());
+            active.control = control.clone();
+            let receiver;
+            (sender, receiver) = mpsc::channel();
+            // A receipt carries passive parts, not a cancel-on-drop job. Not waiting is not withdrawal.
+            let _ = entry.started.send((control.clone(), receiver));
+        }
+    }
+
+    fn run_job(
+        &self,
+        request: BeginTurnInputs,
+        profile: &crate::WorkflowProfile,
+        control: &JobControl,
+        presentation: ConversationPresentation,
+    ) -> JobResult {
+        let invocation = &control.invocation;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.conversation(request, profile, control.cancellation.clone(), presentation)
+        }));
+        if let Some(inbox) = &control.steering {
+            inbox.close();
+        }
+        control
+            .tool_metrics
+            .close(control.cancellation.failure().is_some());
+        match result {
+            Ok(Err(source))
+                if !matches!(
+                    &source,
+                    ChatError::Execution { .. } | ChatError::Uncommitted { .. }
+                ) =>
+            {
+                Err(ExecutionSnafu {
+                    invocation: invocation.clone(),
+                    cleanup: None,
+                }
+                .into_error(Box::new(source)))
+            }
+            Ok(result) => result,
+            Err(_) => {
+                let original = WorkerPanicSnafu {
+                    id: &invocation.call_id,
+                }
+                .build();
+                let cleanup = self
+                    .database
+                    .fail_turn(invocation.clone(), "failed", "chat worker panicked")
+                    .err()
+                    .map(Box::new);
+                Err(ExecutionSnafu {
+                    invocation: invocation.clone(),
+                    cleanup,
+                }
+                .into_error(Box::new(original)))
+            }
+        }
+    }
+
     fn conversation(
         &self,
         request: BeginTurnInputs,
-        profile: crate::WorkflowProfile,
+        profile: &crate::WorkflowProfile,
         cancellation: StreamCancellation,
         presentation: ConversationPresentation,
     ) -> Result<Completion, ChatError> {

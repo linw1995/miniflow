@@ -1,5 +1,7 @@
 #![cfg(unix)]
 
+#[path = "support/runner_fixture.rs"]
+mod runner_fixture;
 #[path = "support/terminal.rs"]
 mod terminal;
 use terminal::Screen;
@@ -162,7 +164,7 @@ TRACES
     write_runner(
         &runner,
         format!(
-            "#!/bin/sh\n{record}[ -z \"${{OTEL_EXPORTER_OTLP_HEADERS+x}}\" ] || exit 7\ncase \"$OTEL_EXPORTER_OTLP_ENDPOINT\" in http://127.0.0.1:*) ;; *) exit 8 ;; esac\n[ -n \"$MF_RUN_ID\" ] || exit 9\nprintf '\\001\\000\\377'\ndd if=/dev/zero bs=65536 count=2 2>/dev/null\nprintf 'diagnostic\\n' >&2\n"
+            "#!/bin/sh\n{record}[ -z \"${{OTEL_EXPORTER_OTLP_HEADERS+x}}\" ] || exit 7\ncase \"$OTEL_EXPORTER_OTLP_ENDPOINT\" in http://127.0.0.1:*) ;; *) exit 8 ;; esac\n[ -n \"$MF_RUN_ID\" ] || exit 9\npython3 -c 'import json;print(json.dumps(dict(payload=\"x\"*131072)))'\nprintf 'diagnostic\\n' >&2\n"
         ),
     );
     fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
@@ -286,9 +288,10 @@ TRACES
     let (screen, _) = reader.join().unwrap();
     assert!(screen.contains("Unverif") && screen.contains("edTail"));
     assert!(screen.contains("Unknown"));
-    assert_eq!(&stdout[..3], [1, 0, 255]);
-    assert_eq!(stdout.len(), 3 + 131_072);
-    assert!(stdout[3..].iter().all(|byte| *byte == 0));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&stdout).unwrap(),
+        serde_json::json!({"payload":"x".repeat(131_072)})
+    );
     if with_observation {
         assert!(screen.contains("history-payload-42"));
         assert!(screen.contains("OTEL Tracing"));
@@ -300,7 +303,7 @@ TRACES
 }
 
 #[test]
-fn tui_displays_parallel_running_nodes_in_pips_until_they_finish() {
+fn tui_retains_parallel_pips_briefly_after_the_nodes_finish() {
     if !loopback_available() {
         return;
     }
@@ -467,7 +470,9 @@ fn tui_displays_parallel_running_nodes_in_pips_until_they_finish() {
     write_runner_with_manifest(
         &runner,
         format!(
-            r#"python3 -I -S - <<'TELEMETRY'
+            r#"[ "$#" -eq 0 ] || exit 17
+if read -r unexpected; then exit 18; fi
+python3 -I -S - <<'TELEMETRY'
 import os
 import time
 import urllib.request
@@ -480,6 +485,7 @@ send('{started}')
 time.sleep(3)
 send('{finished}')
 TELEMETRY
+printf '%s\n' '{{"type":"call"}}'
 "#
         ),
         manifest,
@@ -503,7 +509,7 @@ TELEMETRY
         .arg("--tui")
         .stdin(Stdio::from(pty.slave.try_clone().unwrap()))
         .stderr(Stdio::from(pty.slave.try_clone().unwrap()))
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .spawn()
         .unwrap();
     let mut master = fs::File::from(pty.master);
@@ -527,11 +533,19 @@ TELEMETRY
                         && text.contains(" Running: parallel-1 ")
                     {
                         stage = 1;
-                    } else if stage == 1 && text.contains("Exited:") && !text.contains(" Running: ")
+                    } else if stage == 1
+                        && text.contains(" Recent: parallel-0 ")
+                        && text.contains(" Recent: parallel-1 ")
+                    {
+                        stage = 2;
+                    } else if stage == 2
+                        && text.contains("Exited:")
+                        && !text.contains(" Running: ")
+                        && !text.contains(" Recent: ")
                     {
                         finished_without_pips = true;
                         master.write_all(b"q").unwrap();
-                        stage = 2;
+                        stage = 3;
                     }
                 }
             }
@@ -561,6 +575,10 @@ TELEMETRY
     assert!(screen.contains(" Running: parallel-0 "), "{screen}");
     assert!(screen.contains(" Running: parallel-1 "), "{screen}");
     assert!(finished_without_pips, "{screen}");
+    assert_eq!(
+        child.wait_with_output().unwrap().stdout,
+        b"{\"type\":\"call\"}\n"
+    );
     assert_eq!(status.code(), Some(0));
 }
 
@@ -820,7 +838,10 @@ fn tui_marks_stdout_incomplete_when_descendant_keeps_pipe_open() {
     }
     let directory = tempfile::tempdir().unwrap();
     let runner = directory.path().join("pipe-holding-runner");
-    write_runner(&runner, "#!/bin/sh\nsleep 5 &\nprintf 'prefix'\n".into());
+    write_runner(
+        &runner,
+        "#!/bin/sh\nsleep 5 &\nprintf '%s\\n' '{\"value\":\"prefix\"}'\n".into(),
+    );
     fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
 
     let pty = openpty(
@@ -899,7 +920,7 @@ fn tui_marks_stdout_incomplete_when_descendant_keeps_pipe_open() {
         "{}",
         String::from_utf8_lossy(&screen)
     );
-    assert_eq!(stdout, b"prefix");
+    assert_eq!(stdout, b"{\"value\":\"prefix\"}\n");
     assert_eq!(status.code(), Some(1));
 }
 
@@ -913,7 +934,7 @@ fn failed_stdout_delivery_uses_cli_error_or_preserves_child_failure() {
         let runner = directory.path().join("failing-runner");
         write_runner(
             &runner,
-            format!("#!/bin/sh\nprintf 'result'\nexit {child_code}\n"),
+            format!("#!/bin/sh\nprintf '%s\\n' '{{\"result\":true}}'\nexit {child_code}\n"),
         );
         fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
 
@@ -1154,32 +1175,5 @@ fn write_runner_with_manifest(
     script: String,
     manifest: mf_runtime::WorkflowManifest,
 ) {
-    let source = path.with_extension("rs");
-    let manifest_path = path.with_extension("manifest");
-    fs::write(&manifest_path, manifest.to_bytes().unwrap()).unwrap();
-    fs::write(&source, format!(
-        r#"use std::os::unix::process::CommandExt;
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".mf_manifest"))]
-#[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,__mf_manifest"))]
-static MANIFEST: [u8; include_bytes!({manifest_path:?}).len()] = *include_bytes!({manifest_path:?});
-fn main() {{
-    std::hint::black_box(&MANIFEST);
-    let error = std::process::Command::new("sh").arg("-c").arg({script:?}).arg(std::env::current_exe().unwrap()).args(std::env::args_os().skip(1)).exec();
-    panic!("{{error}}");
-}}
-"#
-    )).unwrap();
-    let output = Command::new("rustc")
-        .arg(&source)
-        .arg("--crate-name")
-        .arg("test_runner")
-        .arg("-o")
-        .arg(path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    runner_fixture::write(path, Some(&manifest.to_bytes().unwrap()), &script);
 }

@@ -7,6 +7,7 @@ pub mod display;
 mod error;
 pub mod flows;
 mod host;
+mod input_queue;
 mod model_selection;
 mod models;
 pub mod nodes;
@@ -29,7 +30,8 @@ pub use contract::{
     ModelContextRevision, ResultAlternatives, TitleContext, UncommittedCompletion,
 };
 pub use error::{BackendSnafu, CaptureSnafu, ChatError};
-pub use host::{ChatHost, ChatJob, HostConfig};
+pub use host::{ChatHost, ChatJob, HostConfig, PromptSubmission, QueuedTurn};
+pub use input_queue::{ClaimedTurn, NextTurnQueue, PendingMessageId};
 pub use model_selection::{ModelSelection, ModelSelectionCancellation, ModelSelectionUpdate};
 pub use models::{Message, ModelCall, Session, Turn};
 pub use preview::{PreviewConsumer, PreviewDelta, PreviewEvent, PreviewReceiver};

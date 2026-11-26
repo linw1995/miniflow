@@ -48,7 +48,15 @@ fn steering_during_a_running_tool_is_fifo_and_save_only_never_replays_it() {
     let job = host.submit(&session.id, "Read article").unwrap();
     tools.wait_for_requests(1);
     job.steer("Consider limitations").unwrap();
-    job.steer("Use a short answer").unwrap();
+    let withdrawn = job.steer("Do not send this correction").unwrap();
+    let kept = job.steer("Use a short answer").unwrap();
+    assert_eq!(
+        job.steering().unwrap().withdraw(withdrawn).as_deref(),
+        Some("Do not send this correction")
+    );
+    let retained_next = host.queue_next(&session.id, "A different task").unwrap();
+    assert!(job.steering().unwrap().withdraw(retained_next.id).is_none());
+    assert!(host.withdraw_next(&session.id, kept).is_none());
     assert_eq!(model.requests().len(), 1);
     let inbox = job.steering().unwrap().clone();
     fail_save(&path, true);
@@ -56,6 +64,9 @@ fn steering_during_a_running_tool_is_fifo_and_save_only_never_replays_it() {
     let ChatError::Uncommitted { pending, .. } = job.join().unwrap_err() else {
         panic!("expected save-only recovery")
     };
+    assert!(
+        matches!(retained_next.wait(), Err(ChatError::NextTurnNotStarted { prompt }) if prompt == "A different task")
+    );
     let requests = model.requests();
     assert_eq!(requests.len(), 2);
     let sent = requests[1].body["messages"].as_array().unwrap();
@@ -73,6 +84,7 @@ fn steering_during_a_running_tool_is_fifo_and_save_only_never_replays_it() {
             json!({"role":"user","content":"Use a short answer"})
         ]
     );
+    assert!(inbox.withdraw(kept).is_none());
     assert!(inbox.submit("Too late".into()).is_err());
     assert!(inbox.take_unsent().is_empty());
     assert_eq!(
@@ -124,13 +136,24 @@ fn cancelling_before_delivery_restores_steering_as_a_draft_not_as_a_follow_up() 
     let mut terminal = ChatTerminal::open(&binary, &path);
     terminal.wait_for(&["What would you like"]);
     terminal.send(b"Original question\x1b\r");
-    terminal.wait_for(&["Paused reply", "Alt+Enter steer"]);
-    terminal.send(b"Unsent correction\x1b\r");
+    terminal.wait_for(&["Paused reply", "Alt+Enter queue", "Alt+S steer"]);
+    terminal.send(b"After success\x1b\rWithdraw next\x1b\rWithdraw steer\x1bs");
+    terminal.wait_for(&["Steering queued"]);
+    terminal.send(b"\x1b[1;3A");
+    terminal.wait_for(&["Withdrew next-turn input", "Withdraw next"]);
+    terminal.send(b"\x15\x1b[1;3B");
+    terminal.wait_for(&["Withdrew steering input", "Withdraw steer"]);
+    terminal.send(b"\x15Unsent correction\x1bs");
     terminal.wait_for(&["Steering queued"]);
     terminal.send(b"Newer draft");
     terminal.wait_for(&["Newer draft"]);
     terminal.send(b"\x03");
-    terminal.wait_for(&["Unsent correction", "Newer draft", "Alt+Enter send"]);
+    terminal.wait_for(&[
+        "After success",
+        "Unsent correction",
+        "Newer draft",
+        "Alt+Enter send",
+    ]);
     release.store(true, Ordering::Release);
     terminal.quit();
     let db = ChatDatabase::open(path).unwrap();
@@ -138,6 +161,53 @@ fn cancelling_before_delivery_restores_steering_as_a_draft_not_as_a_follow_up() 
     assert_eq!(db.messages(&session.id, 8, None).unwrap().messages.len(), 1);
     assert_eq!(db.model_context(&session.id).unwrap().revision, 0);
     assert_eq!(server.requests().len(), 1);
+}
+
+#[test]
+fn a_chatflow_without_a_reply_callback_queues_separate_turns_without_prefetching() {
+    let (first, release) = gated(Reply::text("First reply"), String::new());
+    let server = Server::start(vec![
+        first,
+        Reply::text("Title"),
+        Reply::text("Second reply"),
+        Reply::text("Third reply"),
+    ]);
+    let root = tempfile::tempdir().unwrap();
+    let binary = compiled(root.path(), &server, "chat-flow.json");
+    let path = root.path().join("chat.sqlite");
+    let mut terminal = ChatTerminal::open(&binary, &path);
+    terminal.wait_for(&["What would you like"]);
+    terminal.send(b"Original\x1b\r");
+    terminal.wait_for(&["Alt+Enter queue"]);
+    server.wait_for_requests(1);
+    terminal.send(b"Withdrawn\x1b\r");
+    terminal.wait_for(&["Message queued"]);
+    terminal.send(b"\x1b[1;3A");
+    terminal.wait_for(&["Withdrew next-turn input", "Withdrawn"]);
+    terminal.send(b"\x15Second question\x1b\rThird question\x1b\rStill editing");
+    terminal.wait_for(&["Message queued", "Still editing"]);
+    assert_eq!(server.requests().len(), 1);
+    release.store(true, Ordering::Release);
+    terminal.wait_for(&["Third reply", "Still editing", "Alt+Enter send"]);
+    terminal.quit();
+    let requests = server.requests();
+    assert_eq!(requests.len(), 4);
+    for (index, text, len) in [
+        (0, "Original", 1),
+        (2, "Second question", 3),
+        (3, "Third question", 5),
+    ] {
+        let sent = messages(&requests[index]);
+        assert_eq!(sent.len(), len);
+        assert_eq!(sent.last().unwrap()["content"], text);
+    }
+    let db = ChatDatabase::open(path).unwrap();
+    let session = &db.list_sessions(false, 2, None).unwrap().sessions[0];
+    let stored = db.messages(&session.id, 10, None).unwrap().messages;
+    assert_eq!(stored.len(), 6);
+    assert_ne!(stored[0].message.turn_id, stored[2].message.turn_id);
+    assert_ne!(stored[2].message.turn_id, stored[4].message.turn_id);
+    assert_eq!(db.model_context(&session.id).unwrap().revision, 3);
 }
 
 #[test]
@@ -159,8 +229,9 @@ fn killing_the_host_after_delivery_leaves_no_steering_on_disk_or_for_replay() {
     let mut live = ChatTerminal::open(&binary, &path);
     live.wait_for(&["What would you like"]);
     live.send(b"Original question\x1b\r");
-    live.wait_for(&["First reply", "Alt+Enter steer"]);
-    live.send(format!("{marker}\x1b\r").as_bytes());
+    live.wait_for(&["First reply", "Alt+S steer"]);
+    let queued_marker = "OnlyInTheNextTurnQueue";
+    live.send(format!("{queued_marker}\x1b\r{marker}\x1bs").as_bytes());
     live.wait_for(&["Steering queued"]);
     advance.store(true, Ordering::Release);
     live.wait_for(&["Unfinished revision"]);
@@ -179,13 +250,13 @@ fn killing_the_host_after_delivery_leaves_no_steering_on_disk_or_for_replay() {
     for name in ["chat.sqlite", "chat.sqlite-wal"] {
         let file = root.path().join(name);
         if file.exists() {
-            assert!(
-                !fs::read(file)
-                    .unwrap()
-                    .windows(marker.len())
-                    .any(|bytes| bytes == marker.as_bytes()),
-                "steering persisted in {name}"
-            );
+            let bytes = fs::read(file).unwrap();
+            for text in [marker, queued_marker] {
+                assert!(
+                    !bytes.windows(text.len()).any(|b| b == text.as_bytes()),
+                    "pending input persisted in {name}"
+                );
+            }
         }
     }
     let db = ChatDatabase::open(path).unwrap();
@@ -201,7 +272,7 @@ fn killing_the_host_after_delivery_leaves_no_steering_on_disk_or_for_replay() {
 }
 
 #[test]
-fn live_steering_continues_the_same_runner_after_a_complete_tool_batch_and_a_text_reply() {
+fn live_steering_and_next_turn_input_reach_different_requests_and_turns() {
     let mut tools = Reply::stream_text("");
     let calls = [("add", 2, 3), ("multiply", 3, 4)].into_iter().enumerate().map(|(index, (operation, left, right))| json!({"index":index,"id":operation,"type":"function","function":{"name":"calculator","arguments":json!({"operation":operation,"left":left,"right":right}).to_string()}})).collect::<Vec<_>>();
     let chunk = |delta, finish| {
@@ -219,11 +290,13 @@ fn live_steering_continues_the_same_runner_after_a_complete_tool_batch_and_a_tex
     let text = Reply::stream_text("Intermediate answer");
     let prefix = format!("{}\n\n", text.body.split_once("\n\n").unwrap().0);
     let (text, second) = gated(text, prefix);
+    let (title, finish_title) = gated(Reply::text("Generated title"), String::new());
     let server = Server::start(vec![
         tools,
         text,
         Reply::stream_text("Steered final answer"),
-        Reply::text("Generated title"),
+        title,
+        Reply::stream_text("Separate reply"),
     ]);
     let root = tempfile::tempdir().unwrap();
     let binary = compiled(root.path(), &server, "chat-context-flow.json");
@@ -231,14 +304,14 @@ fn live_steering_continues_the_same_runner_after_a_complete_tool_batch_and_a_tex
     let mut terminal = ChatTerminal::open(&binary, &path);
     terminal.wait_for(&["What would you like"]);
     terminal.send(b"Original question\x1b\r");
-    terminal.wait_for(&["calculator [add]", "Alt+Enter steer"]);
-    terminal.send(b"Use both results\x1b\r");
+    terminal.wait_for(&["calculator [add]", "Alt+Enter queue", "Alt+S steer"]);
+    terminal.send(b"Separate question\x1b\rUse both results\x1bs");
     terminal.wait_for(&["Steering queued"]);
     first.store(true, Ordering::Release);
     terminal.wait_for(&["Intermediate answer"]);
     terminal.send(b"Revise the conclusion");
     terminal.wait_for(&["Revise the conclusion"]);
-    terminal.send(b"\x1b\r");
+    terminal.send(b"\x1bs");
     // The second checkpoint must not race ahead of the actual UI submission.
     let deadline = Instant::now() + Duration::from_secs(5);
     while terminal
@@ -248,15 +321,25 @@ fn live_steering_continues_the_same_runner_after_a_complete_tool_batch_and_a_tex
         assert!(Instant::now() < deadline);
         thread::sleep(Duration::from_millis(10));
     }
+    assert_eq!(
+        server.requests().len(),
+        2,
+        "nothing queued for the next turn was prefetched"
+    );
     second.store(true, Ordering::Release);
-    terminal.wait_for(&["Steered final answer", "Alt+Enter send"]);
+    server.wait_for_requests(4);
+    terminal.send(b"Late correction\x1bs");
+    terminal.wait_for(&["not accepting steering input", "Late correction"]);
+    assert_eq!(server.requests().len(), 4);
+    finish_title.store(true, Ordering::Release);
+    terminal.wait_for(&["Separate reply", "Alt+Enter send", "Late correction"]);
     terminal.quit();
 
     let requests = server.requests();
     assert_eq!(
         requests.len(),
-        4,
-        "three Agent calls and one auxiliary title"
+        5,
+        "three calls in the steered turn, one title and a separate turn"
     );
     let exchanged = requests[1].body["messages"].as_array().unwrap();
     assert_eq!(
@@ -290,14 +373,34 @@ fn live_steering_continues_the_same_runner_after_a_complete_tool_batch_and_a_tex
     let db = ChatDatabase::open(path).unwrap();
     let session = &db.list_sessions(false, 8, None).unwrap().sessions[0];
     let page = db.messages(&session.id, 50, None).unwrap();
-    assert_eq!(page.messages.len(), 8);
-    assert!(
-        page.messages
-            .iter()
-            .all(|r| r.message.turn_id == page.messages[0].message.turn_id)
+    let separate = requests[4].body["messages"].as_array().unwrap();
+    assert_eq!(separate.len(), 9);
+    assert_eq!(&separate[..7], next);
+    assert_eq!(separate[7]["content"][0]["text"], "Steered final answer");
+    assert_eq!(
+        separate[8],
+        json!({"role":"user","content":"Separate question"})
     );
+    assert!(
+        requests[..4]
+            .iter()
+            .all(|r| !r.body.to_string().contains("Separate question"))
+    );
+    assert_eq!(page.messages.len(), 10);
+    let (original, following) = page.messages.split_at(8);
+    assert!(
+        original
+            .iter()
+            .all(|r| r.message.turn_id == original[0].message.turn_id)
+    );
+    assert!(
+        following
+            .iter()
+            .all(|r| r.message.turn_id == following[0].message.turn_id)
+    );
+    assert_ne!(original[0].message.turn_id, following[0].message.turn_id);
     let context = db.model_context(&session.id).unwrap();
-    assert_eq!(context.revision, 1);
+    assert_eq!(context.revision, 2);
     assert_eq!(
         context.messages,
         page.messages

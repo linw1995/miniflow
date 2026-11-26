@@ -1,7 +1,6 @@
 pub mod call;
 pub mod flows;
 pub mod model_info;
-pub mod steering;
 pub mod tools;
 pub use call::{
     CallOutcome, ToolCall, ToolCallDelta, ToolCallEvent, ToolDefinition, ToolResult,

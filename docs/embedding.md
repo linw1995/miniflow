@@ -171,13 +171,13 @@ those views never deserialize the redundant raw child body. Factories receive th
 configuration alongside authoritative prepared children. Node-owned errors retain their typed sources
 under generic compiler node or child-scope context.
 
-Manifest payload version `2026-11-18` contains the root `definition`, resource `entry` and `sources`,
+Manifest payload version `2026-11-27` contains the root `definition`, resource `entry` and `sources`,
 and a public `descriptor` with observation `description` and prepared `input_schema`. It does not
 serialize compiler graphs or execution layouts. Native `CompiledWorkflow` and `CompiledGraph` do not
 implement Serde, and there is no saved-compiled-plan protocol. Generated projects use `workflow-plan.rs`
 only as a build-time native graph handoff; runtime preparation uses generated fixed bindings. Dynamic
 host embedding resolves its native resource bundle at preparation time. Framing remains version 1.
-Older manifest payloads are rejected rather than inferred or adapted.
+Hosts accept only this manifest version. Recompile older runners before loading them.
 
 `manifest(&registry) -> Result<WorkflowManifest, PlanError>` derives the current configured interface
 from the host registry. Inspection prepares separate nodes without executing them. There is no
@@ -351,6 +351,56 @@ does not depend on the chat package. The chat build still generates `title.json`
 provider requirements and feature policy from Cargo's resolved manifest declarations, including
 workspace inheritance. The host registers that generated definition. No duplicate build-only
 registration is needed. Source factories return definitions without executing workflow work.
+
+## Binding a callback for one execution
+
+Prepare an invocation-local registry to replace a declared `callback:<name>` Call. Its authored
+body supplies the fallback and frozen port contract. For example, a host can bind `lookup` without
+passing a callable through business inputs:
+
+```rust
+let mut registry = mf_runtime::NodeRegistry::from_inventory()?;
+let plan = embedded::plan(&registry)?;
+let sites = mf_runtime::callback::callback_sites(&plan.graph);
+let lookup = mf_runtime::callback::HostCallback::new(|args, _cancel| {
+    Ok(mf_runtime::FlowOutputs::from([("value".into(), args.0["query.key"].clone())]).into())
+});
+registry.bind_callbacks(&sites, &[], &[("lookup".into(), lookup)].into())?;
+let result = mf_compiler::execute_compiled(&plan, &registry, None)?;
+```
+
+The callback receives the resolved qualified inputs, including their sensitivity. The runtime checks
+its outputs against the declared ports. A host can attach `CallbackReply::on_delivery` to commit a
+claim on delivery or restore it on abandonment. Reuse the plan, not a registry carrying another
+invocation's callbacks. A standalone runner needs no host. Granted executable callbacks use the
+[local RPC protocol](workflows.md#host-callback-rpc); native embedding needs no transport.
+
+For a compiled child, enable the `callback-host` feature of `mf-runtime`. The launcher owns the
+child process and selects the handlers; the runtime owns the private listener, grant, peer PID
+check, request dispatch, cancellation, and socket cleanup. Prepare before spawning so no other
+process is given the grant, then start serving with the PID returned by `spawn`:
+
+```rust
+use mf_runtime::callback_rpc::host::Listener;
+
+let mut command = std::process::Command::new(executable);
+let listener = Listener::prepare(&mut command, &manifest.descriptor.callbacks, callbacks)?;
+let mut child = command.spawn()?;
+let server = match listener.map(|l| l.start(child.id(), &cancellation, report_error)).transpose() {
+    Ok(server) => server,
+    Err(error) => {
+        let _ = child.kill();
+        child.wait()?;
+        return Err(error.into());
+    }
+};
+let status = child.wait()?;
+drop(server);
+```
+
+Keep the server alive for the run. Route `report_error` to the supervisor so an RPC failure cannot
+be reported as success. An empty binding set clears any inherited grant and creates no listener.
+Standalone runners do not enable `callback-host`.
 
 ## Forwarding finite child emissions
 

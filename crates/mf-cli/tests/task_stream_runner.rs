@@ -65,6 +65,168 @@ fn count_flow(streaming: bool, gate: Option<&Path>, marker: Option<&Path>) -> se
 }
 
 #[test]
+fn installed_finite_runner_calls_a_native_host_without_chat_or_flow_sources() {
+    use mf_runtime::callback::{CallbackReply, HostCallback, HostCallbacks};
+    use mf_runtime::callback_rpc::host::Listener;
+    use std::io::Write;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let root = tempfile::tempdir().unwrap();
+    let executable = compile(
+        root.path(),
+        json!({
+            "version":"2026-11-13", "dependencies":{"core":{"package":"mfn-core","path":crates_dir().join("builtin-nodes/core")}},
+            "nodes":[{"id":"lookup","kind":"workflow.call","config":{"flow":"callback:lookup","body":{
+                "nodes":[{"id":"query","kind":"builtin.parameters","config":{"parameters":{"key":{"type":"string","default":"local"}}}}],
+                "outputs":[{"name":"value","node":"query","port":"key"}]
+            }}}],"outputs":[{"name":"type","node":"lookup","port":"value"}]
+        }),
+    );
+    fs::remove_file(root.path().join("flow.json")).unwrap();
+    fs::remove_dir_all(root.path().join("build")).unwrap();
+    let normal = Command::new(env!("CARGO_BIN_EXE_mf"))
+        .arg("run")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(normal.status.success(), "{normal:?}");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&normal.stdout).unwrap(),
+        json!({"type":"local"})
+    );
+    let sites = [("lookup".into(), vec!["lookup".into()])].into();
+    let committed = Arc::new(AtomicUsize::new(0));
+    let capture = committed.clone();
+    let handler = HostCallback::new(move |args, _| {
+        assert_eq!(args.0["query.key"].as_str(), Some("local"));
+        assert!(args.0["query.key"].is_secret());
+        let capture = capture.clone();
+        Ok(
+            CallbackReply::from(mf_runtime::Outputs::from([("value".into(), "call".into())]))
+                .on_delivery(move |ok| {
+                    assert!(ok);
+                    capture.fetch_add(1, Ordering::SeqCst);
+                }),
+        )
+    });
+    let callbacks: HostCallbacks = [("lookup".into(), handler)].into();
+    let run = |callbacks| {
+        let mut command = Command::new(&executable);
+        let listener = Listener::prepare(&mut command, &sites, callbacks)?;
+        let mut child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let (errors, reported) = std::sync::mpsc::channel();
+        let server = match listener
+            .unwrap()
+            .start(child.id(), &Default::default(), move |error| {
+                errors.send(error).unwrap();
+            }) {
+            Ok(server) => server,
+            Err(error) => {
+                let _ = child.kill();
+                child.wait().unwrap();
+                return Err(error);
+            }
+        };
+        let output = child.wait_with_output().unwrap();
+        drop(server);
+        assert!(reported.try_recv().is_err());
+        Ok::<_, mf_runtime::callback::CallbackError>(output)
+    };
+    let finished = run(callbacks.clone()).unwrap();
+    assert!(finished.status.success(), "{finished:?}");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&finished.stdout).unwrap(),
+        json!({"type":"call"})
+    );
+    assert_eq!(committed.load(Ordering::SeqCst), 1);
+    assert!(run([("other".into(), callbacks["lookup"].clone())].into()).is_err());
+    use mf_runtime::callback_rpc::LAUNCH_ENV;
+    let path = root.path().join("rpc");
+    let grant = |bindings: &[&str]| {
+        json!({"parent":std::process::id(),"socket":path,"bindings":bindings}).to_string()
+    };
+    for (args, config, message) in [
+        (vec![], grant(&["other"]), "unknown or duplicate"),
+        (vec![], grant(&["lookup", "lookup"]), "unknown or duplicate"),
+        (
+            vec!["--node=lookup"],
+            grant(&["lookup"]),
+            "unknown or duplicate",
+        ),
+        (vec![], grant(&["lookup"]), "I/O failed"),
+        (vec![], String::from("{"), "encoding failed"),
+    ] {
+        let output = Command::new(&executable)
+            .args(args)
+            .env(LAUNCH_ENV, config)
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success() && output.stdout.is_empty(),
+            "{output:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(message),
+            "{output:?}"
+        );
+    }
+    let foreign = Command::new(&executable)
+        .env(
+            LAUNCH_ENV,
+            json!({"parent":0,"socket":path,"bindings":["lookup"]}).to_string(),
+        )
+        .output()
+        .unwrap();
+    assert!(foreign.status.success() && foreign.stdout == normal.stdout);
+    let server = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    for (response, diagnostic) in [
+        ("", "host closed without a result"),
+        ("{", "incomplete RPC"),
+        (
+            "{\"id\":2,\"value\":{\"values\":{}}}\n",
+            "unexpected callback result ID",
+        ),
+        (
+            "{\"id\":1,\"value\":{\"values\":{}}}\n",
+            "missing callback output",
+        ),
+    ] {
+        let child = Command::new(&executable)
+            .env(LAUNCH_ENV, grant(&["lookup"]))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let (mut peer, _) = server.accept().unwrap();
+        let mut line = String::new();
+        BufReader::new(&peer).read_line(&mut line).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&line).unwrap(),
+            json!({"id":1,"binding":"lookup","args":{"values":{"query.key":"local"},"private":[["query.key"]]}})
+        );
+        peer.write_all(response.as_bytes()).unwrap();
+        drop(peer);
+        let result = child.wait_with_output().unwrap();
+        assert!(
+            !result.status.success() && result.stdout.is_empty(),
+            "{result:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(diagnostic),
+            "{result:?}"
+        );
+    }
+}
+
+#[test]
 fn compiled_native_stream_delivers_increments_before_the_terminal_result() {
     let root = tempfile::tempdir().unwrap();
     let gate = root.path().join("release");

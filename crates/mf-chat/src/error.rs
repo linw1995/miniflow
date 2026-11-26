@@ -34,12 +34,23 @@ pub enum ChatError {
     },
     #[snafu(display("chat workflow profile {name:?} does not exist"))]
     ProfileMissing { name: String },
+    #[snafu(display("no active turn is accepting next-turn input for this session"))]
+    NextTurnClosed,
+    #[snafu(display("queued prompt was not admitted"))]
+    NextTurnNotStarted { prompt: String },
+    #[snafu(display("could not admit the queued prompt: {source}"))]
+    NextTurnAdmission {
+        prompt: String,
+        source: Box<ChatError>,
+    },
     #[snafu(display("this turn is not accepting steering input"))]
     SteeringClosed,
-    #[snafu(display("could not bind the steering capability: {source}"))]
-    SteeringBinding { source: mf_runtime::TypeMismatch },
-    #[snafu(display("could not exchange input over the local steering channel: {source}"))]
-    SteeringIo { source: io::Error },
+    #[snafu(display("invalid reply callback value: {source}"))]
+    ReplyValue { source: mf_runtime::TypeMismatch },
+    #[snafu(transparent)]
+    Callback {
+        source: mf_runtime::callback::CallbackError,
+    },
     #[snafu(display("chat host is closed"))]
     Closed,
     #[snafu(display("chat host reached its {limit}-workflow capacity"))]

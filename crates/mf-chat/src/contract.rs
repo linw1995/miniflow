@@ -196,8 +196,8 @@ pub struct ProviderParameterPorts {
 #[derive(Clone, Debug)]
 pub struct ChatContract {
     pub parameters: WorkflowInputSchema,
-    /// Qualified, application-owned control port, separate from model and conversation inputs.
-    pub steering_input: Option<String>,
+    /// The user workflow declares an unambiguous Agent reply callback.
+    pub supports_steering: bool,
     pub answer_stream: bool,
     pub tool_call_delta_stream: bool,
     pub streaming: bool,
@@ -221,10 +221,7 @@ impl ChatContract {
 
     /// Returns the qualified workflow ports bound to conversation inputs.
     pub fn input_targets(&self) -> impl Iterator<Item = &str> {
-        self.inputs
-            .values()
-            .map(String::as_str)
-            .chain(self.steering_input.as_deref())
+        self.inputs.values().map(String::as_str)
     }
 
     /// Recovers conversation inputs from the qualified arguments of a registered Flow.
@@ -256,15 +253,7 @@ impl ChatContract {
         );
         let mut configuration = manifest.descriptor.input_schema.clone();
         let mut inputs = BTreeMap::new();
-        let steering = mf_runtime::PortSpec::new(
-            "steering",
-            mf_runtime::ValueType::Nullable(Box::new(mf_runtime::ValueType::Object)),
-            false,
-        );
-        for expected in crate::ConversationInputs::ports()
-            .into_iter()
-            .chain([steering])
-        {
+        for expected in crate::ConversationInputs::ports() {
             let candidates: Vec<_> = manifest
                 .descriptor
                 .input_schema
@@ -282,17 +271,6 @@ impl ChatContract {
                 }
             );
             if let Some((node, port)) = candidates.first() {
-                if expected.name == "steering" {
-                    ensure!(
-                        port.binding.secret
-                            && port.binding.env.is_none()
-                            && port.binding.default == Some(serde_json::Value::Null),
-                        InvalidSnafu {
-                            field: "steering input",
-                            reason: "must be private with a null default and no environment binding"
-                        }
-                    );
-                }
                 ensure!(
                     port.value_type == expected.value_type && (!expected.required || port.required),
                     InvalidSnafu {
@@ -353,7 +331,10 @@ impl ChatContract {
             answer_stream,
             tool_call_delta_stream,
             streaming,
-            steering_input: inputs.remove("steering"),
+            supports_steering: manifest
+                .descriptor
+                .callbacks
+                .contains_key(crate::steering::ON_REPLY),
             inputs,
             alternatives,
         })
@@ -649,7 +630,7 @@ mod output_tests {
             answer_stream: answer,
             tool_call_delta_stream: false,
             streaming: true,
-            steering_input: None,
+            supports_steering: false,
             inputs: Default::default(),
         })
     }
@@ -797,7 +778,7 @@ mod output_tests {
             answer_stream: false,
             tool_call_delta_stream: false,
             streaming: false,
-            steering_input: None,
+            supports_steering: false,
             inputs: BTreeMap::new(),
             alternatives: ResultAlternatives::Append,
         };

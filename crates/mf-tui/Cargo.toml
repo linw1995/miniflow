@@ -9,7 +9,7 @@ description = "Terminal observation of locally launched miniflow workflows"
 [dependencies]
 # Chat persistence, runtime state, and snapshot contracts.
 mf-chat.workspace = true
-mf-runtime.workspace = true
+mf-runtime = { workspace = true, features = ["callback-host"] }
 mf-telemetry = { workspace = true, features = ["snapshot"] }
 
 # Terminal input, rendering, and workflow graph layout.

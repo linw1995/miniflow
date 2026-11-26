@@ -51,7 +51,9 @@ parallel storage DTO.
 
 ### Requirement: Export built-in Agent transcript additions
 
-The Agent SHALL preserve the request, returning only new assistant/tool messages and delivered steering.
+The Agent SHALL preserve the request, returning only new assistant/tool messages and any additions from
+the host-bindable `callback:on_reply` Call. Unbound, its authored body SHALL return an empty list.
+The Agent SHALL NOT interpret a host endpoint or require a chat provider.
 An enclosing Flow MAY replace context. Each assistant, including the final answer, SHALL appear once;
 parallel tool results SHALL follow call order. The Agent SHALL continue while the model requests tools,
 without a fixed round limit. Captured failures SHALL retain available messages and usages with failed

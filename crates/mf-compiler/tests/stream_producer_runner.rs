@@ -15,19 +15,18 @@ use std::{
     fs,
     io::Write,
     path::Path,
-    process::{Command, Output, Stdio},
+    process::{Command, Output},
     thread,
 };
 
 fn run(executable: &Path, input: &[u8]) -> Output {
-    let mut child = Command::new(executable)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child.stdin.take().unwrap().write_all(input).unwrap();
-    child.wait_with_output().unwrap()
+    let mut paths = tempfile::NamedTempFile::new().unwrap();
+    paths.write_all(input).unwrap();
+    Command::new(executable)
+        .arg("--feed.path")
+        .arg(paths.path())
+        .output()
+        .unwrap()
 }
 
 fn records(output: &Output) -> Vec<Value> {
@@ -45,7 +44,7 @@ fn records(output: &Output) -> Vec<Value> {
 }
 
 #[test]
-fn external_line_producer_matches_memory_and_drains_after_stdin_closes() {
+fn external_line_producer_matches_memory_and_drains_after_its_source_closes() {
     let root = tempfile::tempdir().unwrap();
     let definition_path = root.path().join("flow.json");
     let executable = root.path().join("flow");

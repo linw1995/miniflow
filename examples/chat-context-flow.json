@@ -25,12 +25,6 @@
       "kind": "builtin.parameters",
       "config": {
         "parameters": {
-          "steering": {
-            "type": {
-              "nullable": "object"
-            },
-            "default": null
-          },
           "messages": {
             "type": {
               "list": "object"
@@ -65,12 +59,6 @@
         "flow": "conversation"
       },
       "inputs": {
-        "params.steering": {
-          "from": {
-            "node": "params",
-            "port": "steering"
-          }
-        },
         "params.messages": {
           "from": {
             "node": "params",

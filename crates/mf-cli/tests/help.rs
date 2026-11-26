@@ -1,5 +1,7 @@
 #![cfg(unix)]
 
+#[path = "support/runner_fixture.rs"]
+mod runner_fixture;
 use mf_runtime::WorkflowManifest;
 use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
 
@@ -41,40 +43,7 @@ fn command(runner: &Path) -> Command {
 }
 
 fn write_runner(runner: &Path, payload: Option<&[u8]>) {
-    let source = runner.with_extension("rs");
-    let data = runner.with_extension("manifest");
-    let embedded = if let Some(payload) = payload {
-        fs::write(&data, payload).unwrap();
-        format!(
-            r#"
-#[used]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".mf_manifest"))]
-#[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,__mf_manifest"))]
-static MANIFEST: [u8; include_bytes!({data:?}).len()] = *include_bytes!({data:?});
-"#
-        )
-    } else {
-        String::new()
-    };
-    let retain = if payload.is_some() {
-        "std::hint::black_box(&MANIFEST);"
-    } else {
-        ""
-    };
-    fs::write(
-        &source,
-        format!(
-            "{embedded}\nfn main() {{ {retain} panic!(\"help must not launch the runner\"); }}\n"
-        ),
-    )
-    .unwrap();
-    let output = Command::new("rustc")
-        .arg(&source)
-        .args(["--crate-name", "help_runner", "-o"])
-        .arg(runner)
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{output:?}");
+    runner_fixture::write(runner, payload, "touch executed; exit 73");
 }
 
 #[test]
@@ -193,11 +162,17 @@ fn missing_or_invalid_manifests_fail_without_executing_the_file() {
     )
     .unwrap();
     fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
-    for case in ["script", "missing", "invalid"] {
+    for case in ["script", "missing", "invalid", "obsolete"] {
         match case {
             "script" => {}
             "missing" => write_runner(&runner, None),
             "invalid" => write_runner(&runner, Some(b"invalid manifest")),
+            "obsolete" => {
+                let mut bytes = manifest().to_bytes().unwrap();
+                let pos = bytes.windows(10).position(|w| w == b"2026-11-27").unwrap();
+                bytes[pos..pos + 10].copy_from_slice(b"2026-11-25");
+                write_runner(&runner, Some(&bytes));
+            }
             _ => unreachable!(),
         }
         let output = command(&runner)
@@ -208,6 +183,13 @@ fn missing_or_invalid_manifests_fail_without_executing_the_file() {
         assert_eq!(output.status.code(), Some(1), "{output:?}");
         assert!(output.stdout.is_empty());
         assert!(String::from_utf8_lossy(&output.stderr).contains("could not inspect workflow"));
+        let run = command(&runner)
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+        assert_eq!(run.status.code(), Some(1));
+        assert!(run.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&run.stderr).contains("could not inspect workflow"));
         assert!(!marker.exists());
     }
     let output = command(&directory.path().join("missing"))
@@ -223,8 +205,11 @@ fn missing_or_invalid_manifests_fail_without_executing_the_file() {
 fn explicit_separator_and_named_input_values_keep_their_forwarding_semantics() {
     let directory = tempfile::tempdir().unwrap();
     let runner = directory.path().join("runner");
-    fs::write(&runner, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
-    fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
+    runner_fixture::write(
+        &runner,
+        Some(&manifest().to_bytes().unwrap()),
+        r#"printf '%s\n' "$@""#,
+    );
     for (flags, expected) in [
         (vec!["--", "--help"], "--help\n"),
         (vec!["--read.path", "-h"], "--read.path\n-h\n"),
