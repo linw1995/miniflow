@@ -38,6 +38,26 @@ fn check(
     Ok(())
 }
 
+fn encode_frame(frame: &impl Serialize, limit: usize) -> Result<Vec<u8>, CallbackError> {
+    struct BoundedFrame(Vec<u8>, usize);
+    impl Write for BoundedFrame {
+        fn write(&mut self, input: &[u8]) -> io::Result<usize> {
+            if input.len() >= self.1 - self.0.len() {
+                return Err(io::Error::other("RPC frame exceeds limit"));
+            }
+            self.0.extend_from_slice(input);
+            Ok(input.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut bytes = BoundedFrame(Vec::new(), limit);
+    serde_json::to_writer(&mut bytes, frame).context(CodecSnafu)?;
+    bytes.0.push(b'\n');
+    Ok(bytes.0)
+}
+
 impl Channel {
     pub fn new(socket: UnixStream) -> Result<Self, CallbackError> {
         // Accepted sockets may inherit the listener's nonblocking flag on BSD.

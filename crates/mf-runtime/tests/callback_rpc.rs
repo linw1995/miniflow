@@ -3,7 +3,7 @@
 use mf_runtime::{
     Outputs, StreamCancellation, WorkflowArguments,
     callback::*,
-    callback_rpc::{Grant, HostSession, IoGrant, connect, serve, serve_session},
+    callback_rpc::{Grant, HostSession, IoGrant, connect, serve_session},
 };
 use serde_json::{Value, json};
 use std::{
@@ -37,13 +37,16 @@ fn rpc_has_only_requests_and_responses_and_delivers_once_after_writing() {
             )
         })
     };
-    let handlers = [
-        ("lookup".into(), handler("lookup")),
-        ("other".into(), handler("other")),
-    ]
-    .into();
+    let session = HostSession {
+        callbacks: [
+            ("lookup".into(), handler("lookup")),
+            ("other".into(), handler("other")),
+        ]
+        .into(),
+        ..Default::default()
+    };
     let (server, mut peer) = UnixStream::pair().unwrap();
-    let worker = thread::spawn(move || serve(server, &handlers, &Default::default()));
+    let worker = thread::spawn(move || serve_session(server, session, &Default::default()));
     for (id, name) in [(1, "lookup"), (2, "other")] {
         writeln!(
             peer,
@@ -119,6 +122,26 @@ fn hosted_events_and_pulled_inputs_do_not_consume_callback_ids() {
     writeln!(peer, "{}", json!({"flush":{}})).unwrap();
     assert_eq!(read(&peer), json!({"flushed":true}));
     worker.join().unwrap().unwrap();
+}
+
+#[test]
+fn preauthenticated_sessions_also_reject_oversized_startup_inputs() {
+    let (server, peer) = UnixStream::pair().unwrap();
+    drop(peer);
+    let session = HostSession {
+        inputs: Some(WorkflowArguments(
+            [(
+                "key".into(),
+                "x".repeat(mf_runtime::MAX_WORKFLOW_INPUT_BYTES).into(),
+            )]
+            .into(),
+        )),
+        ..Default::default()
+    };
+    assert!(matches!(
+        serve_session(server, session, &Default::default()),
+        Err(CallbackError::Inputs { .. })
+    ));
 }
 
 #[test]
@@ -303,13 +326,16 @@ fn malformed_partials_unknown_bindings_and_reused_ids_do_not_dispatch() {
     ] {
         let (server, mut peer) = UnixStream::pair().unwrap();
         let worker = thread::spawn(move || {
-            serve(
+            serve_session(
                 server,
-                &[(
-                    "lookup".into(),
-                    HostCallback::new(|_, _| panic!("unexpected dispatch")),
-                )]
-                .into(),
+                HostSession {
+                    callbacks: [(
+                        "lookup".into(),
+                        HostCallback::new(|_, _| panic!("unexpected dispatch")),
+                    )]
+                    .into(),
+                    ..Default::default()
+                },
                 &Default::default(),
             )
         });
@@ -318,6 +344,41 @@ fn malformed_partials_unknown_bindings_and_reused_ids_do_not_dispatch() {
         let error = worker.join().unwrap().unwrap_err();
         assert!(error.to_string().contains(expected), "{error}");
     }
+}
+
+#[test]
+fn oversized_replies_write_no_prefix_and_do_not_acknowledge_delivery() {
+    let (server, mut peer) = UnixStream::pair().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handler = HostCallback::new(move |_, _| {
+        let tx = tx.clone();
+        Ok(CallbackReply::from(Outputs::from([(
+            "value".into(),
+            "x".repeat(MAX_CALLBACK_FRAME).into(),
+        )]))
+        .on_delivery(move |ok| tx.send(ok).unwrap()))
+    });
+    let session = HostSession {
+        callbacks: [("lookup".into(), handler)].into(),
+        ..Default::default()
+    };
+    let worker = thread::spawn(move || serve_session(server, session, &Default::default()));
+    writeln!(
+        peer,
+        "{}",
+        json!({"id":1,"binding":"lookup","args":{"values":{}}})
+    )
+    .unwrap();
+    assert!(
+        matches!(worker.join().unwrap(), Err(CallbackError::Codec { source }) if source.to_string().contains("exceeds limit"))
+    );
+    assert!(!rx.recv().unwrap());
+    assert_eq!(
+        BufReader::new(peer)
+            .read_until(b'\n', &mut Vec::new())
+            .unwrap(),
+        0
+    );
 }
 
 #[test]
@@ -371,7 +432,7 @@ fn cancellation_interrupts_idle_rpc_and_incomplete_writes_do_not_acknowledge() {
     let (server, _peer) = UnixStream::pair().unwrap();
     let cancel = StreamCancellation::default();
     let stop = cancel.clone();
-    let worker = thread::spawn(move || serve(server, &Default::default(), &cancel));
+    let worker = thread::spawn(move || serve_session(server, HostSession::default(), &cancel));
     thread::sleep(Duration::from_millis(60));
     stop.cancel(
         mf_runtime::StreamExecutionSnafu {
@@ -399,7 +460,16 @@ fn cancellation_interrupts_idle_rpc_and_incomplete_writes_do_not_acknowledge() {
         }),
     )]
     .into();
-    let worker = thread::spawn(move || serve(server, &handlers, &Default::default()));
+    let worker = thread::spawn(move || {
+        serve_session(
+            server,
+            HostSession {
+                callbacks: handlers,
+                ..Default::default()
+            },
+            &Default::default(),
+        )
+    });
     writeln!(
         peer,
         "{}",

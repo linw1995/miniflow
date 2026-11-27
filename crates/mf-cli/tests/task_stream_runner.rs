@@ -67,7 +67,7 @@ fn count_flow(streaming: bool, gate: Option<&Path>, marker: Option<&Path>) -> se
 #[test]
 fn installed_finite_runner_calls_a_native_host_without_chat_or_flow_sources() {
     use mf_runtime::callback::{CallbackReply, HostCallback, HostCallbacks};
-    use mf_runtime::callback_rpc::host::Listener;
+    use mf_runtime::callback_rpc::{HostSession, host::Listener};
     use std::io::Write;
     use std::sync::{
         Arc,
@@ -114,7 +114,14 @@ fn installed_finite_runner_calls_a_native_host_without_chat_or_flow_sources() {
     let callbacks: HostCallbacks = [("lookup".into(), handler)].into();
     let run = |callbacks| {
         let mut command = Command::new(&executable);
-        let listener = Listener::prepare(&mut command, &sites, callbacks)?;
+        let listener = Listener::prepare_session(
+            &mut command,
+            &sites,
+            HostSession {
+                callbacks,
+                ..Default::default()
+            },
+        )?;
         let mut child = command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -135,7 +142,7 @@ fn installed_finite_runner_calls_a_native_host_without_chat_or_flow_sources() {
             }
         };
         let output = child.wait_with_output().unwrap();
-        drop(server);
+        server.finish()?;
         assert!(reported.try_recv().is_err());
         Ok::<_, mf_runtime::callback::CallbackError>(output)
     };
