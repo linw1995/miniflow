@@ -409,21 +409,20 @@ static calls and loop/iteration bodies, not tool values, routed copies, or callb
 Multiple sites with the same name have no implicit winner. Embedders install `HostCallback` values
 with `NodeRegistry::bind_callbacks`; no callback is a JSON startup argument.
 
-A runner with manifest `2026-11-27` works standalone. Without a callback grant, `./flow` and
-`mf run ./flow` use the local bodies and do not open a callback socket. Both disable stdin and
+A runner with manifest `2026-11-27` works standalone. Without any grant, `./flow` and
+`mf run ./flow` use the local bodies and do not open a socket. Both disable stdin and
 publish only selected business JSON on stdout (one object or ordered JSON Lines). Pass startup
 parameters or use file sources; diagnostics use stderr. Telemetry uses its separate OTLP endpoint.
 
-On Linux and macOS, a host granting callbacks creates a Unix stream listener in a private directory
+On Linux and macOS, a host granting callbacks or I/O creates a Unix stream listener in a private directory
 and sets `MF_RUNNER_RPC_V1` for its immediate child to a JSON object such as
 `{"parent":1234,"socket":"/tmp/mf-rpc-example/rpc","bindings":["lookup"]}`. `parent` is the
-launcher's PID. All names must be unique and declared; isolated Tasks cannot receive a grant.
+launcher's PID. All binding names must be unique and declared; isolated Tasks cannot receive callback bindings.
 The runner connects as the client before provider construction. The host checks the kernel-reported
 peer PID against its launched child and removes the listener after accepting that connection.
 Nested executables do not inherit the grant. Normal CLI launches clear any ambient grant.
 
-Only requests and responses travel on this socket, as LF-terminated UTF-8 JSON. Direction determines
-the schema; there is no `type` discriminator, handshake, output, event, cancel, or completion frame.
+Callback-only launches retain the original LF-terminated UTF-8 request and response protocol.
 For example, the runner writes `{"id":1,"binding":"lookup","args":{"values":{"query.key":"build_id"}}}`
 and the host replies `{"id":1,"value":{"values":{"value":"b42"}}}`. Calls are serial, with one
 shared sequence starting at 1 per connection. Both envelopes preserve sensitivity using optional
@@ -431,6 +430,36 @@ shared sequence starting at 1 per connection. Both envelopes preserve sensitivit
 cannot cross the socket. Each message is bounded to 2 MiB including LF. A broken granted connection,
 malformed message, wrong ID, or failed handler fails the invocation without fallback or replay.
 A host delivery receipt means the complete response was written, not that the workflow committed.
+
+### Optional hosted I/O
+
+A host may independently grant `io.inputs`, `io.output`, or `io.diagnostics` on that same connection,
+with or without callbacks. Omitted flags are false. Values and handler implementations never go in
+`MF_RUNNER_RPC_V1`. Rebuild a callback-only runner before granting I/O: older implementations reject
+unknown grant fields rather than switching transports. File sources, provider environment bindings,
+OTLP, and process exit status are unchanged.
+
+| Capability | Not granted | Granted |
+| --- | --- | --- |
+| Startup inputs | Named arguments, `--inputs`, or `--inputs-file` | The runner pulls `{"get_inputs":{}}` once, before provider construction; the host replies `{"inputs":{"values":{"params.model":"example"}}}`. No argument file is needed. |
+| Business outputs | One JSON object or live JSON Lines on stdout | One `{"output":{...}}` per selected record, including a finite result. No copy on stdout. |
+| Runner diagnostics | stderr | `{"diagnostic":{"level":"warning","message":"..."}}` or level `error`. Raw plugin output, panics, early or interrupted launches, and transport failures can still write stderr. |
+| Invocation callback | Authored local body | A declared finite Call requests its bound handler and waits for the matching response. |
+
+An input grant is exclusive with every CLI business-input transport, even an empty `--inputs={}`.
+The same schema, environment/default resolution, 1 MiB input budget and stdin rejection apply;
+startup and callback arguments support the same `private` paths. Business output values have the
+same JSON representation as stdout, not native privacy labels. For example, a chat consumer sees
+`{"output":{"answer":{"text":"Hi","model_call_id":"m1"}}}` and later an `output` carrying `append`.
+Neither is a callback, a model-context commit, or an OTLP record.
+
+Consumers run in wire order. A slow consumer backpressures the writer; events do not consume callback
+IDs or require per-record responses. Control frames are limited to 2 MiB and output frames to 32 MiB,
+including LF. With output or diagnostics granted, the runner ends the exchange with `{"flush":{}}`;
+the host replies `{"flushed":true}` only after all prior events have been accepted. This one drain
+receipt prevents child exit racing a delayed or failed sink. EOF alone is not a receipt. The host
+still checks process status and its application contract. Failed deliveries never retry or fall back
+to another transport. See [embedding](embedding.md) for the host API.
 
 ### Supply an already-built runner
 

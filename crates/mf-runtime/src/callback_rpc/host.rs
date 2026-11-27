@@ -1,13 +1,13 @@
 //! A private callback listener for exactly one supervised child process.
 
-use super::{Grant, LAUNCH_ENV, serve};
+use super::{Grant, HostSession, LAUNCH_ENV, dispatch};
 use crate::{
     StreamCancellation,
     callback::{
         CallbackError, CallbackSites, CodecSnafu, HostCallbacks, ProtocolSnafu, TransportSnafu,
     },
 };
-use snafu::{ResultExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 use std::{
     fs::Permissions,
     io,
@@ -23,7 +23,7 @@ use std::{
 pub struct Listener {
     directory: tempfile::TempDir,
     socket: UnixListener,
-    callbacks: HostCallbacks,
+    session: HostSession,
 }
 
 impl Listener {
@@ -33,12 +33,35 @@ impl Listener {
         sites: &CallbackSites,
         callbacks: HostCallbacks,
     ) -> Result<Option<Self>, CallbackError> {
+        Self::prepare_session(
+            command,
+            sites,
+            HostSession {
+                callbacks,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Prepare only the requested transports. Input values stay in process memory until PID authentication.
+    pub fn prepare_session(
+        command: &mut Command,
+        sites: &CallbackSites,
+        session: HostSession,
+    ) -> Result<Option<Self>, CallbackError> {
         command.env_remove(LAUNCH_ENV);
-        if callbacks.is_empty() {
+        let io = session.grant();
+        if session.callbacks.is_empty() && io.is_empty() {
             return Ok(None);
         }
+        if let Some(inputs) = &session.inputs {
+            inputs.check_encoded_size()?;
+        }
         ensure!(
-            callbacks.keys().all(|name| sites.contains_key(name)),
+            session
+                .callbacks
+                .keys()
+                .all(|name| sites.contains_key(name)),
             ProtocolSnafu {
                 reason: "callback not declared by the workflow"
             }
@@ -55,7 +78,8 @@ impl Listener {
         let grant = Grant {
             socket: path,
             parent: std::process::id(),
-            bindings: callbacks.keys().cloned().collect(),
+            bindings: session.callbacks.keys().cloned().collect(),
+            io,
         };
         command.env(
             LAUNCH_ENV,
@@ -64,7 +88,7 @@ impl Listener {
         Ok(Some(Self {
             directory,
             socket,
-            callbacks,
+            session,
         }))
     }
 
@@ -77,14 +101,17 @@ impl Listener {
     ) -> Result<Server, CallbackError> {
         let cancellation = parent.child();
         let cancel = cancellation.clone();
+        let mut completed = self.session.grant().is_empty();
         let worker = thread::Builder::new()
-            .name("mf-callback-rpc".into())
+            .name("mf-runner-rpc".into())
             .spawn(move || {
-                if let Err(error) = self.serve(pid, &cancel)
+                if let Err(error) = self.serve(pid, &cancel, &mut completed)
                     && cancel.failure().is_none()
                 {
                     failed(error);
+                    return false;
                 }
+                completed
             })
             .context(TransportSnafu)?;
         Ok(Server {
@@ -93,7 +120,12 @@ impl Listener {
         })
     }
 
-    fn serve(self, pid: u32, cancel: &StreamCancellation) -> Result<(), CallbackError> {
+    fn serve(
+        self,
+        pid: u32,
+        cancel: &StreamCancellation,
+        completed: &mut bool,
+    ) -> Result<(), CallbackError> {
         while cancel.failure().is_none() {
             match self.socket.accept() {
                 Ok((stream, _)) => {
@@ -103,7 +135,7 @@ impl Listener {
                     // The grant cannot be reconnected to, even by descendants of the runner.
                     drop(self.socket);
                     drop(self.directory);
-                    return serve(stream, &self.callbacks, cancel);
+                    return dispatch(stream, self.session, cancel, completed);
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(5))
@@ -133,10 +165,32 @@ fn peer_pid(stream: &UnixStream) -> io::Result<u32> {
 
 pub struct Server {
     cancellation: StreamCancellation,
-    worker: Option<JoinHandle<()>>,
+    worker: Option<JoinHandle<bool>>,
 }
 
 impl Server {
+    /// After reaping the child, reject even a zero exit if its granted event session never drained.
+    /// Transport and handler errors are also reported to the supervisor's failure callback.
+    pub fn finish(mut self) -> Result<(), CallbackError> {
+        self.cancel();
+        let completed = self
+            .worker
+            .take()
+            .expect("RPC server owns its worker")
+            .join()
+            .ok()
+            .context(ProtocolSnafu {
+                reason: "runner RPC worker panicked",
+            })?;
+        ensure!(
+            completed,
+            ProtocolSnafu {
+                reason: "runner exited without completing hosted I/O"
+            }
+        );
+        Ok(())
+    }
+
     pub fn cancel(&self) {
         self.cancellation.cancel(
             crate::StreamExecutionSnafu {

@@ -32,7 +32,8 @@ ordered JSON Lines); diagnostics stay on stderr.
 Neither `producer | ./flow` nor `producer | mf run ./flow` supplies workflow data.
 Pass startup arguments or an explicit source file instead. Recompile older runners before running them:
 `mf run` requires a current embedded manifest and will not launch a script or fall back to inherited stdio.
-An embedding host can bind declared Calls through [local callback RPC](workflows.md#host-callback-rpc);
+An embedding host can independently supply startup inputs, consume output records or structured
+diagnostics, and bind declared Calls through [local RPC](workflows.md#optional-hosted-io);
 standalone execution does not start a listener or perform a handshake.
 Generated Unix runners handle SIGINT and SIGTERM by cancelling the active run, including
 streaming and `--node` execution. Cooperative nodes can release their resources before

@@ -41,6 +41,74 @@ fn empty_grants_clear_inherited_authority_and_unknown_sites_fail_before_spawn() 
 }
 
 #[test]
+fn hosted_inputs_are_bounded_before_spawn_and_absent_from_the_environment() {
+    use mf_runtime::{WorkflowArguments, callback_rpc::HostSession};
+    let mut command = Command::new("true");
+    let prepare = |command: &mut Command, value: String| {
+        Listener::prepare_session(
+            command,
+            &Default::default(),
+            HostSession {
+                inputs: Some(WorkflowArguments([("key".into(), value.into())].into())),
+                ..Default::default()
+            },
+        )
+    };
+    let listener = prepare(&mut command, "not-in-the-launch-grant".into())
+        .unwrap()
+        .unwrap();
+    let config = grant(&command);
+    assert!(
+        config.io.inputs
+            && !config.io.output
+            && !config.io.diagnostics
+            && config.bindings.is_empty()
+    );
+    assert!(
+        !serde_json::to_string(&config)
+            .unwrap()
+            .contains("not-in-the-launch-grant")
+    );
+    drop(listener);
+    let mut ignored = Command::new("true");
+    let listener = Listener::prepare_session(
+        &mut ignored,
+        &Default::default(),
+        HostSession {
+            output: Some(Box::new(|_, _| unreachable!())),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let mut child = ignored.spawn().unwrap();
+    let server = listener
+        .start(child.id(), &Default::default(), |_| {})
+        .unwrap();
+    assert!(child.wait().unwrap().success());
+    assert!(
+        server
+            .finish()
+            .unwrap_err()
+            .to_string()
+            .contains("without completing hosted I/O")
+    );
+    assert!(!config.socket.parent().unwrap().exists());
+    assert!(matches!(
+        prepare(
+            &mut command,
+            "x".repeat(mf_runtime::MAX_WORKFLOW_INPUT_BYTES)
+        ),
+        Err(mf_runtime::callback::CallbackError::Inputs { .. })
+    ));
+    assert!(
+        command
+            .get_envs()
+            .any(|(name, value)| name == LAUNCH_ENV && value.is_none())
+    );
+}
+
+#[test]
 fn the_runtime_authenticates_the_launched_pid_and_owns_the_listener_lifetime() {
     let sites = [("lookup".into(), vec!["site".into()])].into();
     let (sent, received) = mpsc::channel();

@@ -630,7 +630,7 @@ Generated runners SHALL retain generated node preparation and fixed port binding
 
 ### Requirement: Deliver streaming results without waiting for EOF
 
-Each selected stream result SHALL be flushed as one ordinary JSON line, directly or through `mf run`, without building a final aggregate.
+By default each selected stream result SHALL be flushed as one ordinary JSON line, directly or through `mf run`, without building a final aggregate.
 Slow output MUST apply message-count backpressure, and output failure MUST fail execution. In stream mode,
 runner transport MUST reserve result stdout and direct plugin stdout diagnostics to stderr, including
 construction diagnostics.
@@ -1004,8 +1004,8 @@ selected build options, successful elapsed time, and retained generated-project 
 The runtime SHALL provide both sides of invocation-scoped callback RPC without a terminal dependency.
 A launcher granting callbacks SHALL use a private Unix listener for its launched runner. Only that child
 may dispatch uniquely declared bindings. Each LF-terminated request carries an ID, binding and arguments;
-each response carries the matching ID and value. IDs start at one and are serial. The socket MUST NOT
-carry business outputs, telemetry, or unsolicited messages.
+each response carries the matching ID and value. IDs start at one and are serial. Callback authority MUST NOT
+implicitly grant business I/O. Telemetry and unsolicited host input MUST NOT travel on the connection.
 
 #### Scenario: Host a runner without a terminal
 
@@ -1022,6 +1022,29 @@ carry business outputs, telemetry, or unsolicited messages.
 
 - **WHEN** a grant names an unknown binding or an isolated Task, or its socket is unavailable
 - **THEN** the runner fails without starting any workflow node
+
+### Requirement: Grant hosted runner I/O independently
+
+The runtime SHALL let the authenticated host independently supply startup inputs, consume ordered business records,
+and consume structured runner diagnostics. None SHALL require a callback site or grant authority to replace one.
+Raw stderr SHALL remain available. The supervisor MUST check transport failures and process exit before settlement.
+
+#### Scenario: Pull startup values without an argument file
+
+- **WHEN** a host grants startup inputs, including an explicitly empty map
+- **THEN** the launched runner pulls them exactly once before provider construction, preserving sensitivity and enforcing the standard input budget and schema
+- **AND** mixing the grant with CLI business inputs fails before reading an argument file or executing a node
+
+#### Scenario: Consume live output without per-record round trips
+
+- **WHEN** a host grants business output and the runner produces an increment before the final result
+- **THEN** the host receives it live and in wire order, subject to backpressure, without an individual acknowledgement or stdout copy
+- **AND** callbacks retain their own request IDs; the final event drain is confirmed before a successful child exit
+
+#### Scenario: Reject a failed drain
+
+- **WHEN** a granted consumer rejects a record, a frame is incomplete, or the peer disconnects without the drain receipt
+- **THEN** the invocation fails without rerouting, retrying, or replaying any record
 
 ### Requirement: Separate definition resources from inspection projections
 

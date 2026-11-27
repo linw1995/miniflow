@@ -395,12 +395,33 @@ let server = match listener.map(|l| l.start(child.id(), &cancellation, report_er
     }
 };
 let status = child.wait()?;
-drop(server);
+if let Some(server) = server { server.finish()?; }
 ```
 
 Keep the server alive for the run. Route `report_error` to the supervisor so an RPC failure cannot
 be reported as success. An empty binding set clears any inherited grant and creates no listener.
 Standalone runners do not enable `callback-host`.
+
+Use `Listener::prepare_session` instead to take over selected I/O. The listener derives the grant
+from the supplied capabilities; `Some(WorkflowArguments::default())` explicitly supplies empty
+inputs, whereas `None` leaves CLI input resolution intact. For example, use the same spawn/start
+sequence above with this listener (and no `--inputs-file`):
+
+```rust
+use mf_runtime::callback_rpc::HostSession;
+
+let session = HostSession {
+    inputs: Some(arguments),
+    output: Some(Box::new(move |record, cancellation| consume(record, cancellation))),
+    ..Default::default()
+};
+let listener = Listener::prepare_session(&mut command, &manifest.descriptor.callbacks, session)?;
+```
+
+`output` receives selected record maps, not raw socket bytes. The optional `diagnostics` consumer
+receives `RunnerDiagnostic` values. Both run synchronously on the serving thread; a bounded sink may
+wait for capacity but must honor cancellation and never wait for child exit. Return an error to fail
+the invocation. Keep draining piped stderr independently for unstructured process diagnostics.
 
 ## Forwarding finite child emissions
 
