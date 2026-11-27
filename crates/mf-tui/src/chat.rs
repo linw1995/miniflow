@@ -80,6 +80,7 @@ pub enum ChatRunError {
 pub struct ChatOptions {
     pub database_path: PathBuf,
     pub profile: String,
+    pub host_io: bool,
     pub run: RunOptions,
 }
 
@@ -1141,6 +1142,7 @@ impl ExternalBackend {
             arguments: context.workflow_arguments(),
             verbose: self.launch.options.run.verbose,
             snapshots: true,
+            host_io: self.launch.options.host_io,
         }
         .run_with_callbacks(
             callbacks,
@@ -1202,7 +1204,7 @@ impl ExternalBackend {
         )?;
         let mut outcome = completion.outcome;
         let mut protocol_failure = completion.protocol_failure;
-        if self.launch.contract.streaming {
+        if self.launch.contract.streaming || self.launch.options.host_io {
             outcome.stdout = decoder
                 .result()
                 .map(serde_json::to_vec)

@@ -43,6 +43,7 @@ fn chat_options(directory: &Path) -> ChatOptions {
     ChatOptions {
         database_path: directory.join("chat.sqlite"),
         profile: "default".into(),
+        host_io: false,
         run: Default::default(),
     }
 }
@@ -619,7 +620,7 @@ fn live_launch(directory: &Path, mode: &str) -> (ChatLaunch, std::path::PathBuf)
     ]);
     let script = format!(
         r#"#!/usr/bin/env python3
-import json, os, sys, time
+import json, os, socket, sys, time
 records = json.loads({records:?})
 mode = {mode:?}
 if mode == 'flood':
@@ -636,15 +637,41 @@ if mode == 'null': records.append({{'append': None}})
 if mode == 'malformed': records.append({{'append': {{'status': 'succeeded', 'messages': None, 'usages': []}}}})
 split = 0 if mode == 'empty' else 1
 assert sys.stdin.read() == ''
-def emit(record): print(json.dumps(record), flush=True)
+grant = json.loads(os.environ.get('MF_RUNNER_RPC_V1', '{{}}'))
+wire = None
+if grant:
+    assert grant['io'] == {{'inputs': True, 'output': True, 'diagnostics': True}} and not grant['bindings']
+    assert not sys.argv[1:]
+    sock = socket.socket(socket.AF_UNIX)
+    sock.connect(grant['socket'])
+    wire = sock.makefile('rwb', buffering=0)
+    def send(frame): sock.sendall(json.dumps(frame).encode() + b'\n')
+    send({{'get_inputs': {{}}}})
+    assert json.loads(wire.readline())['inputs']['values']['start.messages'][-1]['content'] == 'hello'
+    send({{'diagnostic': {{'level':'warning', 'message':'fixture warning'}}}})
+    print('process diagnostic', file=sys.stderr, flush=True)
+def emit(record):
+    if wire: send({{'output': record}})
+    else: print(json.dumps(record), flush=True)
+def finish():
+    if wire:
+        send({{'flush': {{}}}})
+        assert json.loads(wire.readline()) == {{'flushed': True}}
 for record in records[:split]: emit(record)
 if mode in ('gated', 'gated_tool_call'):
     while not os.path.exists({gate:?}): time.sleep(0.01)
-if mode == 'prefix': sys.exit(2)
+if mode == 'prefix':
+    finish()
+    sys.exit(2)
 for record in records[split:]: emit(record)
 if mode == 'late':
-    print('late diagnostic', flush=True)
+    if wire:
+        send({{'diagnostic': {{'level':'error', 'message':'late diagnostic'}}}})
+        sock.sendall(b'invalid\n')
+        assert not wire.readline()
+    else: print('late diagnostic', flush=True)
     sys.exit(13)
+finish()
 "#,
         records = serde_json::to_string(&records).unwrap(),
         gate = gate.to_str().unwrap()
@@ -654,10 +681,20 @@ if mode == 'late':
 
 #[test]
 fn executable_live_previews_arrive_before_authoritative_settlement() {
+    check_preview_before_settlement(false);
+}
+
+#[test]
+fn hosted_chat_presents_previews_without_settling_before_exit() {
+    check_preview_before_settlement(true);
+}
+
+fn check_preview_before_settlement(host_io: bool) {
     for (mode, expected_fragment) in [("gated", "provisional"), ("gated_tool_call", "{\"query\":")]
     {
         let root = tempfile::tempdir().unwrap();
-        let (launch, gate) = live_launch(root.path(), mode);
+        let (mut launch, gate) = live_launch(root.path(), mode);
+        launch.options.host_io = host_io;
         let controller = ChatController::open(launch).unwrap();
         controller
             .send(ChatCommand::Submit {
@@ -695,7 +732,17 @@ fn executable_live_previews_arrive_before_authoritative_settlement() {
         );
         fs::write(gate, "release").unwrap();
         loop {
-            if let ChatEvent::Finished { resolution, .. } = next(&controller) {
+            if let ChatEvent::Finished {
+                resolution, stderr, ..
+            } = next(&controller)
+            {
+                if host_io {
+                    assert!(
+                        stderr.contains("warning: fixture warning")
+                            && stderr.contains("process diagnostic"),
+                        "{stderr}"
+                    );
+                }
                 let CompletionState::Committed(completion) = resolution.unwrap().state else {
                     panic!("expected saved final")
                 };
@@ -709,9 +756,19 @@ fn executable_live_previews_arrive_before_authoritative_settlement() {
 
 #[test]
 fn native_failures_keep_complete_replies_for_save_only_and_never_save_prefixes() {
+    check_save_only(false);
+}
+
+#[test]
+fn failed_host_sessions_only_offer_complete_replies_for_save_only() {
+    check_save_only(true);
+}
+
+fn check_save_only(host_io: bool) {
     for mode in ["late", "prefix", "empty"] {
         let root = tempfile::tempdir().unwrap();
-        let (launch, _) = live_launch(root.path(), mode);
+        let (mut launch, _) = live_launch(root.path(), mode);
+        launch.options.host_io = host_io;
         let controller = ChatController::open(launch).unwrap();
         controller
             .send(ChatCommand::Submit {

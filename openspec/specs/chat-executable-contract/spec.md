@@ -204,7 +204,21 @@ state SHALL retain precedence.
 
 ### Requirement: Capture native output independently of rendering
 
-Executable supervision SHALL parse native JSONL and drain stdout independently of render refresh. It SHALL keep bounded pending records and the final recovery result rather than spool all preview history. Duplicate keys and malformed records SHALL preserve typed capture causes. Caller cancellation SHALL interrupt a blocked output consumer.
+By default the host SHALL drain and decode stdout independently of rendering.
+With `mf run --chat --host-io` it SHALL supply startup arguments and receive finite or streamed output on the authenticated runner session, without an argument file or stdout fallback.
+It SHALL consume structured runner diagnostics while still capturing raw stderr separately from OTLP. Selecting a transport SHALL NOT grant callbacks.
+
+Both modes SHALL bound pending records, retain the final recovery result instead of all preview history, and preserve typed capture errors. Cancellation SHALL interrupt a blocked consumer.
+
+#### Scenario: A hosted turn without a reply callback
+
+- **WHEN** its runner emits an answer fragment, then a valid terminal result and completes the event drain
+- **THEN** the fragment can be presented before exit and only the validated terminal result can settle the turn after successful process completion
+
+#### Scenario: Child ignores an explicit hosted I/O grant
+
+- **WHEN** it prints a result on stdout and exits zero without completing the granted session
+- **THEN** the host reports an incomplete invocation and does not accept the printed result
 
 #### Scenario: End within a record
 

@@ -3,7 +3,10 @@
 mod pips;
 use mf_runtime::{
     callback::{CallbackSites, HostCallbacks},
-    callback_rpc::host::{Listener, Server},
+    callback_rpc::{
+        HostSession,
+        host::{Listener, Server},
+    },
 };
 
 use pips::{PipGrid, PipScene, PipSurface};
@@ -460,7 +463,7 @@ pub struct LocalOutcome {
 
 #[derive(Debug, Snafu)]
 pub enum CaptureFailure {
-    #[snafu(display("runner callback failed: {source}"))]
+    #[snafu(display("runner host RPC failed: {source}"))]
     Callback {
         #[snafu(source(from(mf_runtime::callback::CallbackError, Arc::new)))]
         source: Arc<mf_runtime::callback::CallbackError>,
@@ -532,7 +535,14 @@ struct StreamCaptureState {
     sender: std::sync::mpsc::SyncSender<mf_runtime::NodeValues>,
     cancellation: mf_runtime::StreamCancellation,
 }
+pub enum InvocationIo {
+    Standard(crate::runner::RunnerOutput),
+    /// No argument file or stdout decoder: the consumer receives native business records.
+    Hosted(WorkflowArguments),
+}
+
 pub struct LocalRun {
+    cancellation: mf_runtime::StreamCancellation,
     records: Option<std::sync::mpsc::Receiver<mf_runtime::NodeValues>>,
     child: ChildGuard,
     rpc: Option<Server>,
@@ -582,47 +592,90 @@ impl LocalRun {
     }
 
     pub fn start_with_callbacks(
-        mut command: Command,
+        command: Command,
         description: WorkflowDescription,
         run_id: RunId,
         cancellation: mf_runtime::StreamCancellation,
         bindings: Option<(&CallbackSites, HostCallbacks)>,
         output: crate::runner::RunnerOutput,
     ) -> Result<Self, RunError> {
+        Self::start_invocation(
+            command,
+            description,
+            run_id,
+            cancellation,
+            bindings,
+            InvocationIo::Standard(output),
+        )
+    }
+
+    pub fn start_invocation(
+        mut command: Command,
+        description: WorkflowDescription,
+        run_id: RunId,
+        cancellation: mf_runtime::StreamCancellation,
+        bindings: Option<(&CallbackSites, HostCallbacks)>,
+        io: InvocationIo,
+    ) -> Result<Self, RunError> {
+        use crate::runner::RunnerOutput;
         if let Some(error) = cancellation.failure() {
             return Err(error.into());
         }
-        let (stdout_limit, stream) = match output {
-            crate::runner::RunnerOutput::Finite { limit } => (limit, None),
-            crate::runner::RunnerOutput::Records => (MAX_STDOUT_BYTES, Some(cancellation.clone())),
+        let (spool_limit, inputs) = match io {
+            InvocationIo::Standard(RunnerOutput::Finite { limit }) => (Some(limit), None),
+            InvocationIo::Standard(RunnerOutput::Records) => (None, None),
+            InvocationIo::Hosted(inputs) => (None, Some(inputs)),
         };
-        let (records, stream) = stream
-            .map(|cancellation| {
-                let (sender, receiver) = std::sync::mpsc::sync_channel(64);
-                (
-                    receiver,
-                    StreamCaptureState {
-                        decoder: NativeOutputDecoder::default(),
-                        sender,
-                        cancellation,
-                    },
-                )
-            })
-            .unzip();
+        let hosted = inputs.is_some();
+        let capture = Arc::new(Mutex::new(Capture::new(spool_limit).context(SpoolSnafu)?));
         let empty = CallbackSites::new();
         let (sites, callbacks) = bindings.unwrap_or_else(|| (&empty, HostCallbacks::new()));
-        let listener = Listener::prepare(&mut command, sites, callbacks)?;
+        let mut session = HostSession {
+            callbacks,
+            inputs,
+            ..Default::default()
+        };
+        let (sender, records) = spool_limit
+            .is_none()
+            .then(|| std::sync::mpsc::sync_channel(64))
+            .unzip();
+        let mut stream = None;
+        if let Some(sender) = sender {
+            if hosted {
+                session.output = Some(Box::new(move |record, cancel| {
+                    send_record(&sender, record, cancel, || false)
+                        .boxed()
+                        .context(mf_runtime::callback::HandlerSnafu)
+                }));
+                let diagnostics = capture.clone();
+                session.diagnostics = Some(Box::new(move |value, _| {
+                    let level = match value.level {
+                        mf_runtime::DiagnosticLevel::Warning => "warning",
+                        mf_runtime::DiagnosticLevel::Error => "error",
+                    };
+                    diagnostics
+                        .lock()
+                        .unwrap()
+                        .store_stderr(format!("{level}: {}\n", value.message).as_bytes());
+                    Ok(())
+                }));
+            } else {
+                stream = Some(StreamCaptureState {
+                    decoder: Default::default(),
+                    sender,
+                    cancellation: cancellation.clone(),
+                });
+            }
+        }
+        let listener = Listener::prepare_session(&mut command, sites, session)?;
         let receiver = LoopbackReceiver::bind(description, run_id).context(ReceiverSnafu)?;
-        let capture = Arc::new(Mutex::new(Capture::new().context(SpoolSnafu)?));
-        capture.lock().expect("capture lock was not poisoned").limit =
-            stdout_limit.min(MAX_STDOUT_BYTES);
-        capture
-            .lock()
-            .expect("capture lock was not poisoned")
-            .record_mode = stream.is_some();
         command
             .stdin(Stdio::null())
-            .stdout(Stdio::piped())
+            .stdout(if hosted {
+                Stdio::null()
+            } else {
+                Stdio::piped()
+            })
             .stderr(Stdio::piped());
         for (name, _) in env::vars_os() {
             if name.to_string_lossy().starts_with("OTEL_EXPORTER_OTLP_") {
@@ -661,6 +714,7 @@ impl LocalRun {
                 operation: "attach workflow output pipes",
             })?;
         Ok(Self {
+            cancellation,
             records,
             child,
             rpc,
@@ -710,7 +764,7 @@ impl LocalRun {
         if self.finished {
             return Ok(None);
         }
-        if self.capture.cancelled() && self.interrupted_at.is_none() {
+        if self.cancellation.failure().is_some() && self.interrupted_at.is_none() {
             self.cancel();
         }
         if self.exited.is_none()
@@ -757,35 +811,36 @@ impl LocalRun {
         // Reap descendants even when they have already closed their inherited streams.
         let _ = self.child.child.start_kill();
         self.capture.stop();
-        self.rpc.take();
+        // Do not hold the capture lock while joining a worker that may report a failure.
+        let rpc_error = self.rpc.take().and_then(|server| {
+            if status.success() && self.interrupted_at.is_none() {
+                server.finish().err()
+            } else {
+                None
+            }
+        });
         let mut capture = self
             .capture
             .capture
             .lock()
             .expect("capture lock was not poisoned");
+        if let Some(error) = rpc_error {
+            capture.record_failure(CallbackSnafu.into_error(error));
+        }
         if capture.stdout.is_some() {
             capture.record_failure(OpenPipeSnafu.build());
         }
         capture.stdout = None;
         capture.stderr = None;
-        let stdout = if capture.record_mode {
-            Vec::new()
-        } else {
-            capture
-                .spool
-                .seek(SeekFrom::Start(0))
-                .context(SuperviseSnafu {
-                    operation: "seek captured workflow output",
-                })?;
-            let mut stdout = Vec::new();
-            capture
-                .spool
-                .read_to_end(&mut stdout)
-                .context(SuperviseSnafu {
-                    operation: "read captured workflow output",
-                })?;
-            stdout
-        };
+        let mut stdout = Vec::new();
+        if let Some(spool) = &mut capture.spool {
+            spool.seek(SeekFrom::Start(0)).context(SuperviseSnafu {
+                operation: "seek captured workflow output",
+            })?;
+            spool.read_to_end(&mut stdout).context(SuperviseSnafu {
+                operation: "read captured workflow output",
+            })?;
+        }
         self.receiver
             .finish_with_interruption(self.interrupted_at.is_some());
         let outcome = LocalOutcome {
@@ -905,14 +960,13 @@ impl Drop for ChildGuard {
 struct Capture {
     stdout: Option<std::process::ChildStdout>,
     stderr: Option<std::process::ChildStderr>,
-    spool: File,
+    spool: Option<File>,
     written: u64,
     limit: u64,
     stderr_tail: VecDeque<u8>,
     stderr_dropped: u64,
     error: Option<String>,
     failure: Option<Arc<CaptureFailure>>,
-    record_mode: bool,
     record_bytes: Vec<u8>,
 }
 
@@ -925,11 +979,30 @@ pub struct CaptureView {
     pub error: Option<String>,
 }
 
+fn send_record(
+    sender: &std::sync::mpsc::SyncSender<mf_runtime::NodeValues>,
+    mut values: mf_runtime::NodeValues,
+    cancellation: &mf_runtime::StreamCancellation,
+    stopped: impl Fn() -> bool,
+) -> Result<(), CaptureFailure> {
+    loop {
+        ensure!(!stopped(), OutputStoppedSnafu);
+        if let Some(error) = cancellation.failure() {
+            return Err(error).context(OutputCancelledSnafu);
+        }
+        match sender.try_send(values) {
+            Ok(()) => return Ok(()),
+            Err(std::sync::mpsc::TrySendError::Full(pending)) => values = pending,
+            Err(error) => return Err(error).context(OutputDeliverySnafu),
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 struct CaptureWorker {
     capture: Arc<Mutex<Capture>>,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
-    cancellation: Option<mf_runtime::StreamCancellation>,
     record_processing: Arc<AtomicBool>,
     record_mode: bool,
     progress: Arc<Mutex<Instant>>,
@@ -947,7 +1020,6 @@ impl CaptureWorker {
         let stop = Arc::new(AtomicBool::new(false));
         let processing = Arc::new(AtomicBool::new(false));
         let progress = Arc::new(Mutex::new(Instant::now()));
-        let cancellation = stream.as_ref().map(|stream| stream.cancellation.clone());
         let record_mode = stream.is_some();
         let shared_capture = Arc::clone(&capture);
         let shared_stop = Arc::clone(&stop);
@@ -976,25 +1048,12 @@ impl CaptureWorker {
                 };
                 if process_records {
                     let stream = stream.as_mut().expect("stream codec exists");
-                    let cancellation = stream.cancellation.clone();
-                    let mut emit = |mut values| -> Result<(), CaptureFailure> {
-                        loop {
-                            ensure!(!shared_stop.load(Ordering::Relaxed), OutputStoppedSnafu);
-                            if let Some(error) = cancellation.failure() {
-                                return Err(error).context(OutputCancelledSnafu);
-                            }
-                            match stream.sender.try_send(values) {
-                                Ok(()) => {
-                                    *shared_progress.lock().unwrap() = Instant::now();
-                                    return Ok(());
-                                }
-                                Err(std::sync::mpsc::TrySendError::Full(pending)) => {
-                                    values = pending
-                                }
-                                Err(error) => return Err(error).context(OutputDeliverySnafu),
-                            }
-                            thread::sleep(Duration::from_millis(10));
-                        }
+                    let mut emit = |values| -> Result<(), CaptureFailure> {
+                        send_record(&stream.sender, values, &stream.cancellation, || {
+                            shared_stop.load(Ordering::Relaxed)
+                        })?;
+                        *shared_progress.lock().unwrap() = Instant::now();
+                        Ok(())
                     };
                     let mut result = stream.decoder.feed(&bytes, &mut emit);
                     if result.is_ok() && stdout_closed {
@@ -1025,7 +1084,6 @@ impl CaptureWorker {
             capture,
             stop,
             worker: Some(worker),
-            cancellation,
             record_processing: processing,
             record_mode,
             progress,
@@ -1034,12 +1092,6 @@ impl CaptureWorker {
 
     fn cancel(&self) {
         self.stop.store(true, Ordering::Relaxed);
-    }
-
-    fn cancelled(&self) -> bool {
-        self.cancellation
-            .as_ref()
-            .is_some_and(|cancellation| cancellation.failure().is_some())
     }
 
     fn processing(&self) -> bool {
@@ -1087,28 +1139,28 @@ impl Capture {
         }
     }
 
-    fn new() -> io::Result<Self> {
+    fn new(spool_limit: Option<u64>) -> io::Result<Self> {
         Ok(Self {
             stdout: None,
             stderr: None,
-            spool: tempfile::tempfile()?,
+            spool: spool_limit.map(|_| tempfile::tempfile()).transpose()?,
             written: 0,
-            limit: MAX_STDOUT_BYTES,
+            limit: spool_limit.unwrap_or(0).min(MAX_STDOUT_BYTES),
             stderr_tail: VecDeque::new(),
             stderr_dropped: 0,
             error: None,
             failure: None,
-            record_mode: false,
             record_bytes: Vec::new(),
         })
     }
 
     fn attach(&mut self, child: &mut Box<dyn ChildWrapper>) -> io::Result<()> {
-        let stdout = child.stdout().take().expect("stdout was piped");
+        self.stdout = child.stdout().take();
+        if let Some(stdout) = &self.stdout {
+            set_nonblocking(stdout)?;
+        }
         let stderr = child.stderr().take().expect("stderr was piped");
-        set_nonblocking(&stdout)?;
         set_nonblocking(&stderr)?;
-        self.stdout = Some(stdout);
         self.stderr = Some(stderr);
         Ok(())
     }
@@ -1159,12 +1211,12 @@ impl Capture {
         if self.error.is_some() {
             return;
         }
-        if self.record_mode {
+        let Some(spool) = &mut self.spool else {
             self.record_bytes.extend_from_slice(bytes);
             return;
-        }
+        };
         let allowed = (self.limit - self.written).min(bytes.len() as u64) as usize;
-        if let Err(error) = self.spool.write_all(&bytes[..allowed]) {
+        if let Err(error) = spool.write_all(&bytes[..allowed]) {
             self.record_failure(
                 IoSnafu {
                     operation: "spool write",
@@ -3769,6 +3821,77 @@ mod tests {
         assert!(outcome.capture_failure.is_none());
         assert_eq!(run.try_record().unwrap()["value"].as_u64(), Some(2));
         assert!(outcome.stdout.is_empty());
+    }
+
+    #[test]
+    fn hosted_cancellation_releases_the_worker_even_with_an_undrained_record_queue() {
+        let mut command = Command::new("python3");
+        command.arg("-c").arg(
+            r#"
+import json, os, socket, sys
+sock = socket.socket(socket.AF_UNIX)
+sock.connect(json.loads(os.environ['MF_RUNNER_RPC_V1'])['socket'])
+reply = sock.makefile('rb')
+sock.sendall(b'{"get_inputs":{}}\n')
+assert json.loads(reply.readline()) == {'inputs': {'values': {}}}
+sock.sendall(b'{"output":{"value":1}}\n' * 128 + b'{"flush":{}}\n')
+print('waiting for drain', file=sys.stderr, flush=True)
+assert not reply.readline()
+"#,
+        );
+        let cancellation = mf_runtime::StreamCancellation::default();
+        let mut run = LocalRun::start_invocation(
+            command,
+            scope_fixture(),
+            RunId::new(),
+            cancellation.clone(),
+            None,
+            InvocationIo::Hosted(Default::default()),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !run.capture.view().stderr_tail.contains("waiting for drain") {
+            assert!(run.poll().unwrap().is_none() && Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(run.capture.capture.lock().unwrap().spool.is_none());
+        cancellation.cancel(
+            mf_runtime::StreamExecutionSnafu {
+                message: "host stopped",
+            }
+            .build(),
+        );
+        let outcome = wait_for_outcome(&mut run);
+        assert!(outcome.interrupted && outcome.stdout.is_empty());
+    }
+
+    #[test]
+    fn hosted_supervision_rejects_stdout_from_a_child_that_ignores_its_grant() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf '{\"value\":1}'; printf 'raw stderr' >&2"]);
+        let mut run = LocalRun::start_invocation(
+            command,
+            scope_fixture(),
+            RunId::new(),
+            Default::default(),
+            None,
+            InvocationIo::Hosted(Default::default()),
+        )
+        .unwrap();
+        let outcome = wait_for_outcome(&mut run);
+        assert!(outcome.status.success());
+        assert!(matches!(
+            outcome.capture_failure.as_deref(),
+            Some(CaptureFailure::Callback { .. })
+        ));
+        assert!(
+            outcome
+                .capture_error
+                .unwrap()
+                .contains("without completing hosted I/O")
+        );
+        assert!(outcome.stdout.is_empty() && run.try_record().is_err());
+        assert_eq!(outcome.stderr, "raw stderr");
     }
 
     #[test]
@@ -7781,14 +7904,15 @@ mod tests {
 
     #[test]
     fn stdout_spool_limit_preserves_the_available_prefix() {
-        let mut capture = Capture::new().unwrap();
+        let mut capture = Capture::new(Some(MAX_STDOUT_BYTES)).unwrap();
         capture.written = MAX_STDOUT_BYTES - 2;
         capture.store_stdout(&[1, 0, 255, 4]);
         assert_eq!(capture.written, MAX_STDOUT_BYTES);
         assert!(capture.error.as_deref().unwrap().contains("spool limit"));
-        capture.spool.seek(SeekFrom::Start(0)).unwrap();
+        let spool = capture.spool.as_mut().unwrap();
+        spool.seek(SeekFrom::Start(0)).unwrap();
         let mut bytes = Vec::new();
-        capture.spool.read_to_end(&mut bytes).unwrap();
+        spool.read_to_end(&mut bytes).unwrap();
         assert_eq!(bytes, [1, 0]);
     }
 
@@ -7797,8 +7921,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("read-only-spool");
         std::fs::write(&path, []).unwrap();
-        let mut capture = Capture::new().unwrap();
-        capture.spool = File::open(path).unwrap();
+        let mut capture = Capture::new(Some(MAX_STDOUT_BYTES)).unwrap();
+        capture.spool = Some(File::open(path).unwrap());
         capture.store_stdout(b"result");
         assert!(
             capture
@@ -7820,7 +7944,7 @@ mod tests {
             .spawn()
             .unwrap();
         let mut child: Box<dyn ChildWrapper> = Box::new(child);
-        let capture = Arc::new(Mutex::new(Capture::new().unwrap()));
+        let capture = Arc::new(Mutex::new(Capture::new(Some(MAX_STDOUT_BYTES)).unwrap()));
         capture.lock().unwrap().attach(&mut child).unwrap();
         let mut worker = CaptureWorker::start(Arc::clone(&capture));
         let deadline = Instant::now() + Duration::from_secs(5);

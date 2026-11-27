@@ -165,6 +165,15 @@ fn cancelling_before_delivery_restores_steering_as_a_draft_not_as_a_follow_up() 
 
 #[test]
 fn a_chatflow_without_a_reply_callback_queues_separate_turns_without_prefetching() {
+    queued_turns(&[]);
+}
+
+#[test]
+fn hosted_io_does_not_need_a_reply_callback_or_prefetch_queued_turns() {
+    queued_turns(&["--host-io"]);
+}
+
+fn queued_turns(options: &[&str]) {
     let (first, release) = gated(Reply::text("First reply"), String::new());
     let server = Server::start(vec![
         first,
@@ -175,7 +184,7 @@ fn a_chatflow_without_a_reply_callback_queues_separate_turns_without_prefetching
     let root = tempfile::tempdir().unwrap();
     let binary = compiled(root.path(), &server, "chat-flow.json");
     let path = root.path().join("chat.sqlite");
-    let mut terminal = ChatTerminal::open(&binary, &path);
+    let mut terminal = ChatTerminal::with_args(&binary, &path, options);
     terminal.wait_for(&["What would you like"]);
     terminal.send(b"Original\x1b\r");
     terminal.wait_for(&["Alt+Enter queue"]);
@@ -273,6 +282,15 @@ fn killing_the_host_after_delivery_leaves_no_steering_on_disk_or_for_replay() {
 
 #[test]
 fn live_steering_and_next_turn_input_reach_different_requests_and_turns() {
+    steered_turns(&[]);
+}
+
+#[test]
+fn hosted_records_and_steering_share_one_connection_without_mixing_turns() {
+    steered_turns(&["--host-io"]);
+}
+
+fn steered_turns(options: &[&str]) {
     let mut tools = Reply::stream_text("");
     let calls = [("add", 2, 3), ("multiply", 3, 4)].into_iter().enumerate().map(|(index, (operation, left, right))| json!({"index":index,"id":operation,"type":"function","function":{"name":"calculator","arguments":json!({"operation":operation,"left":left,"right":right}).to_string()}})).collect::<Vec<_>>();
     let chunk = |delta, finish| {
@@ -301,7 +319,7 @@ fn live_steering_and_next_turn_input_reach_different_requests_and_turns() {
     let root = tempfile::tempdir().unwrap();
     let binary = compiled(root.path(), &server, "chat-context-flow.json");
     let path = root.path().join("chat.sqlite");
-    let mut terminal = ChatTerminal::open(&binary, &path);
+    let mut terminal = ChatTerminal::with_args(&binary, &path, options);
     terminal.wait_for(&["What would you like"]);
     terminal.send(b"Original question\x1b\r");
     terminal.wait_for(&["calculator [add]", "Alt+Enter queue", "Alt+S steer"]);
