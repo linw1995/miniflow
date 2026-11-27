@@ -4,9 +4,7 @@ use crate::{
     run::{LocalObservation, RunError, RunOptions},
     runner::{PreparedRunner, RunnerCompletion, RunnerError, RunnerInvocation},
 };
-use mf_chat::contract::{
-    ChatContract, CompletionState, ConversationExit, ReconciledCompletion, TurnExit,
-};
+use mf_chat::contract::{ChatContract, CompletionState, ReconciledCompletion, TurnExit};
 use mf_chat::{
     ChatDatabase, ConversationResult, Invocation, ModelInfo, ModelSelection,
     ModelSelectionCancellation, NextTurnQueue, PendingMessageId, Session, SessionPage,
@@ -79,7 +77,6 @@ pub enum ChatRunError {
 pub struct ChatOptions {
     pub database_path: PathBuf,
     pub profile: String,
-    pub host_io: bool,
     pub run: RunOptions,
 }
 
@@ -985,12 +982,7 @@ impl Controller {
             resolution.state = if abandon {
                 self.database.abandon_recovered(&pending)?;
                 self.database
-                    .reconcile_completion(ConversationExit {
-                        invocation: &invocation,
-                        stdout: None,
-                        outcome: TurnExit::Cancelled,
-                        summary: "reply discarded",
-                    })?
+                    .reconcile_result(&invocation, None, TurnExit::Cancelled, "reply discarded")?
                     .state
             } else {
                 CompletionState::Committed(self.database.save_recovered(pending)?)
@@ -1087,17 +1079,11 @@ impl mf_chat::ConversationBackend for ExternalBackend {
             outcome: failure,
             reply: None,
         })?;
-        let records = self.launch.contract.streaming || self.launch.options.host_io;
-        let response = if records {
-            decoder.finish()
-        } else {
-            ConversationResult::from_json(&outcome.stdout)
-        }
-        .map(|mut response| {
+        let response = decoder.finish().map(|mut response| {
             outcome.call_events.apply(&mut response.usages);
             response
         });
-        let invalid_records = records && response.is_err() && outcome.capture_failure.is_none();
+        let invalid_records = response.is_err() && outcome.capture_failure.is_none();
         let reason = if (protocol_failure.is_some() || invalid_records)
             && !self.cancel.load(Ordering::Acquire)
             && !self.closed.load(Ordering::Acquire)
@@ -1163,7 +1149,7 @@ impl ExternalBackend {
             arguments: context.workflow_arguments(),
             verbose: self.launch.options.run.verbose,
             snapshots: true,
-            host_io: self.launch.options.host_io,
+            host_io: true,
             callbacks,
         }
         .run_batches(

@@ -65,9 +65,6 @@ enum Command {
         /// Session profile label; model configuration stays in the executable.
         #[arg(long, value_name = "NAME", requires = "chat")]
         chat_profile: Option<String>,
-        /// Exchange turn inputs, outputs and runner diagnostics over an authenticated host session.
-        #[arg(long, requires = "chat")]
-        host_io: bool,
         /// Workflow startup arguments keyed by qualified node.port names.
         #[arg(long, value_name = "JSON", conflicts_with_all = ["inputs_file", "preview"])]
         inputs: Option<String>,
@@ -276,7 +273,6 @@ fn run(cli: Cli) -> Result<u8, CliError> {
             chat,
             chat_db,
             chat_profile,
-            host_io,
             inputs,
             inputs_file,
             arguments,
@@ -315,7 +311,6 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                         mf_tui::chat::ChatOptions {
                             database_path,
                             profile: chat_profile.unwrap_or_else(|| "default".into()),
-                            host_io,
                             run: options,
                         },
                     )?)
@@ -337,7 +332,6 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                     chat,
                     chat_db,
                     chat_profile,
-                    host_io,
                 );
                 UnsupportedTuiSnafu.fail()
             }
@@ -810,7 +804,6 @@ mod chat_tests {
         for args in [
             vec!["mf", "run", "flow", "--tui", "--chat-db", "chat.sqlite"],
             vec!["mf", "run", "flow", "--chat-profile", "default"],
-            vec!["mf", "run", "flow", "--host-io"],
         ] {
             assert!(Cli::try_parse_from(args).is_err());
         }
@@ -820,7 +813,6 @@ mod chat_tests {
                 "run",
                 "flow",
                 "--chat",
-                "--host-io",
                 "--chat-db",
                 "chat.sqlite",
                 "--chat-profile",
@@ -833,14 +825,13 @@ mod chat_tests {
                 chat,
                 chat_db,
                 chat_profile,
-                host_io,
                 arguments,
                 ..
             } = cli.command
             else {
                 panic!("expected run")
             };
-            assert!(chat && host_io);
+            assert!(chat);
             assert_eq!(chat_db, Some(PathBuf::from("chat.sqlite")));
             assert_eq!(chat_profile.as_deref(), Some("work"));
             assert_eq!(arguments.len(), 2);

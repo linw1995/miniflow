@@ -439,6 +439,10 @@ with or without callbacks. Omitted flags are false. Values and handler implement
 unknown grant fields rather than switching transports. File sources, provider environment bindings,
 OTLP, and process exit status are unchanged.
 
+A bare executable or ordinary `mf run` / `mf run --tui` does not need a host session. Native
+hosts can opt into any combination of these capabilities through `mf-runtime`. Executable `--chat`
+always uses hosted I/O, whether or not the executable declares a steering callback.
+
 | Capability | Not granted | Granted |
 | --- | --- | --- |
 | Startup inputs | Named arguments, `--inputs`, or `--inputs-file` | The runner pulls `{"get_inputs":{}}` once, before provider construction; the host replies `{"inputs":{"values":{"params.model":"example"}}}`. No argument file is needed. |
@@ -496,7 +500,7 @@ terminal map. This wire mode includes finite streaming workflows as well as auto
 Since records can come from different execution domains, the derived stream ports are optional per
 record (`required: false`); the loader's supplied ports still match the manifest's selection optionality.
 Use `policy.stream_output_ports()` to inspect that derived contract. Records are forwarded live through
-the same supervised transport as chat, without accumulating the stream into a terminal result.
+the shared process supervisor, without accumulating the stream into a terminal result.
 Arguments and results cross a JSON boundary, so nested callable arguments cannot cross
 into the subprocess. Output values are conservatively secret because runner JSON does
 not preserve native privacy labels. The subprocess uses its own internal execution
@@ -512,10 +516,10 @@ with a validated manifest and a sink-aware executor using the same boundary sema
 
 `--chat` and runner-backed Flow parameters share `mf_tui::runner::RunnerInvocation`
 for launch, live observation, cancellation, output draining, and process-group cleanup.
-By default, both supply an argument file and read terminal JSON or backpressured JSON records
-from stdout. Chat can select [hosted I/O](#optional-hosted-io) instead. Its conversation decoder
-retains only a validated terminal reply for recovery, never preview fragments, and uses the same
-usage events on either transport. Its streaming composition uses `PreparedSubgraph` and `workflow.call`; runner-backed Flow
+Runner-backed Flow parameters use an argument file and read JSON from stdout. Executable chat
+requires [hosted I/O](#optional-hosted-io), including for finite replies. Its conversation decoder
+retains only a validated terminal reply for recovery, never preview fragments, and reconciles it with
+observed usage events. Its streaming composition uses `PreparedSubgraph` and `workflow.call`; runner-backed Flow
 values select terminal or record transport from the manifest and use the same executor.
 
 Both `--chat` and runner-backed Flow values hold the same prepared-runner abstraction.

@@ -646,19 +646,17 @@ and output from unsuccessful turns as well as completed conversations.
 `ChatContract` validates the external startup/result interface, not internal model counts, graph
 layout, loops, or business policy. `mf run runner --chat` uses the frozen executable as the backend
 of the application Flow's `workflow` call. Opening chat and submitting turns do not rebuild the
-executable or load original Flow sources. By default, the supervisor passes the admitted messages and
-configuration in a private argument file and reads business output from stdout.
+executable or load original Flow sources. Every turn uses an authenticated
+[host session](workflows.md#optional-hosted-io): the child pulls the admitted messages and parameters,
+then sends finite or streaming business records and structured diagnostics. There is no turn argument
+file, business stdout reader, or callback-only chat mode. Raw stderr and OTLP remain separate.
+Recompile older runners before using them for chat.
 
-With `mf run runner --chat --host-io`, the child instead pulls those inputs from the host and sends
-business records and structured runner diagnostics over its [host session](workflows.md#optional-hosted-io).
-The host creates no turn argument file and does not read business data from stdout. Raw process
-stderr is still captured; OTLP observation is unchanged. This option works without a reply callback.
-When one is bound, only the callback can pull steering input during execution. Lost connections fail
-the turn without relaunching it or switching to stdout. Recompile older runners before opting in.
+Hosted I/O does not grant steering. Only an explicitly bound `callback:on_reply` can pull user input
+at a reply boundary, on the same connection. A missing or broken session fails the turn without
+relaunching the runner or trying stdout, even if it printed a valid-looking result and exited zero.
 
-On stdout, finite executables return one JSON object and streaming executables use JSONL. On a host
-session the same records arrive individually, including the finite result. Optional `answer` and
-`tool_call_delta` records are previews; exactly one complete alternative result is required. Capture validates the whole invocation and
+Optional `answer` and `tool_call_delta` records are previews; exactly one complete alternative result is required. Capture validates the whole invocation and
 retains the candidate until normal closure. A later conflicting result invalidates recovery rather
 than preserving a first-result winner. Unrelated workflow outputs do not supply missing result facts.
 Result capture is bounded by `MAX_RECOVERY_BYTES` (16 MiB).

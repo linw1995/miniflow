@@ -4290,7 +4290,14 @@ mod tests {
         let launch = super::super::tests::launch(root.path());
         let mut view = ChatView::new(launch.runner.description()).unwrap();
         let gate = root.path().join("release");
-        std::fs::write(launch.runner.executable().with_extension("script"), format!("#!/bin/sh\nwhile ! test -f '{}'; do sleep 0.02; done\nprintf '%s\\n' '{{\"append\":{{\"status\":\"succeeded\",\"messages\":[{{\"role\":\"assistant\",\"content\":\"done\"}}],\"usages\":[]}}}}'\n", gate.display())).unwrap();
+        std::fs::write(
+            launch.runner.executable().with_extension("script"),
+            format!(
+                "{}\nwhile not Path({gate:?}).exists(): time.sleep(0.02)\nemit({{'append':{{'status':'succeeded','messages':[{{'role':'assistant','content':'done'}}],'usages':[]}}}})\nfinish()\n",
+                super::super::tests::HOSTED_RUNNER
+            ),
+        )
+        .unwrap();
         let controller = ChatController::open(launch).unwrap();
         view.editor.insert("original");
         view.submit(&controller);
@@ -4374,7 +4381,14 @@ mod tests {
         let offline = root.path().join("offline");
         launch.options.database_path = state.join("chat.sqlite");
         let path = launch.options.database_path.clone();
-        std::fs::write(launch.runner.executable().with_extension("script"), "#!/bin/sh\nsleep 0.3\nprintf '%s\\n' '{\"append\":{\"status\":\"succeeded\",\"messages\":[{\"role\":\"assistant\",\"content\":\"paid reply\"}],\"usages\":[]}}'\necho 'runner diagnostic' >&2\nkill -TERM $$\n").unwrap();
+        std::fs::write(
+            launch.runner.executable().with_extension("script"),
+            format!(
+                "{}\nimport signal\ntime.sleep(0.3)\nemit({{'append':{{'status':'succeeded','messages':[{{'role':'assistant','content':'paid reply'}}],'usages':[]}}}})\nfinish()\nprint('runner diagnostic', file=sys.stderr, flush=True)\nos.kill(os.getpid(), signal.SIGTERM)\n",
+                super::super::tests::HOSTED_RUNNER
+            ),
+        )
+        .unwrap();
         let mut view = ChatView::new(launch.runner.description()).unwrap();
         let controller = ChatController::open(launch).unwrap();
         view.editor.insert("question");

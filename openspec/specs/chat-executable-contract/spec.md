@@ -204,23 +204,21 @@ state SHALL retain precedence.
 
 ### Requirement: Capture native output independently of rendering
 
-By default the host SHALL drain and decode stdout independently of rendering.
-With `mf run --chat --host-io` it SHALL supply startup arguments and receive finite or streamed output on the authenticated runner session, without an argument file or stdout fallback.
-It SHALL consume structured runner diagnostics while still capturing raw stderr separately from OTLP. Selecting a transport SHALL NOT grant callbacks.
+Every `mf run --chat` invocation SHALL supply startup arguments and receive finite or streamed output on an authenticated runner session, without a turn argument file or stdout fallback. The host SHALL consume structured runner diagnostics while capturing raw stderr separately from OTLP. Declaring or binding a reply callback is not required for I/O; only a bound callback SHALL authorize steering.
 
-Both modes SHALL bound pending records, retain the final recovery result instead of all preview history, and preserve typed capture errors. Cancellation SHALL interrupt a blocked consumer.
+The host SHALL drain records independently of rendering, bound pending records, retain the final recovery result instead of all preview history, and preserve typed capture errors. Cancellation SHALL interrupt a blocked consumer.
 
 #### Scenario: A hosted turn without a reply callback
 
 - **WHEN** its runner emits an answer fragment, then a valid terminal result and completes the event drain
 - **THEN** the fragment can be presented before exit and only the validated terminal result can settle the turn after successful process completion
 
-#### Scenario: Child ignores an explicit hosted I/O grant
+#### Scenario: Chat rejects a stdout-only child
 
-- **WHEN** it prints a result on stdout and exits zero without completing the granted session
+- **WHEN** a chat child prints a valid reply on stdout and exits zero without completing the granted session
 - **THEN** the host reports an incomplete invocation and does not accept the printed result
 
 #### Scenario: End within a record
 
-- **WHEN** the executable ends halfway through a JSONL record
+- **WHEN** the executable ends halfway through a hosted record
 - **THEN** earlier deltas remain provisional and the decoder reports a typed capture failure

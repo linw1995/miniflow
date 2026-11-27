@@ -45,7 +45,6 @@ fn supplied_title_workflow_runs_inside_the_application_lifecycle() {
         ChatOptions {
             database_path: path.clone(),
             profile: "assistant-flow".into(),
-            host_io: false,
             run: RunOptions {
                 arguments: vec![
                     "--params.model=fixture-model".into(),
@@ -304,7 +303,7 @@ fn compiled_context_replacement_keeps_tool_audit_and_save_only_retries_after_reo
     let mut original = vec![];
     for (turn, compact) in [false, true, false].into_iter().enumerate() {
         let launch = ChatLaunch::prepare(&binary, ChatOptions {
-            database_path: path.clone(), profile: "context".into(), host_io: false,
+            database_path: path.clone(), profile: "context".into(),
             run: RunOptions { inputs: Some(json!({"params.model":"fixture-model","params.api_key":"synthetic-key","params.compact":compact}).to_string()), ..Default::default() },
         }).unwrap();
         let controller = ChatController::open(launch).unwrap();
@@ -910,10 +909,6 @@ struct ChatTerminal {
 
 impl ChatTerminal {
     fn open(binary: &Path, database: &Path) -> Self {
-        Self::with_args(binary, database, &[])
-    }
-
-    fn with_args(binary: &Path, database: &Path, options: &[&str]) -> Self {
         let size = Winsize {
             ws_row: 40,
             ws_col: 160,
@@ -925,7 +920,6 @@ impl ChatTerminal {
         fcntl(&pty.master, FcntlArg::F_SETFD(flags | FdFlag::FD_CLOEXEC)).unwrap();
         let child = Command::new(env!("CARGO_BIN_EXE_mf"))
             .args(["run", "--chat"])
-            .args(options)
             .arg("--chat-db")
             .arg(database)
             .arg(binary)
@@ -1119,7 +1113,6 @@ fn loop_conversations() {
         ChatOptions {
             database_path: path.clone(),
             profile: "loop".into(),
-            host_io: false,
             run: mf_tui::run::RunOptions {
                 inputs: Some(
                     serde_json::json!({
@@ -1347,7 +1340,6 @@ fn model_selection_defaults_to_first_model_persists_preferences_and_reuses_on_re
         ChatOptions {
             database_path: db_path.clone(),
             profile: "default".into(),
-            host_io: false,
             run: RunOptions {
                 arguments: vec![
                     format!("--params.base_url={}", server1.base_url).into(),
@@ -1434,7 +1426,6 @@ fn model_selection_defaults_to_first_model_persists_preferences_and_reuses_on_re
         ChatOptions {
             database_path: db_path.clone(),
             profile: "default".into(),
-            host_io: false,
             run: RunOptions {
                 arguments: vec!["--params.api_key=synthetic-secret-key".into()],
                 ..Default::default()
@@ -1494,7 +1485,6 @@ fn model_selection_defaults_to_first_model_persists_preferences_and_reuses_on_re
         ChatOptions {
             database_path: db_path,
             profile: "default".into(),
-            host_io: false,
             run: RunOptions {
                 arguments: vec![
                     format!("--params.base_url={}", server2.base_url).into(),
