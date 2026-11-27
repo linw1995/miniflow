@@ -103,6 +103,37 @@ fn compiles_a_runner_without_telemetry_and_preserves_execution() {
             .nodes
             .is_empty()
     );
+    let (open_input, _writer) = std::io::pipe().unwrap();
+    let pty = nix::pty::openpty(None, None).unwrap();
+    for input in [
+        std::process::Stdio::from(open_input),
+        std::process::Stdio::from(pty.slave),
+    ] {
+        let mut child = Command::new(&output)
+            .stdin(input)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while child.try_wait().unwrap().is_none() {
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("standalone runner waited for stdin EOF");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let result = child.wait_with_output().unwrap();
+        assert!(result.status.success());
+        assert_eq!(result.stdout, execution.stdout);
+    }
+    let via_path = Command::new(env!("CARGO_BIN_EXE_mf"))
+        .args(["run", "workflow"])
+        .env("PATH", temporary.path())
+        .output()
+        .unwrap();
+    assert!(via_path.status.success(), "{via_path:?}");
+    assert_eq!(via_path.stdout, execution.stdout);
     let requested = Command::new(&output)
         .env("MF_CAPTURE_SNAPSHOTS", "1")
         .output()

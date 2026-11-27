@@ -1069,8 +1069,8 @@ reads a regular UTF-8 text file, including through a symbolic link to a regular 
 directories, devices, and sockets are unsupported. Paths are opened nonblocking and the opened file's
 type is checked before reading, so rejecting a FIFO does not wait for a writer. Omission selects stdin,
 which continues to accept pipes and terminals. It preserves blank lines and whitespace, strips LF or
-CRLF delimiters, and accepts a final unterminated line. It does not parse JSON. Runners supply a reserved
-`TextInput` when stdin is required; embedding hosts supply `StreamOptions.stdin` or use
+CRLF delimiters, and accepts a final unterminated line. It does not parse JSON. Compiled runners disable stdin
+and require a file path. Embedding hosts can supply a `TextInput` via `StreamOptions.stdin` or use
 `ExecutionContext::set_stdin` for context-based execution.
 Factories and interface inspection do not open source files or read stdin. Runtime-owned reads check
 cancellation between reads and while waiting for stdin readiness. Nonblocking opens prevent FIFO writer

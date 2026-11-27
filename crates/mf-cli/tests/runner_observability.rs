@@ -953,6 +953,18 @@ fn stalled_collector() -> (String, thread::JoinHandle<bool>) {
     (endpoint, worker)
 }
 
+fn pipe_source(definition: &mut Value, path: &Path) {
+    definition["dependencies"]["fixture"] = json!({"package":"fixture-multi-nodes", "path":crates_dir().join("mf-compiler/tests/fixtures/multi-nodes")});
+    let source = definition["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|n| n["id"] == "feed")
+        .unwrap();
+    source["kind"] = json!("fixture.read_lines");
+    nix::unistd::mkfifo(path, nix::sys::stat::Mode::S_IRWXU).unwrap();
+}
+
 #[test]
 fn streaming_runner_exports_message_lifecycles_without_changing_results() {
     use mf_telemetry::{
@@ -969,6 +981,8 @@ fn streaming_runner_exports_message_lifecycles_without_changing_results() {
     value["dependencies"]["core"]["path"] = json!(crates_dir().join("builtin-nodes/core"));
     value["dependencies"]["code"]["path"] = json!(crates_dir().join("builtin-nodes/code"));
     value["nodes"][0]["config"]["max_wait_ms"] = json!(3_600_000);
+    let pipe = root.path().join("feed");
+    pipe_source(&mut value, &pipe);
     let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
     let runner = build(
         &root.path().join("build"),
@@ -984,13 +998,14 @@ fn streaming_runner_exports_message_lifecycles_without_changing_results() {
         if let Some(endpoint) = endpoint {
             command.env("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint);
         }
-        let mut child = command
-            .stdin(Stdio::piped())
+        let child = command
+            .arg("--feed.path")
+            .arg(&pipe)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        let mut input = child.stdin.take().unwrap();
+        let mut input = fs::OpenOptions::new().write(true).open(&pipe).unwrap();
         input.write_all(b"1\n2\n3\n").unwrap();
         if let Some(collector) = collector {
             // Force later events into new export requests without relying on sleeps.
@@ -1204,18 +1219,19 @@ fn streaming_runner_exports_message_lifecycles_without_changing_results() {
     );
     let run_id = mf_telemetry::identity::RunId::new();
     let mut receiver = LoopbackReceiver::bind(description, run_id).unwrap();
-    let mut child = command(&runner)
+    let child = command(&runner)
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", receiver.endpoint())
         .env("MF_RUN_ID", run_id.to_string())
         .env(mf_telemetry::SNAPSHOT_CAPTURE_ENV, "1")
-        .stdin(Stdio::piped())
+        .arg("--feed.path")
+        .arg(&pipe)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child
-        .stdin
-        .take()
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&pipe)
         .unwrap()
         .write_all(b"1\n2\n3\n4\n5\n")
         .unwrap();
@@ -1312,12 +1328,15 @@ fn streaming_snapshots_preserve_large_values_and_report_interrupted_history() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
-    let definition: WorkflowDefinition = serde_json::from_value(json!({
+    let mut definition = json!({
         "version": "2026-10-03", "execution": {},
-        "dependencies": {"core": {"package": "mfn-core", "path": crates_dir().join("builtin-nodes/core")}},
-        "nodes": [{"id": "feed", "kind": "builtin.readline"}],
+        "dependencies": {},
+        "nodes": [{"id": "feed", "kind": "fixture.read_lines"}],
         "outputs": [{"name": "line", "node": "feed", "port": "line"}]
-    })).unwrap();
+    });
+    let pipe = root.path().join("feed");
+    pipe_source(&mut definition, &pipe);
+    let definition = serde_json::from_value(definition).unwrap();
     let runner = build(
         &root.path().join("build"),
         &root.path().join("flow.lock"),
@@ -1325,35 +1344,22 @@ fn streaming_snapshots_preserve_large_values_and_report_interrupted_history() {
     );
     let description = read_manifest(&runner).unwrap().description().unwrap();
     let value = "x".repeat(300_000);
+    let lines = root.path().join("lines");
+    fs::write(&lines, format!("small\n{value}\nafter\n")).unwrap();
     let execute = |capture: bool| {
         let run = mf_telemetry::identity::RunId::new();
         let mut receiver = LoopbackReceiver::bind(description.clone(), run).unwrap();
-        let mut child = command(&runner)
+        let output = command(&runner)
+            .arg("--feed.path")
+            .arg(&lines)
             .env("OTEL_EXPORTER_OTLP_ENDPOINT", receiver.endpoint())
             .env("MF_RUN_ID", run.to_string())
             .env(
                 mf_telemetry::SNAPSHOT_CAPTURE_ENV,
                 if capture { "1" } else { "0" },
             )
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
+            .output()
             .unwrap();
-        // Read stdout concurrently so a large business value cannot fill its pipe.
-        let stdout = child.stdout.take().unwrap();
-        let reader = thread::spawn(move || {
-            let mut bytes = Vec::new();
-            std::io::Read::read_to_end(&mut { stdout }, &mut bytes).unwrap();
-            bytes
-        });
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(format!("small\n{value}\nafter\n").as_bytes())
-            .unwrap();
-        let output = child.wait_with_output().unwrap();
         assert!(
             output.status.success(),
             "{}",
@@ -1363,7 +1369,7 @@ fn streaming_snapshots_preserve_large_values_and_report_interrupted_history() {
             receiver.finish().lifecycle.completeness,
             Completeness::Complete
         );
-        (reader.join().unwrap(), receiver.data_snapshot())
+        (output.stdout, receiver.data_snapshot())
     };
     let (plain, unavailable) = execute(false);
     let (captured, data) = execute(true);
@@ -1383,16 +1389,18 @@ fn streaming_snapshots_preserve_large_values_and_report_interrupted_history() {
 
     let run = mf_telemetry::identity::RunId::new();
     let mut receiver = LoopbackReceiver::bind(description, run).unwrap();
-    let mut child = command(&runner)
+    let mut child = Command::new(&runner)
+        .arg("--feed.path")
+        .arg(&pipe)
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", receiver.endpoint())
         .env("MF_RUN_ID", run.to_string())
         .env(mf_telemetry::SNAPSHOT_CAPTURE_ENV, "1")
-        .stdin(Stdio::piped())
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let mut input = child.stdin.take().unwrap();
+    let mut input = fs::OpenOptions::new().write(true).open(&pipe).unwrap();
     input.write_all(b"before-interrupt\n").unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     while receiver.history_len() < 2 {

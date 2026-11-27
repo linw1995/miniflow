@@ -171,7 +171,7 @@ those views never deserialize the redundant raw child body. Factories receive th
 configuration alongside authoritative prepared children. Node-owned errors retain their typed sources
 under generic compiler node or child-scope context.
 
-Manifest payload version `2026-11-18` contains the root `definition`, resource `entry` and `sources`,
+Manifest payload version `2026-11-25` contains the root `definition`, resource `entry` and `sources`,
 and a public `descriptor` with observation `description` and prepared `input_schema`. It does not
 serialize compiler graphs or execution layouts. Native `CompiledWorkflow` and `CompiledGraph` do not
 implement Serde, and there is no saved-compiled-plan protocol. Generated projects use `workflow-plan.rs`

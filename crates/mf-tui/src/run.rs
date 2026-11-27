@@ -197,6 +197,11 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
     let manifest = read_manifest(path).context(ManifestSnafu)?;
     let arguments = options.workflow_arguments(&manifest.descriptor.input_schema)?;
     let description = manifest.description()?;
+    let arguments = mf_runtime::resolve_workflow_inputs(
+        &manifest.descriptor.input_schema,
+        &arguments,
+        |name| std::env::var_os(name),
+    )?;
     let needs_stdin = manifest
         .descriptor
         .input_schema
@@ -204,7 +209,7 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
         .is_some();
     if needs_stdin {
         return option_error(
-            "TUI execution cannot supply workflow stdin; provide source parameters or run the executable directly",
+            "TUI execution cannot supply workflow stdin; provide source parameters",
         );
     }
     let arguments = if !arguments.0.is_empty() {
@@ -6478,6 +6483,31 @@ mod tests {
                 .unwrap()
                 .to_string()
                 .contains("cannot supply workflow stdin")
+        );
+        let binding = &mut manifest
+            .descriptor
+            .input_schema
+            .inputs
+            .get_mut("source/id")
+            .unwrap()
+            .get_mut("path")
+            .unwrap()
+            .binding;
+        binding.env = Some("PATH".into());
+        binding.default = Some(serde_json::json!("fallback.txt"));
+        std::fs::write(
+            &runner,
+            crate::test_support::elf(Some(&manifest.to_bytes().unwrap()), 1),
+        )
+        .unwrap();
+        let resolved = prepare_launch(&runner, &RunOptions::default())
+            .unwrap()
+            .arguments
+            .unwrap();
+        let args = WorkflowArguments::from_json(&std::fs::read(resolved.path()).unwrap()).unwrap();
+        assert_eq!(
+            args.0["source/id.path"].as_str().unwrap(),
+            std::env::var("PATH").unwrap_or_else(|_| "fallback.txt".into())
         );
         let mut corrupt = std::fs::read(&runner).unwrap();
         *corrupt.last_mut().unwrap() = 0xff;

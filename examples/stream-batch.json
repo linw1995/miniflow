@@ -75,7 +75,7 @@
   "clusters": [
     {
       "label": "Read and convert",
-      "annotation": "Read stdin lines and parse each line as an integer message.",
+      "annotation": "Read text lines and parse each line as an integer message.",
       "nodes": [
         "feed",
         "convert"

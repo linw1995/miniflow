@@ -79,6 +79,7 @@ enum Command {
 
 #[derive(Debug, Snafu)]
 enum CliError {
+    #[cfg(unix)]
     #[snafu(display("could not run workflow {path:?}: {source}"))]
     Execute { path: PathBuf, source: io::Error },
     #[cfg(unix)]
@@ -284,30 +285,10 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                 return UnsupportedTuiSnafu.fail();
             }
             if !tui && !chat {
-                let mut command = std::process::Command::new(&executable);
-                for _ in 0..verbose {
-                    command.arg("--verbose");
-                }
-                if let Some(inputs) = inputs {
-                    command.arg("--inputs").arg(inputs);
-                }
-                if let Some(path) = inputs_file {
-                    command.arg("--inputs-file").arg(path);
-                }
-                let status = command
-                    .args(arguments)
-                    .status()
-                    .context(ExecuteSnafu { path: executable })?;
-                #[cfg(unix)]
-                {
-                    use std::os::unix::process::ExitStatusExt;
-                    return Ok(status
-                        .code()
-                        .unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
-                        as u8);
-                }
                 #[cfg(not(unix))]
-                return Ok(status.code().unwrap_or(1) as u8);
+                return UnsupportedInspectionSnafu.fail();
+                #[cfg(unix)]
+                return run_direct(executable, verbose, inputs, inputs_file, arguments);
             }
             #[cfg(unix)]
             {
@@ -356,6 +337,56 @@ fn run(cli: Cli) -> Result<u8, CliError> {
             }
         }
     }
+}
+
+#[cfg(unix)]
+fn run_direct(
+    executable: PathBuf,
+    verbose: u8,
+    inputs: Option<String>,
+    inputs_file: Option<PathBuf>,
+    arguments: Vec<OsString>,
+) -> Result<u8, CliError> {
+    use std::os::unix::process::ExitStatusExt;
+    let path = resolve_program(&executable).with_context(|_| ExecuteSnafu { path: executable })?;
+    mf_tui::manifest::read_manifest(&path).with_context(|_| InspectSnafu { path: path.clone() })?;
+    let mut command = std::process::Command::new(&path);
+    command.stdin(std::process::Stdio::null());
+    for _ in 0..verbose {
+        command.arg("--verbose");
+    }
+    if let Some(value) = inputs {
+        command.arg("--inputs").arg(value);
+    }
+    if let Some(file) = inputs_file {
+        command.arg("--inputs-file").arg(file);
+    }
+    let status = command
+        .args(arguments)
+        .status()
+        .context(ExecuteSnafu { path })?;
+    Ok(status
+        .code()
+        .unwrap_or_else(|| 128 + status.signal().unwrap_or(0)) as u8)
+}
+
+#[cfg(unix)]
+fn resolve_program(path: &std::path::Path) -> io::Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    if path.parent().is_some_and(|dir| dir.as_os_str().is_empty()) {
+        let paths = std::env::var_os("PATH").unwrap_or_default();
+        for dir in std::env::split_paths(&paths) {
+            let candidate = dir.join(path);
+            if candidate
+                .metadata()
+                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            {
+                return std::path::absolute(candidate);
+            }
+        }
+        return Err(io::ErrorKind::NotFound.into());
+    }
+    Ok(path.to_owned())
 }
 
 fn flows(name: Option<String>) -> Result<u8, CliError> {
@@ -470,6 +501,17 @@ fn support_packages() -> SupportPackages {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn path_search_returns_the_same_file_for_inspection_and_launch() {
+        use super::*;
+        assert!(
+            resolve_program(std::path::Path::new("sh"))
+                .unwrap()
+                .is_absolute()
+        );
+        assert!(resolve_program(std::path::Path::new("mf-missing-test-command-7761")).is_err());
+    }
     use super::*;
 
     #[test]
