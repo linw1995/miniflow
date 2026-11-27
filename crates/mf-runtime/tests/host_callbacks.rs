@@ -30,7 +30,6 @@ fn private_paths_round_trip_without_tainting_sibling_messages_or_treating_fields
             .decode()
             .is_err()
     );
-    assert!(encode_control(&"x".repeat(MAX_CALLBACK_FRAME)).is_err());
 }
 
 #[test]

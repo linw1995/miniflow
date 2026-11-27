@@ -3,7 +3,7 @@
 use mf_runtime::{
     StreamCancellation,
     callback::{CallbackSites, HostCallback, HostCallbacks},
-    callback_rpc::{Grant, LAUNCH_ENV, host::Listener},
+    callback_rpc::{Grant, HostSession, LAUNCH_ENV, host::Listener},
 };
 use std::{
     process::{Command, Stdio},
@@ -27,7 +27,7 @@ fn empty_grants_clear_inherited_authority_and_unknown_sites_fail_before_spawn() 
     command.env(LAUNCH_ENV, "inherited");
     let sites = CallbackSites::new();
     assert!(
-        Listener::prepare(&mut command, &sites, Default::default())
+        Listener::prepare_session(&mut command, &sites, HostSession::default())
             .unwrap()
             .is_none()
     );
@@ -36,13 +36,16 @@ fn empty_grants_clear_inherited_authority_and_unknown_sites_fail_before_spawn() 
             .get_envs()
             .any(|(key, val)| key == LAUNCH_ENV && val.is_none())
     );
-    let handlers = [("unknown".into(), HostCallback::new(|_, _| unreachable!()))].into();
-    assert!(Listener::prepare(&mut command, &sites, handlers).is_err());
+    let session = HostSession {
+        callbacks: [("unknown".into(), HostCallback::new(|_, _| unreachable!()))].into(),
+        ..Default::default()
+    };
+    assert!(Listener::prepare_session(&mut command, &sites, session).is_err());
 }
 
 #[test]
 fn hosted_inputs_are_bounded_before_spawn_and_absent_from_the_environment() {
-    use mf_runtime::{WorkflowArguments, callback_rpc::HostSession};
+    use mf_runtime::WorkflowArguments;
     let mut command = Command::new("true");
     let prepare = |command: &mut Command, value: String| {
         Listener::prepare_session(
@@ -126,7 +129,7 @@ fn the_runtime_authenticates_the_launched_pid_and_owns_the_listener_lifetime() {
 import json, os, socket, stat
 launch = json.loads(os.environ['MF_RUNNER_RPC_V1'])
 path = launch['socket']
-assert launch['parent'] == os.getppid() and launch['bindings'] == ['lookup']
+assert launch == {'parent': os.getppid(), 'socket': path, 'bindings': ['lookup']}
 assert stat.S_IMODE(os.stat(os.path.dirname(path)).st_mode) == 0o700
 def peer():
     s = socket.socket(socket.AF_UNIX)
@@ -150,7 +153,11 @@ print('{"binding":"business data"}')
 call(s, 'bad id', 1)
 assert not s.readline()
 "#]).stdout(Stdio::piped());
-    let listener = Listener::prepare(&mut command, &sites, handlers.clone())
+    let session = || HostSession {
+        callbacks: handlers.clone(),
+        ..Default::default()
+    };
+    let listener = Listener::prepare_session(&mut command, &sites, session())
         .unwrap()
         .unwrap();
     let child = command.spawn().unwrap();
@@ -174,7 +181,7 @@ assert not s.readline()
     assert_eq!(received.try_iter().collect::<Vec<_>>(), ["runner"]);
 
     let mut command = Command::new("true");
-    let listener = Listener::prepare(&mut command, &sites, handlers)
+    let listener = Listener::prepare_session(&mut command, &sites, session())
         .unwrap()
         .unwrap();
     let path = grant(&command).socket;

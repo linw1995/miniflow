@@ -381,10 +381,11 @@ check, request dispatch, cancellation, and socket cleanup. Prepare before spawni
 process is given the grant, then start serving with the PID returned by `spawn`:
 
 ```rust
-use mf_runtime::callback_rpc::host::Listener;
+use mf_runtime::callback_rpc::{HostSession, host::Listener};
 
 let mut command = std::process::Command::new(executable);
-let listener = Listener::prepare(&mut command, &manifest.descriptor.callbacks, callbacks)?;
+let session = HostSession { callbacks, ..Default::default() };
+let listener = Listener::prepare_session(&mut command, &manifest.descriptor.callbacks, session)?;
 let mut child = command.spawn()?;
 let server = match listener.map(|l| l.start(child.id(), &cancellation, report_error)).transpose() {
     Ok(server) => server,
@@ -399,23 +400,19 @@ if let Some(server) = server { server.finish()?; }
 ```
 
 Keep the server alive for the run. Route `report_error` to the supervisor so an RPC failure cannot
-be reported as success. An empty binding set clears any inherited grant and creates no listener.
+be reported as success. `HostSession::default()` clears any inherited grant and creates no listener.
 Standalone runners do not enable `callback-host`.
 
-Use `Listener::prepare_session` instead to take over selected I/O. The listener derives the grant
-from the supplied capabilities; `Some(WorkflowArguments::default())` explicitly supplies empty
-inputs, whereas `None` leaves CLI input resolution intact. For example, use the same spawn/start
-sequence above with this listener (and no `--inputs-file`):
+The same session can supply inputs, consume outputs, or receive diagnostics with or without callbacks.
+`Some(WorkflowArguments::default())` explicitly supplies empty inputs; `None` leaves CLI input resolution intact.
+For example, to receive output and supply the arguments without an `--inputs-file`, prepare this session instead:
 
 ```rust
-use mf_runtime::callback_rpc::HostSession;
-
 let session = HostSession {
     inputs: Some(arguments),
     output: Some(Box::new(move |record, cancellation| consume(record, cancellation))),
     ..Default::default()
 };
-let listener = Listener::prepare_session(&mut command, &manifest.descriptor.callbacks, session)?;
 ```
 
 `output` receives selected record maps, not raw socket bytes. The optional `diagnostics` consumer

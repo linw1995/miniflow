@@ -102,6 +102,13 @@ pub struct HostSession {
 }
 
 impl HostSession {
+    fn validate_inputs(&self) -> Result<(), CallbackError> {
+        if let Some(inputs) = &self.inputs {
+            inputs.check_encoded_size()?;
+        }
+        Ok(())
+    }
+
     fn grant(&self) -> IoGrant {
         IoGrant {
             inputs: self.inputs.is_some(),
@@ -111,28 +118,13 @@ impl HostSession {
     }
 }
 
-/// Serve callbacks only, without taking over any runner I/O.
-pub fn serve(
-    socket: UnixStream,
-    callbacks: &HostCallbacks,
-    cancel: &StreamCancellation,
-) -> Result<(), CallbackError> {
-    serve_session(
-        socket,
-        HostSession {
-            callbacks: callbacks.clone(),
-            ..Default::default()
-        },
-        cancel,
-    )
-}
-
 /// Serve an already authenticated peer. An event sink error prevents the final drain receipt.
 pub fn serve_session(
     socket: UnixStream,
     session: HostSession,
     cancel: &StreamCancellation,
 ) -> Result<(), CallbackError> {
+    session.validate_inputs()?;
     dispatch(socket, session, cancel, &mut false)
 }
 
@@ -169,7 +161,6 @@ fn dispatch(
                 let inputs = session.inputs.take().context(ProtocolSnafu {
                     reason: "startup inputs not granted or already consumed",
                 })?;
-                inputs.check_encoded_size()?;
                 channel.send(
                     &Startup {
                         inputs: WireValues::encode(&inputs.0),

@@ -251,27 +251,3 @@ impl WireValues {
 }
 
 pub const MAX_CALLBACK_FRAME: usize = 2 * 1024 * 1024;
-
-pub fn encode_control(frame: &impl Serialize) -> Result<Vec<u8>, CallbackError> {
-    encode_frame(frame, MAX_CALLBACK_FRAME)
-}
-
-pub(super) fn encode_frame(frame: &impl Serialize, limit: usize) -> Result<Vec<u8>, CallbackError> {
-    struct BoundedFrame(Vec<u8>, usize);
-    impl std::io::Write for BoundedFrame {
-        fn write(&mut self, input: &[u8]) -> std::io::Result<usize> {
-            if input.len() >= self.1 - self.0.len() {
-                return Err(std::io::Error::other("RPC frame exceeds limit"));
-            }
-            self.0.extend_from_slice(input);
-            Ok(input.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut bytes = BoundedFrame(Vec::new(), limit);
-    serde_json::to_writer(&mut bytes, frame).context(CodecSnafu)?;
-    bytes.0.push(b'\n');
-    Ok(bytes.0)
-}

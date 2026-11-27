@@ -1,11 +1,9 @@
-//! A private callback listener for exactly one supervised child process.
+//! A private session listener for exactly one supervised runner process.
 
 use super::{Grant, HostSession, LAUNCH_ENV, dispatch};
 use crate::{
     StreamCancellation,
-    callback::{
-        CallbackError, CallbackSites, CodecSnafu, HostCallbacks, ProtocolSnafu, TransportSnafu,
-    },
+    callback::{CallbackError, CallbackSites, CodecSnafu, ProtocolSnafu, TransportSnafu},
 };
 use snafu::{OptionExt, ResultExt, ensure};
 use std::{
@@ -27,23 +25,7 @@ pub struct Listener {
 }
 
 impl Listener {
-    /// Configure the child's grant before spawning it. An unbound launch opens no socket.
-    pub fn prepare(
-        command: &mut Command,
-        sites: &CallbackSites,
-        callbacks: HostCallbacks,
-    ) -> Result<Option<Self>, CallbackError> {
-        Self::prepare_session(
-            command,
-            sites,
-            HostSession {
-                callbacks,
-                ..Default::default()
-            },
-        )
-    }
-
-    /// Prepare only the requested transports. Input values stay in process memory until PID authentication.
+    /// Prepare only the requested transports. An empty session clears inherited authority and opens no socket.
     pub fn prepare_session(
         command: &mut Command,
         sites: &CallbackSites,
@@ -54,9 +36,7 @@ impl Listener {
         if session.callbacks.is_empty() && io.is_empty() {
             return Ok(None);
         }
-        if let Some(inputs) = &session.inputs {
-            inputs.check_encoded_size()?;
-        }
+        session.validate_inputs()?;
         ensure!(
             session
                 .callbacks
@@ -203,8 +183,8 @@ impl Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        self.cancel();
         if let Some(worker) = self.worker.take() {
+            self.cancel();
             let _ = worker.join();
         }
     }
