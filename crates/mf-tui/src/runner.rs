@@ -115,6 +115,7 @@ pub struct RunnerInvocation<'a> {
     pub snapshots: bool,
     /// Pull arguments and deliver all outputs (including a finite result) to the record consumer.
     pub host_io: bool,
+    pub callbacks: mf_runtime::callback::HostCallbacks,
 }
 
 /// Preserve raw completion on protocol failure so hosts can reconcile or recover
@@ -149,23 +150,6 @@ impl RunnerInvocation<'_> {
     /// Consume available records in wire order without waiting for another record to fill a batch.
     pub fn run_batches<E>(
         self,
-        cancellation: StreamCancellation,
-        observe: impl FnOnce(LocalObservation),
-        consume: impl FnMut(&mut dyn Iterator<Item = NodeValues>) -> Result<(), E>,
-        should_cancel: impl FnMut() -> bool,
-    ) -> Result<RunnerCompletion<E>, RunnerError> {
-        self.run_with_callbacks(
-            Default::default(),
-            cancellation,
-            observe,
-            consume,
-            should_cancel,
-        )
-    }
-
-    pub fn run_with_callbacks<E>(
-        self,
-        callbacks: mf_runtime::callback::HostCallbacks,
         cancellation: StreamCancellation,
         observe: impl FnOnce(LocalObservation),
         mut consume: impl FnMut(&mut dyn Iterator<Item = NodeValues>) -> Result<(), E>,
@@ -211,7 +195,7 @@ impl RunnerInvocation<'_> {
             description,
             run_id,
             cancellation.clone(),
-            Some((&self.runner.manifest.descriptor.callbacks, callbacks)),
+            Some((&self.runner.manifest.descriptor.callbacks, self.callbacks)),
             io,
         )?;
         observe(run.observation());
@@ -311,6 +295,7 @@ mod tests {
                 verbose: 0,
                 snapshots: false,
                 host_io: false,
+                callbacks: Default::default(),
             }
             .run(
                 Default::default(),

@@ -187,7 +187,7 @@ fn callbacks_do_not_become_configurable_chat_arguments() {
     );
     assert!(
         RunOptions {
-            arguments: vec!["--host-stdio-v1=on_reply".into()],
+            arguments: vec!["--callback:on_reply".into()],
             ..Default::default()
         }
         .parsed_workflow_arguments(&contract.parameters)
@@ -755,6 +755,46 @@ fn check_preview_before_settlement(host_io: bool) {
 }
 
 #[test]
+fn hosted_recovery_keeps_the_typed_reply_when_storage_is_temporarily_unavailable() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut launch, gate) = live_launch(root.path(), "gated");
+    let state = root.path().join("state");
+    let offline = root.path().join("offline");
+    launch.options.database_path = state.join("chat.sqlite");
+    launch.options.host_io = true;
+    let runner = launch.runner.executable().to_path_buf();
+    let controller = ChatController::open(launch).unwrap();
+    controller
+        .send(ChatCommand::Submit {
+            session_id: None,
+            prompt: "hello".into(),
+        })
+        .unwrap();
+    while !matches!(next(&controller), ChatEvent::Preview { .. }) {}
+    fs::rename(&state, &offline).unwrap();
+    fs::write(&state, "unavailable").unwrap();
+    fs::write(gate, "finish").unwrap();
+    loop {
+        if let ChatEvent::Finished { resolution, .. } = next(&controller) {
+            assert!(resolution.is_err());
+            break;
+        }
+    }
+    fs::remove_file(runner).unwrap();
+    fs::remove_file(&state).unwrap();
+    fs::rename(&offline, &state).unwrap();
+    controller.send(ChatCommand::Save).unwrap();
+    let ChatEvent::Finished { resolution, .. } = next(&controller) else {
+        panic!("expected recovery")
+    };
+    let CompletionState::Committed(completion) = resolution.unwrap().state else {
+        panic!("expected saved reply")
+    };
+    assert_eq!(completion.result.final_text(), Some("canonical"));
+    controller.close().unwrap();
+}
+
+#[test]
 fn native_failures_keep_complete_replies_for_save_only_and_never_save_prefixes() {
     check_save_only(false);
 }
@@ -837,6 +877,15 @@ fn check_save_only(host_io: bool) {
 
 #[test]
 fn invalid_terminal_records_invalidate_native_recovery_instead_of_saving_first() {
+    check_invalid_terminal_records(false);
+}
+
+#[test]
+fn invalid_terminal_records_invalidate_hosted_recovery_instead_of_saving_first() {
+    check_invalid_terminal_records(true);
+}
+
+fn check_invalid_terminal_records(host_io: bool) {
     for mode in [
         "duplicate",
         "undeclared",
@@ -846,12 +895,13 @@ fn invalid_terminal_records_invalidate_native_recovery_instead_of_saving_first()
         "malformed_delta",
     ] {
         let root = tempfile::tempdir().unwrap();
-        let (launch, _) = live_launch(root.path(), mode);
+        let (mut launch, _) = live_launch(root.path(), mode);
+        launch.options.host_io = host_io;
         let controller = ChatController::open(launch).unwrap();
         controller
             .send(ChatCommand::Submit {
                 session_id: None,
-                prompt: "Question".into(),
+                prompt: "hello".into(),
             })
             .unwrap();
         let mut invocation = None;

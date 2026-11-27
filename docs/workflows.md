@@ -511,11 +511,11 @@ implementing other independently observed executors can use `FlowValue::external
 with a validated manifest and a sink-aware executor using the same boundary semantics.
 
 `--chat` and runner-backed Flow parameters share `mf_tui::runner::RunnerInvocation`
-for argument-file transport, launch, live observation, cancellation, output draining,
-and process-group cleanup. It supports both terminal JSON and backpressured JSON
-records. Chat supplies its conversation decoder and preview consumer, then reconciles
-the retained terminal reply and usage events, including after protocol or process
-failure. Its streaming composition uses `PreparedSubgraph` and `workflow.call`; runner-backed Flow
+for launch, live observation, cancellation, output draining, and process-group cleanup.
+By default, both supply an argument file and read terminal JSON or backpressured JSON records
+from stdout. Chat can select [hosted I/O](#optional-hosted-io) instead. Its conversation decoder
+retains only a validated terminal reply for recovery, never preview fragments, and uses the same
+usage events on either transport. Its streaming composition uses `PreparedSubgraph` and `workflow.call`; runner-backed Flow
 values select terminal or record transport from the manifest and use the same executor.
 
 Both `--chat` and runner-backed Flow values hold the same prepared-runner abstraction.

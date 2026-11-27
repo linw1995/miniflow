@@ -563,15 +563,15 @@ impl LocalRun {
         run_id: RunId,
         stdout_limit: u64,
     ) -> Result<Self, RunError> {
-        Self::start_with_callbacks(
+        Self::start_invocation(
             command,
             description,
             run_id,
             Default::default(),
             None,
-            crate::runner::RunnerOutput::Finite {
+            InvocationIo::Standard(crate::runner::RunnerOutput::Finite {
                 limit: stdout_limit,
-            },
+            }),
         )
     }
 
@@ -581,31 +581,13 @@ impl LocalRun {
         run_id: RunId,
         cancellation: mf_runtime::StreamCancellation,
     ) -> Result<Self, RunError> {
-        Self::start_with_callbacks(
-            command,
-            description,
-            run_id,
-            cancellation,
-            None,
-            crate::runner::RunnerOutput::Records,
-        )
-    }
-
-    pub fn start_with_callbacks(
-        command: Command,
-        description: WorkflowDescription,
-        run_id: RunId,
-        cancellation: mf_runtime::StreamCancellation,
-        bindings: Option<(&CallbackSites, HostCallbacks)>,
-        output: crate::runner::RunnerOutput,
-    ) -> Result<Self, RunError> {
         Self::start_invocation(
             command,
             description,
             run_id,
             cancellation,
-            bindings,
-            InvocationIo::Standard(output),
+            None,
+            InvocationIo::Standard(crate::runner::RunnerOutput::Records),
         )
     }
 
@@ -718,10 +700,7 @@ impl LocalRun {
             records,
             child,
             rpc,
-            capture: match stream {
-                Some(stream) => CaptureWorker::start_with_stream(capture, Some(stream)),
-                None => CaptureWorker::start(capture),
-            },
+            capture: CaptureWorker::start(capture, stream),
             receiver,
             started: Instant::now(),
             exited: None,
@@ -1009,14 +988,7 @@ struct CaptureWorker {
 }
 
 impl CaptureWorker {
-    fn start(capture: Arc<Mutex<Capture>>) -> Self {
-        Self::start_with_stream(capture, None)
-    }
-
-    fn start_with_stream(
-        capture: Arc<Mutex<Capture>>,
-        mut stream: Option<StreamCaptureState>,
-    ) -> Self {
+    fn start(capture: Arc<Mutex<Capture>>, mut stream: Option<StreamCaptureState>) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let processing = Arc::new(AtomicBool::new(false));
         let progress = Arc::new(Mutex::new(Instant::now()));
@@ -7946,7 +7918,7 @@ assert not reply.readline()
         let mut child: Box<dyn ChildWrapper> = Box::new(child);
         let capture = Arc::new(Mutex::new(Capture::new(Some(MAX_STDOUT_BYTES)).unwrap()));
         capture.lock().unwrap().attach(&mut child).unwrap();
-        let mut worker = CaptureWorker::start(Arc::clone(&capture));
+        let mut worker = CaptureWorker::start(Arc::clone(&capture), None);
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             let view = worker.view();

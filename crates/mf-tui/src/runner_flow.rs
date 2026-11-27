@@ -71,6 +71,7 @@ fn execute(
         // Existing runner JSON cannot carry the caller's native privacy labels.
         snapshots: false,
         host_io: false,
+        callbacks: Default::default(),
     }
     .run(
         context.cancellation(),
