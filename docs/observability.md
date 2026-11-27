@@ -138,7 +138,7 @@ Compiler IR, graph relationships, scheduling layouts, and typed optimization evi
 The definition contains full static configuration, including private literals, parameter defaults, and dependencies.
 Configuration expressions remain unresolved; invocation values and environment-derived values are not materialized.
 Execution descriptions store the mode; `event_schema_version()` derives the event protocol without a duplicate field.
-Declared callbacks use optional local RPC, independent of stdout and OTLP. Older manifest versions require recompilation. Invalid orders,
+Declared callbacks and explicitly granted runner I/O may share a local RPC socket; OTLP remains independent. Without an output grant business results stay on stdout. Older manifest versions require recompilation. Invalid orders,
 inconsistent input contracts, missing required facts, and unexpected properties fail validation.
 The combined UTF-8 JSON payload remains limited to 16 MiB.
 New Linux and macOS runners embed these bytes in `.mf_manifest` (ELF) or `__DATA,__mf_manifest` (Mach-O), respectively.

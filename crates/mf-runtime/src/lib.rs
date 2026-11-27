@@ -136,7 +136,7 @@ pub use stream_instance::{
     ProducerSnafu as StreamProducerSnafu, StreamClock, StreamDelivery, StreamError, StreamInstance,
     StreamMetrics, StreamOptions, StreamOutput, StreamSummary,
 };
-pub use stream_io::{RunnerStdio, TextInput};
+pub use stream_io::{DiagnosticLevel, RunnerDiagnostic, RunnerStdio, TextInput};
 pub use stream_plan::{
     FlowDependency, GeneratedStreamDomainExecutor, MessageSchedule, PreparedStream,
     StreamEmissionBinding, StreamInputResolver, StreamMessageInitializer, StreamMessageProgram,

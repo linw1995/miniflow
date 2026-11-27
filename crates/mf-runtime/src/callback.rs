@@ -59,6 +59,8 @@ pub enum CallbackError {
     #[snafu(display("host callback I/O failed: {source}"), visibility(pub))]
     Transport { source: std::io::Error },
     #[snafu(transparent)]
+    Inputs { source: crate::WorkflowInputError },
+    #[snafu(transparent)]
     Stream { source: crate::StreamError },
     #[snafu(display("invalid callback result port {port}: {source}"))]
     OutputType {
@@ -251,11 +253,15 @@ impl WireValues {
 pub const MAX_CALLBACK_FRAME: usize = 2 * 1024 * 1024;
 
 pub fn encode_control(frame: &impl Serialize) -> Result<Vec<u8>, CallbackError> {
-    struct BoundedFrame(Vec<u8>);
+    encode_frame(frame, MAX_CALLBACK_FRAME)
+}
+
+pub(super) fn encode_frame(frame: &impl Serialize, limit: usize) -> Result<Vec<u8>, CallbackError> {
+    struct BoundedFrame(Vec<u8>, usize);
     impl std::io::Write for BoundedFrame {
         fn write(&mut self, input: &[u8]) -> std::io::Result<usize> {
-            if input.len() >= MAX_CALLBACK_FRAME - self.0.len() {
-                return Err(std::io::Error::other("control frame exceeds limit"));
+            if input.len() >= self.1 - self.0.len() {
+                return Err(std::io::Error::other("RPC frame exceeds limit"));
             }
             self.0.extend_from_slice(input);
             Ok(input.len())
@@ -264,7 +270,7 @@ pub fn encode_control(frame: &impl Serialize) -> Result<Vec<u8>, CallbackError> 
             Ok(())
         }
     }
-    let mut bytes = BoundedFrame(Vec::new());
+    let mut bytes = BoundedFrame(Vec::new(), limit);
     serde_json::to_writer(&mut bytes, frame).context(CodecSnafu)?;
     bytes.0.push(b'\n');
     Ok(bytes.0)

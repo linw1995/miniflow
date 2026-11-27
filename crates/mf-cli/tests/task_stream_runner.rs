@@ -227,6 +227,157 @@ fn installed_finite_runner_calls_a_native_host_without_chat_or_flow_sources() {
 }
 
 #[test]
+fn installed_runner_routes_startup_records_and_diagnostics_independently() {
+    use mf_runtime::{
+        DiagnosticLevel, StreamCancellation, WorkflowArguments,
+        callback_rpc::{HostSession, host::Listener},
+    };
+    use std::{sync::mpsc, time::Duration};
+
+    let root = tempfile::tempdir().unwrap();
+    let gate = root.path().join("release");
+    let executable = compile(root.path(), count_flow(true, Some(&gate), None));
+    fs::remove_file(root.path().join("flow.json")).unwrap();
+    fs::remove_dir_all(root.path().join("build")).unwrap();
+    let (failures, failed) = mpsc::channel();
+    let start = |args: &[&str], host| {
+        let mut command = Command::new(&executable);
+        command
+            .args(args)
+            .env(mf_telemetry::SNAPSHOT_CAPTURE_ENV, "1");
+        let listener = Listener::prepare_session(&mut command, &Default::default(), host)
+            .unwrap()
+            .unwrap();
+        let child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let failures = failures.clone();
+        let server = listener
+            .start(child.id(), &StreamCancellation::default(), move |err| {
+                failures.send(err).unwrap();
+            })
+            .unwrap();
+        (child, server)
+    };
+    let inputs = || WorkflowArguments::from_json(br#"{"count.count":3}"#).unwrap();
+    let (tx, rx) = mpsc::channel();
+    let (warnings, received) = mpsc::channel();
+    let host = HostSession {
+        inputs: Some(inputs()),
+        output: Some(Box::new(move |v, _| {
+            tx.send(serde_json::to_value(v).unwrap()).unwrap();
+            Ok(())
+        })),
+        diagnostics: Some(Box::new(move |v, _| {
+            warnings.send(v).unwrap();
+            Ok(())
+        })),
+        ..Default::default()
+    };
+    let (mut child, server) = start(&[], host);
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(10)).unwrap(),
+        json!({"increment":0})
+    );
+    assert!(child.try_wait().unwrap().is_none());
+    fs::write(&gate, "release").unwrap();
+    let result = child.wait_with_output().unwrap();
+    server.finish().unwrap();
+    assert!(
+        result.status.success() && result.stdout.is_empty() && result.stderr.is_empty(),
+        "{result:?}"
+    );
+    let records = rx.into_iter().collect::<Vec<_>>();
+    assert_eq!(
+        records
+            .iter()
+            .filter_map(|r| r.get("increment"))
+            .collect::<Vec<_>>(),
+        [&json!(1), &json!(2)]
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter_map(|r| r.get("total"))
+            .collect::<Vec<_>>(),
+        [&json!(3)]
+    );
+    assert!(
+        received
+            .into_iter()
+            .any(|d| d.level == DiagnosticLevel::Warning
+                && d.message.contains("telemetry-enabled build"))
+    );
+
+    let (child, server) = start(
+        &["--node", "count"],
+        HostSession {
+            inputs: Some(inputs()),
+            ..Default::default()
+        },
+    );
+    let result = child.wait_with_output().unwrap();
+    server.finish().unwrap();
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&result.stdout).unwrap(),
+        json!({"total":3})
+    );
+    assert!(String::from_utf8_lossy(&result.stderr).contains("data history unavailable"));
+
+    let (tx, rx) = mpsc::channel();
+    let (child, server) = start(
+        &["--node", "count", "--count.count=2"],
+        HostSession {
+            output: Some(Box::new(move |v, _| {
+                tx.send(serde_json::to_value(v).unwrap()).unwrap();
+                Ok(())
+            })),
+            ..Default::default()
+        },
+    );
+    let result = child.wait_with_output().unwrap();
+    server.finish().unwrap();
+    assert!(
+        result.status.success() && result.stdout.is_empty(),
+        "{result:?}"
+    );
+    assert_eq!(rx.into_iter().collect::<Vec<_>>(), [json!({"total":2})]);
+
+    for args in [
+        &["--inputs={}"][..],
+        &["--inputs-file=/absent-rpc-input-file"],
+        &["--count.count", "2"],
+    ] {
+        let (tx, rx) = mpsc::channel();
+        let (child, server) = start(
+            args,
+            HostSession {
+                inputs: Some(inputs()),
+                diagnostics: Some(Box::new(move |v, _| {
+                    tx.send(v).unwrap();
+                    Ok(())
+                })),
+                ..Default::default()
+            },
+        );
+        let result = child.wait_with_output().unwrap();
+        server.finish().unwrap();
+        assert!(
+            !result.status.success() && result.stdout.is_empty() && result.stderr.is_empty(),
+            "{result:?}"
+        );
+        let error = rx.recv().unwrap();
+        assert_eq!(error.level, DiagnosticLevel::Error);
+        assert!(error.message.contains("cannot be combined"), "{error:?}");
+    }
+    assert!(failed.try_iter().collect::<Vec<_>>().is_empty());
+}
+
+#[test]
 fn compiled_native_stream_delivers_increments_before_the_terminal_result() {
     let root = tempfile::tempdir().unwrap();
     let gate = root.path().join("release");

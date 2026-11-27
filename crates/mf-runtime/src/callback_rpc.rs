@@ -1,28 +1,49 @@
-//! Invocation-scoped callback RPC over a local Unix socket. Direction determines the message schema.
+//! Invocation-scoped runner I/O and finite callbacks over one authenticated Unix connection.
 
+mod channel;
 #[cfg(feature = "callback-host")]
 pub mod host;
 
-use crate::{StreamCancellation, WorkflowArguments, callback::*};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use crate::{NodeValues, RunnerDiagnostic, StreamCancellation, WorkflowArguments, callback::*};
+use channel::Channel;
+use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
 use std::{
-    io::{self, BufRead, BufReader, Write},
     os::unix::net::UnixStream,
     path::PathBuf,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
 };
 
 pub const LAUNCH_ENV: &str = "MF_RUNNER_RPC_V1";
+/// Large business records need not fit the much smaller callback/control envelope.
+pub const MAX_OUTPUT_FRAME: usize = 32 * 1024 * 1024;
 
-/// Only the launcher's immediate child consumes this grant. It contains no business inputs.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct IoGrant {
+    pub inputs: bool,
+    pub output: bool,
+    pub diagnostics: bool,
+}
+
+impl IoGrant {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+    fn events(self) -> bool {
+        self.output || self.diagnostics
+    }
+}
+
+/// Only the launcher's immediate child consumes this grant. It contains no business values.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Grant {
     pub parent: u32,
     pub socket: PathBuf,
     pub bindings: Vec<String>,
+    #[serde(default, skip_serializing_if = "IoGrant::is_empty")]
+    pub io: IoGrant,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -40,191 +61,343 @@ struct Response {
     value: WireValues,
 }
 
-const IO_TICK: Duration = Duration::from_millis(50);
-const TRANSFER_TIMEOUT: Duration = Duration::from_secs(5);
-
-struct Channel {
-    socket: BufReader<UnixStream>,
-    last: u64,
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum Event {
+    GetInputs {},
+    Output(NodeValues),
+    Diagnostic(RunnerDiagnostic),
+    Flush {},
 }
 
-fn transient(error: &io::Error) -> bool {
-    matches!(
-        error.kind(),
-        io::ErrorKind::Interrupted | io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
-    )
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Incoming {
+    Event(Event),
+    Call(Request),
 }
 
-fn check(
-    cancellation: &StreamCancellation,
-    deadline: Option<Instant>,
-) -> Result<(), CallbackError> {
-    if let Some(error) = cancellation.failure() {
-        return Err(error.into());
-    }
-    ensure!(
-        deadline.is_none_or(|end| Instant::now() < end),
-        ProtocolSnafu {
-            reason: "RPC transfer timed out"
-        }
-    );
-    Ok(())
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Startup {
+    inputs: WireValues,
 }
 
-impl Channel {
-    fn new(socket: UnixStream) -> Result<Self, CallbackError> {
-        // Accepted sockets may inherit the listener's nonblocking flag on BSD.
-        socket.set_nonblocking(false).context(TransportSnafu)?;
-        socket
-            .set_read_timeout(Some(IO_TICK))
-            .context(TransportSnafu)?;
-        socket
-            .set_write_timeout(Some(IO_TICK))
-            .context(TransportSnafu)?;
-        Ok(Self {
-            socket: BufReader::new(socket),
-            last: 0,
-        })
-    }
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Flushed {
+    flushed: bool,
+}
 
-    fn next_id(&self) -> Result<u64, CallbackError> {
-        self.last.checked_add(1).context(ProtocolSnafu {
-            reason: "callback ID exhausted",
-        })
-    }
+pub type Consumer<T> = Box<dyn FnMut(T, &StreamCancellation) -> Result<(), CallbackError> + Send>;
 
-    fn receive<T: DeserializeOwned>(
-        &mut self,
-        cancel: &StreamCancellation,
-    ) -> Result<Option<T>, CallbackError> {
-        let mut bytes = Vec::new();
-        let mut deadline = None;
-        loop {
-            check(cancel, deadline)?;
-            let input = match self.socket.fill_buf() {
-                Ok(input) => input,
-                Err(e) if transient(&e) => continue,
-                Err(e) => return Err(e).context(TransportSnafu),
-            };
-            if input.is_empty() {
-                ensure!(
-                    bytes.is_empty(),
-                    ProtocolSnafu {
-                        reason: "incomplete RPC message"
-                    }
-                );
-                return Ok(None);
-            }
-            let newline = input.iter().position(|b| *b == b'\n');
-            let len = newline.unwrap_or(input.len());
-            ensure!(
-                bytes.len() + len < MAX_CALLBACK_FRAME,
-                ProtocolSnafu {
-                    reason: "RPC message exceeds limit"
-                }
-            );
-            bytes.extend_from_slice(&input[..len]);
-            self.socket.consume(len + usize::from(newline.is_some()));
-            if newline.is_some() {
-                return crate::decode_unique_json(&bytes)
-                    .context(CodecSnafu)
-                    .map(Some);
-            }
-            deadline.get_or_insert_with(|| Instant::now() + TRANSFER_TIMEOUT);
+/// Independent capabilities for one launch. Consumers run in wire order and may exert backpressure.
+/// A blocking consumer must observe cancellation, and must not wait for the child to exit.
+#[derive(Default)]
+pub struct HostSession {
+    pub callbacks: HostCallbacks,
+    pub inputs: Option<WorkflowArguments>,
+    pub output: Option<Consumer<NodeValues>>,
+    pub diagnostics: Option<Consumer<RunnerDiagnostic>>,
+}
+
+impl HostSession {
+    fn grant(&self) -> IoGrant {
+        IoGrant {
+            inputs: self.inputs.is_some(),
+            output: self.output.is_some(),
+            diagnostics: self.diagnostics.is_some(),
         }
     }
-
-    fn send(
-        &mut self,
-        value: &impl Serialize,
-        cancel: &StreamCancellation,
-    ) -> Result<(), CallbackError> {
-        let bytes = encode_control(value)?;
-        let deadline = Some(Instant::now() + TRANSFER_TIMEOUT);
-        let mut rest = bytes.as_slice();
-        while !rest.is_empty() {
-            check(cancel, deadline)?;
-            match self.socket.get_mut().write(rest) {
-                Ok(0) => {
-                    return Err(io::Error::from(io::ErrorKind::WriteZero)).context(TransportSnafu);
-                }
-                Ok(n) => rest = &rest[n..],
-                Err(e) if transient(&e) => continue,
-                Err(e) => return Err(e).context(TransportSnafu),
-            }
-        }
-        Ok(())
-    }
-
-    fn call(
-        &mut self,
-        binding: &str,
-        args: &WorkflowArguments,
-        cancel: &StreamCancellation,
-    ) -> Result<CallbackReply, CallbackError> {
-        let id = self.next_id()?;
-        self.send(
-            &Request {
-                id,
-                binding: binding.into(),
-                args: WireValues::encode(&args.0),
-            },
-            cancel,
-        )?;
-        let reply: Response = self.receive(cancel)?.context(ProtocolSnafu {
-            reason: "host closed without a result",
-        })?;
-        ensure!(
-            reply.id == id,
-            ProtocolSnafu {
-                reason: "unexpected callback result ID"
-            }
-        );
-        self.last = id;
-        Ok(reply.value.decode()?.into())
-    }
 }
 
-/// Serve an already authenticated peer. The connection is consumed and never resumed after an error.
+/// Serve callbacks only, without taking over any runner I/O.
 pub fn serve(
     socket: UnixStream,
     callbacks: &HostCallbacks,
     cancel: &StreamCancellation,
 ) -> Result<(), CallbackError> {
+    serve_session(
+        socket,
+        HostSession {
+            callbacks: callbacks.clone(),
+            ..Default::default()
+        },
+        cancel,
+    )
+}
+
+/// Serve an already authenticated peer. An event sink error prevents the final drain receipt.
+pub fn serve_session(
+    socket: UnixStream,
+    session: HostSession,
+    cancel: &StreamCancellation,
+) -> Result<(), CallbackError> {
+    dispatch(socket, session, cancel, &mut false)
+}
+
+fn dispatch(
+    socket: UnixStream,
+    mut session: HostSession,
+    cancel: &StreamCancellation,
+    completed: &mut bool,
+) -> Result<(), CallbackError> {
     let mut channel = Channel::new(socket)?;
-    while let Some(Request { id, binding, args }) = channel.receive(cancel)? {
+    let io = session.grant();
+    let limit = if io.output {
+        MAX_OUTPUT_FRAME
+    } else {
+        MAX_CALLBACK_FRAME
+    };
+    while let Some(bytes) = channel.read_frame(limit, cancel)? {
+        let message: Incoming = crate::decode_unique_json(&bytes).context(CodecSnafu)?;
         ensure!(
-            id == channel.next_id()?,
+            bytes.len() < MAX_CALLBACK_FRAME
+                || matches!(message, Incoming::Event(Event::Output(_))),
             ProtocolSnafu {
-                reason: "out-of-order callback request"
+                reason: "control message exceeds limit"
             }
         );
-        let handler = callbacks.get(&binding).context(ProtocolSnafu {
-            reason: "unbound callback",
-        })?;
-        let reply = handler.call(&WorkflowArguments(args.decode()?), cancel)?;
-        channel.send(
-            &Response {
-                id,
-                value: WireValues::encode(&reply.outputs),
-            },
-            cancel,
-        )?;
-        reply.delivered();
-        channel.last = id;
+        ensure!(
+            session.inputs.is_none() || matches!(message, Incoming::Event(Event::GetInputs {})),
+            ProtocolSnafu {
+                reason: "startup inputs must be requested first"
+            }
+        );
+        match message {
+            Incoming::Event(Event::GetInputs {}) => {
+                let inputs = session.inputs.take().context(ProtocolSnafu {
+                    reason: "startup inputs not granted or already consumed",
+                })?;
+                inputs.check_encoded_size()?;
+                channel.send(
+                    &Startup {
+                        inputs: WireValues::encode(&inputs.0),
+                    },
+                    MAX_CALLBACK_FRAME,
+                    false,
+                    cancel,
+                )?;
+                *completed = !io.events();
+            }
+            Incoming::Event(Event::Output(values)) => {
+                session.output.as_mut().context(ProtocolSnafu {
+                    reason: "output not granted",
+                })?(values, cancel)?;
+            }
+            Incoming::Event(Event::Diagnostic(diagnostic)) => {
+                session.diagnostics.as_mut().context(ProtocolSnafu {
+                    reason: "diagnostics not granted",
+                })?(diagnostic, cancel)?;
+            }
+            Incoming::Event(Event::Flush {}) => {
+                ensure!(
+                    io.events(),
+                    ProtocolSnafu {
+                        reason: "unexpected drain request"
+                    }
+                );
+                channel.send(
+                    &Flushed { flushed: true },
+                    MAX_CALLBACK_FRAME,
+                    false,
+                    cancel,
+                )?;
+                *completed = true;
+                return Ok(());
+            }
+            Incoming::Call(Request { id, binding, args }) => {
+                ensure!(
+                    id == channel.next_id()?,
+                    ProtocolSnafu {
+                        reason: "out-of-order callback request"
+                    }
+                );
+                let handler = session.callbacks.get(&binding).context(ProtocolSnafu {
+                    reason: "unbound callback",
+                })?;
+                let reply = handler.call(&WorkflowArguments(args.decode()?), cancel)?;
+                channel.send(
+                    &Response {
+                        id,
+                        value: WireValues::encode(&reply.outputs),
+                    },
+                    MAX_CALLBACK_FRAME,
+                    false,
+                    cancel,
+                )?;
+                reply.delivered();
+                channel.last_id = id;
+            }
+        }
     }
+    ensure!(
+        !io.events() && session.inputs.is_none(),
+        ProtocolSnafu {
+            reason: "runner closed before completing hosted I/O"
+        }
+    );
     Ok(())
+}
+
+#[derive(Clone)]
+struct Link {
+    channel: Arc<Mutex<Channel>>,
+    execution: StreamCancellation,
+}
+
+impl Link {
+    fn poison(&self) {
+        self.execution.cancel(
+            crate::StreamExecutionSnafu {
+                message: "runner RPC previously failed",
+            }
+            .build(),
+        );
+    }
+
+    fn exchange<T>(
+        &self,
+        op: impl FnOnce(&mut Channel) -> Result<T, CallbackError>,
+    ) -> Result<T, CallbackError> {
+        let mut channel = self.channel.lock().unwrap();
+        if let Some(error) = self.execution.failure() {
+            return Err(error.into());
+        }
+        op(&mut channel).inspect_err(|_| self.poison())
+    }
+}
+
+pub struct Client {
+    link: Link,
+    bindings: Vec<String>,
+    io: IoGrant,
+}
+
+impl Client {
+    pub fn io(&self) -> IoGrant {
+        self.io
+    }
+
+    pub fn callbacks(&self) -> HostCallbacks {
+        self.bindings
+            .iter()
+            .map(|name| {
+                let binding = name.clone();
+                let link = self.link.clone();
+                let backpressured = self.io.events();
+                (
+                    name.clone(),
+                    HostCallback::new(move |args, cancel| {
+                        let reply: CallbackReply = link.exchange(|channel| {
+                            let id = channel.next_id()?;
+                            channel.send(
+                                &Request {
+                                    id,
+                                    binding: binding.clone(),
+                                    args: WireValues::encode(&args.0),
+                                },
+                                MAX_CALLBACK_FRAME,
+                                backpressured,
+                                cancel,
+                            )?;
+                            let reply: Response = channel.reply(cancel)?;
+                            ensure!(
+                                reply.id == id,
+                                ProtocolSnafu {
+                                    reason: "unexpected callback result ID"
+                                }
+                            );
+                            channel.last_id = id;
+                            Ok(reply.value.decode()?.into())
+                        })?;
+                        let link = link.clone();
+                        Ok(reply.on_delivery(move |valid| {
+                            if !valid {
+                                link.poison();
+                            }
+                        }))
+                    }),
+                )
+            })
+            .collect()
+    }
+
+    pub fn take_inputs(&mut self) -> Result<Option<WorkflowArguments>, CallbackError> {
+        if !std::mem::take(&mut self.io.inputs) {
+            return Ok(None);
+        }
+        self.link.exchange(|channel| {
+            let cancel = &self.link.execution;
+            channel.send(&Event::GetInputs {}, MAX_CALLBACK_FRAME, false, cancel)?;
+            let reply: Startup = channel.reply(cancel)?;
+            let inputs = WorkflowArguments(reply.inputs.decode()?);
+            inputs.check_encoded_size()?;
+            Ok(Some(inputs))
+        })
+    }
+
+    pub fn output(
+        &self,
+        values: NodeValues,
+        cancel: &StreamCancellation,
+    ) -> Result<(), CallbackError> {
+        ensure!(
+            self.io.output,
+            ProtocolSnafu {
+                reason: "output not granted"
+            }
+        );
+        self.link.exchange(|channel| {
+            channel.send(&Event::Output(values), MAX_OUTPUT_FRAME, true, cancel)
+        })
+    }
+
+    pub fn diagnostic(&self, value: RunnerDiagnostic) -> Result<(), CallbackError> {
+        ensure!(
+            self.io.diagnostics,
+            ProtocolSnafu {
+                reason: "diagnostics not granted"
+            }
+        );
+        self.link.exchange(|channel| {
+            channel.send(
+                &Event::Diagnostic(value),
+                MAX_CALLBACK_FRAME,
+                true,
+                &self.link.execution,
+            )
+        })
+    }
+
+    /// Only one round trip, after the last event. A successful exit cannot race an undrained or rejected record.
+    pub fn finish(self) -> Result<(), CallbackError> {
+        if self.io.events() {
+            self.link.exchange(|channel| {
+                let cancel = &self.link.execution;
+                channel.send(&Event::Flush {}, MAX_CALLBACK_FRAME, true, cancel)?;
+                let ack: Flushed = channel.reply(cancel)?;
+                ensure!(
+                    ack.flushed,
+                    ProtocolSnafu {
+                        reason: "host did not drain runner events"
+                    }
+                );
+                Ok(())
+            })?;
+        }
+        Ok(())
+    }
 }
 
 pub fn connect(
     grant: Grant,
     sites: &CallbackSites,
     execution: &StreamCancellation,
-) -> Result<HostCallbacks, CallbackError> {
-    use std::collections::BTreeSet;
-    let mut seen = BTreeSet::new();
+) -> Result<Client, CallbackError> {
+    let mut seen = std::collections::BTreeSet::new();
     ensure!(
-        !grant.bindings.is_empty()
+        (!grant.bindings.is_empty() || !grant.io.is_empty())
             && grant
                 .bindings
                 .iter()
@@ -240,57 +413,28 @@ pub fn connect(
         }
     );
     let socket = UnixStream::connect(&grant.socket).context(TransportSnafu)?;
-    let channel = Arc::new(Mutex::new(Channel::new(socket)?));
-    Ok(grant
-        .bindings
-        .into_iter()
-        .map(|name| {
-            let channel = channel.clone();
-            let execution = execution.clone();
-            (
-                name.clone(),
-                HostCallback::new(move |args, cancel| {
-                    let mut channel = channel.lock().unwrap();
-                    if let Some(error) = execution.failure() {
-                        return Err(error.into());
-                    }
-                    // A capturing Call cannot turn an interrupted exchange into a successful run.
-                    let execution = execution.clone();
-                    let poison = move || {
-                        execution.cancel(
-                            crate::StreamExecutionSnafu {
-                                message: "callback RPC previously failed",
-                            }
-                            .build(),
-                        )
-                    };
-                    let reply = channel
-                        .call(&name, args, cancel)
-                        .inspect_err(|_| poison())?;
-                    Ok(reply.on_delivery(move |valid| {
-                        if !valid {
-                            poison();
-                        }
-                    }))
-                }),
-            )
-        })
-        .collect())
+    Ok(Client {
+        link: Link {
+            channel: Arc::new(Mutex::new(Channel::new(socket)?)),
+            execution: execution.clone(),
+        },
+        bindings: grant.bindings,
+        io: grant.io,
+    })
 }
 
-/// Consume only a grant issued by this executable's immediate parent.
+/// Environment inheritance is not delegation to another executable.
 pub fn from_env(
     sites: &CallbackSites,
     execution: &StreamCancellation,
-) -> Result<HostCallbacks, CallbackError> {
+) -> Result<Option<Client>, CallbackError> {
     use std::os::unix::ffi::OsStrExt;
     let Some(value) = std::env::var_os(LAUNCH_ENV) else {
-        return Ok(Default::default());
+        return Ok(None);
     };
     let grant: Grant = crate::decode_unique_json(value.as_bytes()).context(CodecSnafu)?;
-    // A plugin may start another standalone executable. Environment inheritance is not delegation.
     if grant.parent != unsafe { libc::getppid() } as u32 {
-        return Ok(Default::default());
+        return Ok(None);
     }
-    connect(grant, sites, execution)
+    connect(grant, sites, execution).map(Some)
 }

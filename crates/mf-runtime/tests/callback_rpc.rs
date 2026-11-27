@@ -3,7 +3,7 @@
 use mf_runtime::{
     Outputs, StreamCancellation, WorkflowArguments,
     callback::*,
-    callback_rpc::{Grant, connect, serve},
+    callback_rpc::{Grant, HostSession, IoGrant, connect, serve, serve_session},
 };
 use serde_json::{Value, json};
 use std::{
@@ -59,6 +59,224 @@ fn rpc_has_only_requests_and_responses_and_delivers_once_after_writing() {
     peer.shutdown(Shutdown::Write).unwrap();
     worker.join().unwrap().unwrap();
     assert_eq!(*events.lock().unwrap(), [("lookup", true), ("other", true)]);
+}
+
+#[test]
+fn hosted_events_and_pulled_inputs_do_not_consume_callback_ids() {
+    use mf_runtime::{DiagnosticLevel, NodeValues};
+    let (server, mut peer) = UnixStream::pair().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let host = HostSession {
+        callbacks: [(
+            "lookup".into(),
+            HostCallback::new(|args, _| Ok(args.0.clone().into())),
+        )]
+        .into(),
+        inputs: Some(WorkflowArguments(
+            [(
+                "params.token".into(),
+                mf_runtime::ValueRef::from("token").into_secret(),
+            )]
+            .into(),
+        )),
+        output: Some(Box::new(move |record: NodeValues, _| {
+            tx.send(record).unwrap();
+            Ok(())
+        })),
+        diagnostics: Some(Box::new(|diagnostic, _| {
+            assert_eq!(diagnostic.level, DiagnosticLevel::Warning);
+            assert_eq!(diagnostic.message, "note");
+            Ok(())
+        })),
+    };
+    let worker = thread::spawn(move || serve_session(server, host, &Default::default()));
+    writeln!(peer, "{}", json!({"get_inputs":{}})).unwrap();
+    assert_eq!(
+        read(&peer),
+        json!({"inputs":{"values":{"params.token":"token"},"private":[["params.token"]]}})
+    );
+    let large = "z".repeat(MAX_CALLBACK_FRAME + 1);
+    for record in [json!({"answer":"prefix"}), json!({"output":large})] {
+        writeln!(peer, "{}", json!({"output":record})).unwrap();
+        assert_eq!(
+            serde_json::to_value(rx.recv_timeout(Duration::from_secs(5)).unwrap()).unwrap(),
+            record
+        );
+    }
+    writeln!(
+        peer,
+        "{}",
+        json!({"diagnostic":{"level":"warning","message":"note"}})
+    )
+    .unwrap();
+    writeln!(
+        peer,
+        "{}",
+        json!({"id":1,"binding":"lookup","args":{"values":{"x":1}}})
+    )
+    .unwrap();
+    assert_eq!(read(&peer), json!({"id":1,"value":{"values":{"x":1}}}));
+    writeln!(peer, "{}", json!({"flush":{}})).unwrap();
+    assert_eq!(read(&peer), json!({"flushed":true}));
+    worker.join().unwrap().unwrap();
+}
+
+#[test]
+fn ungranted_or_incomplete_io_fails_without_replaying_any_event() {
+    fn output() -> HostSession {
+        HostSession {
+            output: Some(Box::new(|_, _| Ok(()))),
+            ..Default::default()
+        }
+    }
+    fn inputs() -> HostSession {
+        HostSession {
+            inputs: Some(Default::default()),
+            ..Default::default()
+        }
+    }
+    for (host, lines, diagnostic) in [
+        (
+            HostSession::default(),
+            vec![json!({"get_inputs":{}})],
+            "not granted",
+        ),
+        (
+            HostSession::default(),
+            vec![json!({"output":{}})],
+            "output not granted",
+        ),
+        (
+            HostSession::default(),
+            vec![json!({"flush":{}})],
+            "unexpected drain",
+        ),
+        (
+            output(),
+            vec![json!({"diagnostic":{"level":"error","message":"not allowed"}})],
+            "diagnostics not granted",
+        ),
+        (
+            inputs(),
+            vec![json!({"get_inputs":{}}), json!({"get_inputs":{}})],
+            "already consumed",
+        ),
+        (inputs(), vec![json!({"output":{}})], "requested first"),
+        (
+            output(),
+            vec![json!({"output":{"x":1}})],
+            "closed before completing",
+        ),
+        (
+            output(),
+            vec![
+                json!({"id":1,"binding":"x","args":{"values":{"x":"z".repeat(MAX_CALLBACK_FRAME)}}}),
+            ],
+            "exceeds limit",
+        ),
+        (
+            output(),
+            vec![json!({"output":{},"binding":"x"})],
+            "encoding",
+        ),
+    ] {
+        let (server, mut peer) = UnixStream::pair().unwrap();
+        let worker = thread::spawn(move || serve_session(server, host, &Default::default()));
+        for line in lines {
+            writeln!(peer, "{line}").unwrap();
+        }
+        peer.shutdown(Shutdown::Write).unwrap();
+        let error = worker.join().unwrap().unwrap_err();
+        assert!(error.to_string().contains(diagnostic), "{error}");
+    }
+}
+
+#[test]
+fn event_sinks_must_drain_before_exit_and_cannot_fall_back_after_disconnect() {
+    for (reply, valid) in [
+        ("", false),
+        ("{\"flushed\":false}\n", false),
+        ("{\"flushed\":true}\n", true),
+    ] {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let path = dir.path().join("rpc");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            for expected in [json!({"output":{"id":"business"}}), json!({"flush":{}})] {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                assert_eq!(serde_json::from_str::<Value>(&line).unwrap(), expected);
+            }
+            socket.write_all(reply.as_bytes()).unwrap();
+        });
+        let execution = StreamCancellation::default();
+        let mut client = connect(
+            Grant {
+                parent: std::process::id(),
+                socket: path,
+                bindings: vec![],
+                io: IoGrant {
+                    output: true,
+                    ..Default::default()
+                },
+            },
+            &Default::default(),
+            &execution,
+        )
+        .unwrap();
+        assert!(client.take_inputs().unwrap().is_none());
+        assert!(
+            client
+                .diagnostic(mf_runtime::RunnerDiagnostic {
+                    level: mf_runtime::DiagnosticLevel::Error,
+                    message: "unexpected".into()
+                })
+                .is_err()
+        );
+        client
+            .output([("id".into(), "business".into())].into(), &execution)
+            .unwrap();
+        assert_eq!(client.finish().is_ok(), valid);
+        assert_eq!(execution.failure().is_none(), valid);
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn a_rejected_output_never_acknowledges_drain() {
+    let (server, mut peer) = UnixStream::pair().unwrap();
+    let worker = thread::spawn(move || {
+        serve_session(
+            server,
+            HostSession {
+                output: Some(Box::new(|_, _| {
+                    ProtocolSnafu {
+                        reason: "consumer stopped",
+                    }
+                    .fail()
+                })),
+                ..Default::default()
+            },
+            &Default::default(),
+        )
+    });
+    peer.write_all(b"{\"output\":{}}\n{\"flush\":{}}\n")
+        .unwrap();
+    assert!(
+        worker
+            .join()
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains("consumer stopped")
+    );
+    let mut bytes = Vec::new();
+    assert_eq!(
+        BufReader::new(peer).read_until(b'\n', &mut bytes).unwrap(),
+        0
+    );
 }
 
 #[test]
@@ -128,11 +346,13 @@ fn a_failed_or_abandoned_client_reply_permanently_poisons_the_grant() {
                 parent: std::process::id(),
                 socket: path,
                 bindings: vec!["lookup".into()],
+                io: Default::default(),
             },
             &[("lookup".into(), vec!["site".into()])].into(),
             &execution,
         )
-        .unwrap();
+        .unwrap()
+        .callbacks();
         let call = || callbacks["lookup"].call(&WorkflowArguments::default(), &Default::default());
         let reply = call();
         assert_eq!(reply.is_ok(), valid);
@@ -141,7 +361,7 @@ fn a_failed_or_abandoned_client_reply_permanently_poisons_the_grant() {
         let Err(error) = call() else {
             panic!("poisoned session dispatched a second call")
         };
-        assert!(error.to_string().contains("callback RPC previously failed"));
+        assert!(error.to_string().contains("runner RPC previously failed"));
         server.join().unwrap();
     }
 }

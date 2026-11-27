@@ -88,7 +88,18 @@ impl<'a> RunnerCommand<'a> {
         })
     }
 
+    pub fn isolated(&self) -> bool {
+        self.target.is_some()
+    }
+
     pub fn resolve(self) -> Result<RunnerInvocation, RunnerArgumentError> {
+        self.resolve_with_inputs(None)
+    }
+
+    pub fn resolve_with_inputs(
+        self,
+        hosted: Option<WorkflowArguments>,
+    ) -> Result<RunnerInvocation, RunnerArgumentError> {
         let Self {
             matches,
             schema,
@@ -102,7 +113,25 @@ impl<'a> RunnerCommand<'a> {
                 message: "context transport requires --node"
             }
         );
-        let options = decode_options(&matches, schema, true)?;
+        let options = if let Some(mut inputs) = hosted {
+            ensure!(
+                matches.ids().all(|id| matches!(
+                    id.as_str(),
+                    "help" | "verbose" | "node" | "context" | "context-file"
+                )),
+                InvalidSnafu {
+                    message: "RPC startup inputs cannot be combined with command-line inputs"
+                }
+            );
+            inputs.check_encoded_size()?;
+            schema.mark_secrets(&mut inputs);
+            RunnerArguments {
+                verbose: matches.get_count("verbose").min(3),
+                inputs,
+            }
+        } else {
+            decode_options(&matches, schema, true)?
+        };
         let inputs =
             crate::resolve_workflow_inputs(schema, &options.inputs, |name| std::env::var_os(name))?;
         schema.validate_stdin(&inputs, false)?;
@@ -431,8 +460,7 @@ fn decode_options(
     };
     schema.mark_secrets(&mut values);
     schema.validate(&values)?;
-    let encoded = serde_json::to_vec(&values).context(crate::WorkflowInputJsonSnafu)?;
-    WorkflowArguments::check_size(encoded.len())?;
+    values.check_encoded_size()?;
     Ok(RunnerArguments {
         verbose: if allow_verbose {
             matches.get_count("verbose").min(3)
