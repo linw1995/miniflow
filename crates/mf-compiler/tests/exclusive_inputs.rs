@@ -17,16 +17,12 @@ fn definition(selected: bool, left: Value, right: Value) -> WorkflowDefinition {
             {"id":"route", "kind":"builtin.if_else", "config":{"branches":[{"id":"left", "condition":{"source":{"output":"condition.value", "path":""}, "operator":"eq", "value":true}}]}},
             {"id":"left", "kind":"builtin.constant", "config":{"value":left}},
             {"id":"right", "kind":"builtin.constant", "config":{"value":right}},
-            {"id":"consume", "kind":"builtin.identity"}
+            {"id":"consume", "kind":"builtin.identity", "inputs":{"input":{"exclusive":[{"$ref":"left.value"}, {"$ref":"right.value"}]}}}
         ],
-        "control_edges":[
+        "edges":[
             {"from_node":"condition", "from_output":"value", "to_node":"route"},
             {"from_node":"route", "from_output":"left", "to_node":"left"},
             {"from_node":"route", "from_output":"else", "to_node":"right"}
-        ],
-        "edges":[
-            {"from_node":"left", "from_output":"value", "to_node":"consume", "to_input":"input", "exclusive":true},
-            {"from_node":"right", "from_output":"value", "to_node":"consume", "to_input":"input", "exclusive":true}
         ],
         "outputs":[{"name":"result", "node":"consume", "port":"value", "optional":true}]
     })).unwrap()
@@ -97,33 +93,32 @@ fn loop_rounds_and_parallel_iterations_select_within_each_scope() {
         body["nodes"].as_array_mut().unwrap().remove(0);
         body["nodes"][0]["config"]["branches"][0]["condition"]["source"]["output"] =
             json!(format!("{source}.{port}"));
-        body["control_edges"][0]["from_node"] = json!(source);
-        body["control_edges"][0]["from_output"] = json!(port);
+        body["edges"][0]["from_node"] = json!(source);
+        body["edges"][0]["from_output"] = json!(port);
         let definition = if mode == "loop" {
-            body["nodes"][3] =
-                json!({"id":"consume", "kind":"workflow.assign", "config":{"variable":"state"}});
-            for edge in body["edges"].as_array_mut().unwrap() {
-                edge["to_input"] = json!("value");
-            }
+            let selected = body["nodes"][3]["inputs"]["input"].take();
+            body["nodes"][3] = json!({"id":"consume", "kind":"workflow.assign", "config":{"variable":"state"}, "inputs":{"value":selected}});
             json!({"version":"2026-10-03", "dependencies":{}, "nodes":[
                 {"id":"start", "kind":"builtin.constant", "config":{"value":false}},
                 {"id":"loop", "kind":"loop.run", "config":{"max_iterations":3, "variables":[{"name":"state", "type":"bool"}], "body":{"version":"2026-10-03", "dependencies":{},
-                    "nodes":body["nodes"], "control_edges":body["control_edges"], "edges":body["edges"]
-                }}}
-            ], "edges":[{"from_node":"start", "from_output":"value", "to_node":"loop", "to_input":"state"}],
+                    "nodes":body["nodes"], "edges":body["edges"]
+                }},
+                "inputs":{"state":{"$ref":"start.value"}}}
+            ],
             "outputs":[{"name":"result", "node":"loop", "port":"state"}]})
         } else {
             json!({"version":"2026-10-03", "dependencies":{}, "nodes":[
                 {"id":"start", "kind":"builtin.constant", "config":{"value":[true,false,true,false]}},
                 {"id":"iterate", "kind":"builtin.iteration", "config":{"mode":mode, "body":{"version":"2026-10-03", "dependencies":{},
-                    "nodes":body["nodes"], "control_edges":body["control_edges"], "edges":body["edges"], "outputs": [{"name":"result", "node":"consume", "port":"value"}]
-                }}}
-            ], "edges":[{"from_node":"start", "from_output":"value", "to_node":"iterate", "to_input":"items"}],
+                    "nodes":body["nodes"], "edges":body["edges"], "outputs": [{"name":"result", "node":"consume", "port":"value"}]
+                }},
+                "inputs":{"items":{"$ref":"start.value"}}}
+            ],
             "outputs":[{"name":"result", "node":"iterate", "port":"results"}]})
         };
         let mut invalid = definition.clone();
         let body = &mut invalid["nodes"][1]["config"]["body"];
-        body["control_edges"].as_array_mut().unwrap().truncate(1);
+        body["edges"].as_array_mut().unwrap().truncate(1);
         let error =
             compile_definition(&serde_json::from_value(invalid).unwrap(), &registry).unwrap_err();
         assert!(
@@ -185,9 +180,8 @@ fn typed_plans_fall_back_at_groups_and_isolated_nodes_accept_resolved_inputs() {
     value["dependencies"] = json!({"core":{"package":"mfn-core", "path":std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../builtin-nodes/core")}});
     value["nodes"].as_array_mut().unwrap().extend([
         json!({"id":"unrelated_a", "kind":"builtin.identity"}),
-        json!({"id":"unrelated_b", "kind":"builtin.identity"}),
+        json!({"id":"unrelated_b", "kind":"builtin.identity", "inputs":{"input":{"$ref":"unrelated_a.value"}}}),
     ]);
-    value["edges"].as_array_mut().unwrap().push(json!({"from_node":"unrelated_a", "from_output":"value", "to_node":"unrelated_b", "to_input":"input"}));
     let plan = compile_definition(&serde_json::from_value(value).unwrap(), &registry).unwrap();
     let artifacts = plan
         .generate_artifacts(&registry, Default::default())
@@ -241,8 +235,7 @@ fn observed_selections_and_snapshots_preserve_provenance_without_secret_values()
         value["nodes"][index]["config"] = json!({});
     }
     for index in [2, 3] {
-        value["nodes"][index]["inputs"] =
-            json!({"input":{"from":{"node":"params","port":"payload"}}});
+        value["nodes"][index]["inputs"] = json!({"input":{"$ref":"params.payload"}});
     }
     let registry = NodeRegistry::from_inventory().unwrap();
     for ci in [false, true] {
@@ -305,17 +298,11 @@ fn stream_skip_observations_use_logical_inputs_and_keep_selected_sources() {
         "nodes":[
             controlled::source(json!("int")),
             {"id":"route", "kind":"builtin.if_else", "config":{"branches":[{"id":"positive", "condition":{"source":{"output":"feed.item", "path":""}, "operator":"gt", "value":0}}]}},
-            {"id":"active", "kind":"builtin.identity"},
-            {"id":"inactive", "kind":"builtin.identity"},
-            {"id":"collect", "kind":"builtin.batch", "config":{"max_items":2, "max_wait_ms":100}}
+            {"id":"active", "kind":"builtin.identity", "inputs":{"input":{"$ref":"feed.item"}}},
+            {"id":"inactive", "kind":"builtin.identity", "inputs":{"input":{"$ref":"feed.item"}}},
+            {"id":"collect", "kind":"builtin.batch", "config":{"max_items":2, "max_wait_ms":100}, "inputs":{"item":{"exclusive":[{"$ref":"active.value"}, {"$ref":"inactive.value"}]}}}
         ],
         "edges":[
-            {"from_node":"feed", "from_output":"item", "to_node":"active", "to_input":"input"},
-            {"from_node":"feed", "from_output":"item", "to_node":"inactive", "to_input":"input"},
-            {"from_node":"active", "from_output":"value", "to_node":"collect", "to_input":"item", "exclusive":true},
-            {"from_node":"inactive", "from_output":"value", "to_node":"collect", "to_input":"item", "exclusive":true}
-        ],
-        "control_edges":[
             {"from_node":"feed", "from_output":"item", "to_node":"route"},
             {"from_node":"route", "from_output":"positive", "to_node":"active"},
             {"from_node":"route", "from_output":"else", "to_node":"inactive"},
@@ -365,6 +352,9 @@ fn stream_skip_observations_use_logical_inputs_and_keep_selected_sources() {
 fn exclusive_startup_input_activates_a_stream_producer() {
     let registry = NodeRegistry::from_inventory().unwrap();
     for ci in [false, true] {
+        let mut feed = controlled::source(json!("int"));
+        feed["inputs"]["control"] =
+            json!({"exclusive":[{"$ref":"local.value"}, {"$ref":"ci.value"}]});
         let definition: WorkflowDefinition = serde_json::from_value(json!({
             "version":"2026-10-03", "dependencies":{}, "execution":{},
             "nodes":[
@@ -372,19 +362,12 @@ fn exclusive_startup_input_activates_a_stream_producer() {
                     "control":{"type":"string"}, "ci":{"type":"bool", "default":ci, "secret":false}
                 }}},
                 {"id":"route", "kind":"builtin.if_else", "config":{"branches":[{"id":"ci", "condition":{"source":{"output":"params.ci", "path":""}, "operator":"eq", "value":true}}]}},
-                {"id":"local", "kind":"builtin.identity"},
-                {"id":"ci", "kind":"builtin.identity"},
-                controlled::source(json!("int")),
-                {"id":"consume", "kind":"builtin.identity"}
+                {"id":"local", "kind":"builtin.identity", "inputs":{"input":{"$ref":"params.control"}}},
+                {"id":"ci", "kind":"builtin.identity", "inputs":{"input":{"$ref":"params.control"}}},
+                feed,
+                {"id":"consume", "kind":"builtin.identity", "inputs":{"input":{"$ref":"feed.item"}}}
             ],
             "edges":[
-                {"from_node":"params", "from_output":"control", "to_node":"local", "to_input":"input"},
-                {"from_node":"params", "from_output":"control", "to_node":"ci", "to_input":"input"},
-                {"from_node":"feed", "from_output":"item", "to_node":"consume", "to_input":"input"},
-                {"from_node":"local", "from_output":"value", "to_node":"feed", "to_input":"control", "exclusive":true},
-                {"from_node":"ci", "from_output":"value", "to_node":"feed", "to_input":"control", "exclusive":true}
-            ],
-            "control_edges":[
                 {"from_node":"params", "from_output":"ci", "to_node":"route"},
                 {"from_node":"route", "from_output":"ci", "to_node":"ci"},
                 {"from_node":"route", "from_output":"else", "to_node":"local"}
@@ -421,14 +404,14 @@ fn rejects_unproven_groups_before_execution_and_code_generation() {
     ] {
         let mut value = serde_json::to_value(definition(true, json!(1), json!(2))).unwrap();
         match case {
-            "unguarded" => value["control_edges"].as_array_mut().unwrap().truncate(1),
-            "same_branch" => value["control_edges"][2]["from_output"] = json!("left"),
+            "unguarded" => value["edges"].as_array_mut().unwrap().truncate(1),
+            "same_branch" => value["edges"][2]["from_output"] = json!("left"),
             "unrelated_router" => {
                 let mut route = value["nodes"][1].clone();
                 route["id"] = json!("other_route");
                 value["nodes"].as_array_mut().unwrap().push(route);
-                value["control_edges"][2]["from_node"] = json!("other_route");
-                value["control_edges"].as_array_mut().unwrap().push(json!({
+                value["edges"][2]["from_node"] = json!("other_route");
+                value["edges"].as_array_mut().unwrap().push(json!({
                     "from_node":"condition", "from_output":"value", "to_node":"other_route"
                 }));
             }
@@ -436,11 +419,9 @@ fn rejects_unproven_groups_before_execution_and_code_generation() {
                 value["nodes"]
                     .as_array_mut()
                     .unwrap()
-                    .push(json!({"id":"after", "kind":"builtin.identity"}));
-                value["edges"].as_array_mut().unwrap().extend([
-                    json!({"from_node":"consume", "from_output":"value", "to_node":"after", "to_input":"input", "exclusive":true}),
-                    json!({"from_node":if case == "reconverged_left" { "left" } else { "right" }, "from_output":"value", "to_node":"after", "to_input":"input", "exclusive":true})
-                ]);
+                    .push(json!({"id":"after", "kind":"builtin.identity", "inputs":{"input":{"exclusive":[
+                        {"$ref":"consume.value"}, {"$ref":if case == "reconverged_left" { "left.value" } else { "right.value" }}
+                    ]}}}));
             }
             _ => unreachable!(),
         }
@@ -478,18 +459,13 @@ fn propagates_data_and_control_facts_and_keeps_common_outer_branches() {
     value["nodes"].as_array_mut().unwrap().extend([
         json!({"id":"outer", "kind":"builtin.if_else", "config":{"branches":[{"id":"inside", "condition":{"source":{"output":"condition.value", "path":""}, "operator":"eq", "value":true}}]}}),
         json!({"id":"outside", "kind":"builtin.constant", "config":{"value":3}}),
-        json!({"id":"forward", "kind":"builtin.identity"}),
-        json!({"id":"final", "kind":"builtin.identity"})
+        json!({"id":"forward", "kind":"builtin.identity", "inputs":{"input":{"$ref":"consume.value"}}}),
+        json!({"id":"final", "kind":"builtin.identity", "inputs":{"input":{"exclusive":[{"$ref":"forward.value"},{"$ref":"outside.value"}]}}})
     ]);
-    value["control_edges"].as_array_mut().unwrap().extend([
+    value["edges"].as_array_mut().unwrap().extend([
         json!({"from_node":"condition", "from_output":"value", "to_node":"outer"}),
         json!({"from_node":"outer", "from_output":"inside", "to_node":"route"}),
         json!({"from_node":"outer", "from_output":"else", "to_node":"outside"}),
-    ]);
-    value["edges"].as_array_mut().unwrap().extend([
-        json!({"from_node":"consume", "from_output":"value", "to_node":"forward", "to_input":"input"}),
-        json!({"from_node":"forward", "from_output":"value", "to_node":"final", "to_input":"input", "exclusive":true}),
-        json!({"from_node":"outside", "from_output":"value", "to_node":"final", "to_input":"input", "exclusive":true})
     ]);
     value["outputs"] = json!([{"name":"result", "node":"final", "port":"value"}]);
     for selected in [true, false] {
@@ -616,10 +592,10 @@ fn stateful_boundaries_do_not_export_per_invocation_branch_facts() {
         value["nodes"].as_array_mut().unwrap().push(
             json!({"id":"seed", "kind":"builtin.constant", "config":{"value":"source-control"}}),
         );
-        value["edges"][0]["from_output"] = json!(if event { "items" } else { "item" });
-        value["edges"].as_array_mut().unwrap().push(json!({
-            "from_node":"seed", "from_output":"value", "to_node":"left", "to_input":if event { "item" } else { "control" }
-        }));
+        value["nodes"][4]["inputs"]["input"]["exclusive"][0] =
+            json!({"$ref":if event { "left.items" } else { "left.item" }});
+        value["nodes"][2]["inputs"][if event { "item" } else { "control" }] =
+            json!({"$ref":"seed.value"});
         let definition = serde_json::from_value(value).unwrap();
         let error = compile_definition(&definition, &registry)
             .err()

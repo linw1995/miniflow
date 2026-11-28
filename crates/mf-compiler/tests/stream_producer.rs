@@ -218,14 +218,10 @@ fn graph(key: &str, count: usize) -> Value {
             "version":"2026-10-03", "dependencies":{},
             "execution":{"limits":{"max_pending_messages":3, "workers":1}},
             "nodes":[
-                {"id":"produce", "kind":"test.producer", "config":{"key":key, "count":count}},
-                {"id":"consume", "kind":"builtin.identity"}
+                {"id":"produce", "kind":"test.producer", "config":{"key":key, "count":count}, "inputs":{"input":{"$ref":"feed.item"}}},
+                {"id":"consume", "kind":"builtin.identity", "inputs":{"input":{"$ref":"produce.value"}}}
             , controlled::source(json!("int"))
     ],
-            "edges":[
-                {"from_node":"feed", "from_output":"item", "to_node":"produce", "to_input":"input"},
-                {"from_node":"produce", "from_output":"value", "to_node":"consume", "to_input":"input"}
-            ],
             "outputs":[{"name":"value", "node":"consume", "port":"value"}]
         })
 }
@@ -371,18 +367,15 @@ fn skips_and_chained_producers_preserve_input_order() {
     let mut value = graph("chain-first", 3);
     value["execution"]["limits"]["max_pending_messages"] = json!(4);
     value["nodes"].as_array_mut().unwrap().push(json!({
-        "id":"expand", "kind":"test.producer", "config":{"key":"chain-second", "count":2}
+        "id":"expand", "kind":"test.producer", "config":{"key":"chain-second", "count":2}, "inputs":{"input":{"$ref":"produce.value"}}
     }));
-    value["edges"][1]["to_node"] = json!("expand");
-    value["edges"].as_array_mut().unwrap().push(json!({
-        "from_node":"expand", "from_output":"value", "to_node":"consume", "to_input":"input"
-    }));
+    value["nodes"][1]["inputs"]["input"] = json!({"$ref":"expand.value"});
     value["nodes"].as_array_mut().unwrap().push(json!({
         "id":"route", "kind":"builtin.if_else", "config":{"branches":[{
             "id":"positive", "condition":{"source":{"output":"feed.item", "path":""}, "operator":"gt", "value":0}
         }]}
     }));
-    value["control_edges"] = json!([
+    value["edges"] = json!([
         {"from_node":"feed", "from_output":"item", "to_node":"route"},
         {"from_node":"route", "from_output":"positive", "to_node":"produce"}
     ]);
@@ -410,7 +403,7 @@ fn timers_flush_while_a_producer_is_still_executing() {
     value["execution"]["limits"]["max_pending_messages"] = json!(4);
     value["nodes"][1] =
         json!({"id":"consume", "kind":"builtin.batch", "config":{"max_items":5, "max_wait_ms":20}});
-    value["edges"][1]["to_input"] = json!("item");
+    value["nodes"][1]["inputs"]["item"] = json!({"$ref":"produce.value"});
     value["outputs"][0]["port"] = json!("items");
     let instance = start(value, StreamOptions::default());
     let probe = probe("timer");
@@ -430,8 +423,7 @@ fn timers_flush_while_a_producer_is_still_executing() {
 #[test]
 fn downstream_failure_wakes_a_producer_blocked_on_capacity() {
     let mut value = graph("failed-upstream", 1_000);
-    value["nodes"][1] =
-        json!({"id":"consume", "kind":"test.producer_sink", "config":{"key":"failed-sink"}});
+    value["nodes"][1] = json!({"id":"consume", "kind":"test.producer_sink", "config":{"key":"failed-sink"}, "inputs":{"input":{"$ref":"produce.value"}}});
     let instance = start(value, StreamOptions::default());
     let sink = probe("failed-sink");
     let _release = Release(Arc::clone(&sink));
@@ -564,7 +556,7 @@ fn ignored_invalid_sends_fail_publication_and_producer_observation_counts_output
 fn preparation_infers_root_producers_and_rejects_invalid_explicit_bindings() {
     let mut value = graph("preparation", 1);
     value.as_object_mut().unwrap().remove("execution");
-    value["edges"].as_array_mut().unwrap().remove(0);
+    value["nodes"][0].as_object_mut().unwrap().remove("inputs");
     let registry = NodeRegistry::from_inventory().unwrap();
     let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
     assert!(
@@ -586,7 +578,7 @@ fn preparation_infers_root_producers_and_rejects_invalid_explicit_bindings() {
         Err(mf_compiler::FlowBuildError::NonTaskNode { .. })
     ));
     let mut value = graph("preparation", 1);
-    value["control_edges"] = json!([{
+    value["edges"] = json!([{
         "from_node":"feed", "from_output":"item", "to_node":"consume"
     }]);
     let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
@@ -606,14 +598,12 @@ fn producer_reads_declared_ancestor_context_on_its_worker() {
             .as_array_mut()
             .unwrap()
             .push(json!({"id":"copy", "kind":"builtin.identity"}));
-        value["edges"][0]["to_node"] = json!("copy");
-        value["edges"].as_array_mut().unwrap().push(json!({
-            "from_node":"copy", "from_output":"value", "to_node":"produce", "to_input":"input"
-        }));
+        value["nodes"][3]["inputs"]["input"] =
+            json!({"$ref":if startup { "feed.value" } else { "feed.item" }});
+        value["nodes"][0]["inputs"]["input"] = json!({"$ref":"copy.value"});
         let (instance, _source) = if startup {
             value["nodes"][2] =
                 json!({"id":"feed", "kind":"builtin.constant", "config":{"value":17}});
-            value["edges"][0]["from_output"] = json!("value");
             let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
             let registry = NodeRegistry::from_inventory().unwrap();
             let plan = compile_definition(&definition, &registry).unwrap();

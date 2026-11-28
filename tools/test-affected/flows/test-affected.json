@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-13",
+  "version": "2026-11-28",
   "execution": {
     "limits": {
       "max_pending_messages": 2,
@@ -264,28 +264,16 @@
       },
       "inputs": {
         "raw": {
-          "from": {
-            "node": "params",
-            "port": "configuration"
-          }
+          "$ref": "params.configuration"
         },
         "target": {
-          "from": {
-            "node": "params",
-            "port": "target"
-          }
+          "$ref": "params.target"
         },
         "mode": {
-          "from": {
-            "node": "params",
-            "port": "mode"
-          }
+          "$ref": "params.mode"
         },
         "precision": {
-          "from": {
-            "node": "params",
-            "port": "precision"
-          }
+          "$ref": "params.precision"
         }
       }
     },
@@ -324,46 +312,25 @@
       },
       "inputs": {
         "mode": {
-          "from": {
-            "node": "params",
-            "port": "mode"
-          }
+          "$ref": "params.mode"
         },
         "base": {
-          "from": {
-            "node": "params",
-            "port": "base"
-          }
+          "$ref": "params.base"
         },
         "head": {
-          "from": {
-            "node": "params",
-            "port": "head"
-          }
+          "$ref": "params.head"
         },
         "precision": {
-          "from": {
-            "node": "params",
-            "port": "precision"
-          }
+          "$ref": "params.precision"
         },
         "inventory": {
-          "from": {
-            "node": "params",
-            "port": "inventory"
-          }
+          "$ref": "params.inventory"
         },
         "config": {
-          "from": {
-            "node": "local_settings",
-            "port": "configuration"
-          }
+          "$ref": "local_settings.configuration"
         },
         "run": {
-          "from": {
-            "node": "params",
-            "port": "run"
-          }
+          "$ref": "params.run"
         }
       }
     },
@@ -373,10 +340,7 @@
       "config": {},
       "inputs": {
         "repository": {
-          "from": {
-            "node": "params",
-            "port": "repository"
-          }
+          "$ref": "params.repository"
         }
       }
     },
@@ -394,10 +358,7 @@
       },
       "inputs": {
         "e": {
-          "from": {
-            "node": "checkout",
-            "port": "result"
-          }
+          "$ref": "checkout.result"
         }
       }
     },
@@ -451,124 +412,64 @@
       },
       "inputs": {
         "github_repository": {
-          "from": {
-            "node": "params",
-            "port": "github_repository"
-          }
+          "$ref": "params.github_repository"
         },
         "run_id": {
-          "from": {
-            "node": "params",
-            "port": "run_id"
-          }
+          "$ref": "params.run_id"
         },
         "attempt": {
-          "from": {
-            "node": "params",
-            "port": "attempt"
-          }
+          "$ref": "params.attempt"
         },
         "pr": {
-          "from": {
-            "node": "params",
-            "port": "pr"
-          }
+          "$ref": "params.pr"
         },
         "branch": {
-          "from": {
-            "node": "params",
-            "port": "branch"
-          }
+          "$ref": "params.branch"
         },
         "event": {
-          "from": {
-            "node": "params",
-            "port": "event"
-          }
+          "$ref": "params.event"
         },
         "expected_head": {
-          "from": {
-            "node": "params",
-            "port": "expected_head"
-          }
+          "$ref": "params.expected_head"
         },
         "expected_merge": {
-          "from": {
-            "node": "params",
-            "port": "expected_merge"
-          }
+          "$ref": "params.expected_merge"
         },
         "cumulative": {
-          "from": {
-            "node": "params",
-            "port": "cumulative"
-          }
+          "$ref": "params.cumulative"
         },
         "coverage_target": {
-          "from": {
-            "node": "params",
-            "port": "coverage_target"
-          }
+          "$ref": "params.coverage_target"
         },
         "profile": {
-          "from": {
-            "node": "params",
-            "port": "profile"
-          }
+          "$ref": "params.profile"
         },
         "toolchain": {
-          "from": {
-            "node": "params",
-            "port": "toolchain"
-          }
+          "$ref": "params.toolchain"
         },
         "target": {
-          "from": {
-            "node": "params",
-            "port": "target"
-          }
+          "$ref": "params.target"
         },
         "rustflags": {
-          "from": {
-            "node": "params",
-            "port": "rustflags"
-          }
+          "$ref": "params.rustflags"
         },
         "encoded_rustflags": {
-          "from": {
-            "node": "params",
-            "port": "encoded_rustflags"
-          }
+          "$ref": "params.encoded_rustflags"
         },
         "incremental": {
-          "from": {
-            "node": "params",
-            "port": "incremental"
-          }
+          "$ref": "params.incremental"
         },
         "dev_debug": {
-          "from": {
-            "node": "params",
-            "port": "dev_debug"
-          }
+          "$ref": "params.dev_debug"
         },
         "test_debug": {
-          "from": {
-            "node": "params",
-            "port": "test_debug"
-          }
+          "$ref": "params.test_debug"
         },
         "policy": {
-          "from": {
-            "node": "validation_policy",
-            "port": "value"
-          }
+          "$ref": "validation_policy.value"
         },
         "run": {
-          "from": {
-            "node": "params",
-            "port": "run"
-          }
+          "$ref": "params.run"
         }
       }
     },
@@ -601,22 +502,13 @@
       },
       "inputs": {
         "path": {
-          "from": {
-            "node": "ci_settings",
-            "port": "path"
-          }
+          "$ref": "ci_settings.path"
         },
         "token": {
-          "from": {
-            "node": "params",
-            "port": "token"
-          }
+          "$ref": "params.token"
         },
         "deadline": {
-          "from": {
-            "node": "checkout",
-            "port": "deadline"
-          }
+          "$ref": "checkout.deadline"
         }
       }
     },
@@ -637,22 +529,13 @@
       },
       "inputs": {
         "run": {
-          "from": {
-            "node": "current_run",
-            "port": "result"
-          }
+          "$ref": "current_run.result"
         },
         "git": {
-          "from": {
-            "node": "checkout",
-            "port": "result"
-          }
+          "$ref": "checkout.result"
         },
         "s": {
-          "from": {
-            "node": "ci_settings",
-            "port": "settings"
-          }
+          "$ref": "ci_settings.settings"
         }
       }
     },
@@ -704,10 +587,7 @@
       },
       "inputs": {
         "s": {
-          "from": {
-            "node": "ci_settings",
-            "port": "settings"
-          }
+          "$ref": "ci_settings.settings"
         }
       }
     },
@@ -722,22 +602,13 @@
       },
       "inputs": {
         "path": {
-          "from": {
-            "node": "manual_path",
-            "port": "path"
-          }
+          "$ref": "manual_path.path"
         },
         "token": {
-          "from": {
-            "node": "params",
-            "port": "token"
-          }
+          "$ref": "params.token"
         },
         "deadline": {
-          "from": {
-            "node": "checkout",
-            "port": "deadline"
-          }
+          "$ref": "checkout.deadline"
         }
       }
     },
@@ -757,22 +628,13 @@
       },
       "inputs": {
         "e": {
-          "from": {
-            "node": "manual_pull",
-            "port": "result"
-          }
+          "$ref": "manual_pull.result"
         },
         "c": {
-          "from": {
-            "node": "current_identity",
-            "port": "current"
-          }
+          "$ref": "current_identity.current"
         },
         "s": {
-          "from": {
-            "node": "ci_settings",
-            "port": "settings"
-          }
+          "$ref": "ci_settings.settings"
         }
       }
     },
@@ -796,10 +658,7 @@
       "kind": "builtin.identity",
       "inputs": {
         "input": {
-          "from": {
-            "node": "current_identity",
-            "port": "current"
-          }
+          "$ref": "current_identity.current"
         }
       }
     },
@@ -808,10 +667,7 @@
       "kind": "builtin.identity",
       "inputs": {
         "input": {
-          "from": {
-            "node": "current_identity",
-            "port": "current"
-          }
+          "$ref": "current_identity.current"
         }
       }
     },
@@ -834,20 +690,15 @@
       },
       "inputs": {
         "s": {
-          "from": {
-            "node": "ci_settings",
-            "port": "settings"
-          }
+          "$ref": "ci_settings.settings"
         },
         "c": {
           "exclusive": [
             {
-              "node": "event_context",
-              "port": "value"
+              "$ref": "event_context.value"
             },
             {
-              "node": "manual_context",
-              "port": "value"
+              "$ref": "manual_context.value"
             }
           ]
         }
@@ -877,10 +728,7 @@
       "kind": "builtin.identity",
       "inputs": {
         "input": {
-          "from": {
-            "node": "ci_seed",
-            "port": "comparison"
-          }
+          "$ref": "ci_seed.comparison"
         }
       }
     },
@@ -901,28 +749,16 @@
       },
       "inputs": {
         "path": {
-          "from": {
-            "node": "ci_seed",
-            "port": "path"
-          }
+          "$ref": "ci_seed.path"
         },
         "query": {
-          "from": {
-            "node": "ci_seed",
-            "port": "query"
-          }
+          "$ref": "ci_seed.query"
         },
         "token": {
-          "from": {
-            "node": "params",
-            "port": "token"
-          }
+          "$ref": "params.token"
         },
         "deadline": {
-          "from": {
-            "node": "checkout",
-            "port": "deadline"
-          }
+          "$ref": "checkout.deadline"
         }
       }
     },
@@ -944,16 +780,10 @@
       },
       "inputs": {
         "e": {
-          "from": {
-            "node": "history",
-            "port": "result"
-          }
+          "$ref": "history.result"
         },
         "c": {
-          "from": {
-            "node": "ci_seed",
-            "port": "current"
-          }
+          "$ref": "ci_seed.current"
         }
       }
     },
@@ -991,16 +821,10 @@
       },
       "inputs": {
         "c": {
-          "from": {
-            "node": "ci_seed",
-            "port": "current"
-          }
+          "$ref": "ci_seed.current"
         },
         "reason": {
-          "from": {
-            "node": "history_metadata",
-            "port": "reason"
-          }
+          "$ref": "history_metadata.reason"
         }
       }
     },
@@ -1018,10 +842,7 @@
       },
       "inputs": {
         "c": {
-          "from": {
-            "node": "ci_seed",
-            "port": "current"
-          }
+          "$ref": "ci_seed.current"
         }
       }
     },
@@ -1033,28 +854,16 @@
       },
       "inputs": {
         "repository": {
-          "from": {
-            "node": "params",
-            "port": "repository"
-          }
+          "$ref": "params.repository"
         },
         "revisions": {
-          "from": {
-            "node": "history_metadata",
-            "port": "heads"
-          }
+          "$ref": "history_metadata.heads"
         },
         "ancestor_of": {
-          "from": {
-            "node": "ancestry_target",
-            "port": "head"
-          }
+          "$ref": "ancestry_target.head"
         },
         "deadline": {
-          "from": {
-            "node": "checkout",
-            "port": "deadline"
-          }
+          "$ref": "checkout.deadline"
         }
       }
     },
@@ -1080,22 +889,13 @@
       },
       "inputs": {
         "e": {
-          "from": {
-            "node": "ancestry",
-            "port": "result"
-          }
+          "$ref": "ancestry.result"
         },
         "runs": {
-          "from": {
-            "node": "history_metadata",
-            "port": "runs"
-          }
+          "$ref": "history_metadata.runs"
         },
         "c": {
-          "from": {
-            "node": "ci_seed",
-            "port": "current"
-          }
+          "$ref": "ci_seed.current"
         }
       }
     },
@@ -1123,10 +923,7 @@
       "kind": "builtin.identity",
       "inputs": {
         "input": {
-          "from": {
-            "node": "candidate_state",
-            "port": "comparison"
-          }
+          "$ref": "candidate_state.comparison"
         }
       }
     },
@@ -1175,7 +972,7 @@
           "value": true
         },
         "body": {
-          "version": "2026-11-13",
+          "version": "2026-11-28",
           "dependencies": {},
           "nodes": [
             {
@@ -1194,10 +991,7 @@
               },
               "inputs": {
                 "remaining": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "remaining"
-                  }
+                  "$ref": "%loop.remaining"
                 }
               }
             },
@@ -1217,16 +1011,10 @@
               },
               "inputs": {
                 "k": {
-                  "from": {
-                    "node": "pick",
-                    "port": "candidate"
-                  }
+                  "$ref": "pick.candidate"
                 },
                 "c": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "current"
-                  }
+                  "$ref": "%loop.current"
                 }
               }
             },
@@ -1244,28 +1032,16 @@
               },
               "inputs": {
                 "path": {
-                  "from": {
-                    "node": "artifact_query",
-                    "port": "path"
-                  }
+                  "$ref": "artifact_query.path"
                 },
                 "query": {
-                  "from": {
-                    "node": "artifact_query",
-                    "port": "query"
-                  }
+                  "$ref": "artifact_query.query"
                 },
                 "token": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "token"
-                  }
+                  "$ref": "%loop.token"
                 },
                 "deadline": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "deadline"
-                  }
+                  "$ref": "%loop.deadline"
                 }
               }
             },
@@ -1287,22 +1063,13 @@
               },
               "inputs": {
                 "e": {
-                  "from": {
-                    "node": "artifacts",
-                    "port": "result"
-                  }
+                  "$ref": "artifacts.result"
                 },
                 "k": {
-                  "from": {
-                    "node": "pick",
-                    "port": "candidate"
-                  }
+                  "$ref": "pick.candidate"
                 },
                 "c": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "current"
-                  }
+                  "$ref": "%loop.current"
                 }
               }
             },
@@ -1339,10 +1106,7 @@
               },
               "inputs": {
                 "expired": {
-                  "from": {
-                    "node": "artifact_match",
-                    "port": "expired"
-                  }
+                  "$ref": "artifact_match.expired"
                 }
               }
             },
@@ -1355,22 +1119,13 @@
               },
               "inputs": {
                 "path": {
-                  "from": {
-                    "node": "artifact_match",
-                    "port": "path"
-                  }
+                  "$ref": "artifact_match.path"
                 },
                 "token": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "token"
-                  }
+                  "$ref": "%loop.token"
                 },
                 "deadline": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "deadline"
-                  }
+                  "$ref": "%loop.deadline"
                 }
               }
             },
@@ -1390,10 +1145,7 @@
               },
               "inputs": {
                 "e": {
-                  "from": {
-                    "node": "record",
-                    "port": "result"
-                  }
+                  "$ref": "record.result"
                 }
               }
             },
@@ -1416,34 +1168,19 @@
               },
               "inputs": {
                 "r": {
-                  "from": {
-                    "node": "record_shape",
-                    "port": "record"
-                  }
+                  "$ref": "record_shape.record"
                 },
                 "valid": {
-                  "from": {
-                    "node": "record_shape",
-                    "port": "schema"
-                  }
+                  "$ref": "record_shape.schema"
                 },
                 "expired": {
-                  "from": {
-                    "node": "record_shape",
-                    "port": "expired"
-                  }
+                  "$ref": "record_shape.expired"
                 },
                 "c": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "current"
-                  }
+                  "$ref": "%loop.current"
                 },
                 "k": {
-                  "from": {
-                    "node": "pick",
-                    "port": "candidate"
-                  }
+                  "$ref": "pick.candidate"
                 }
               }
             },
@@ -1481,16 +1218,10 @@
               },
               "inputs": {
                 "reason": {
-                  "from": {
-                    "node": "compatible_record",
-                    "port": "reason"
-                  }
+                  "$ref": "compatible_record.reason"
                 },
                 "expired": {
-                  "from": {
-                    "node": "record_shape",
-                    "port": "expired"
-                  }
+                  "$ref": "record_shape.expired"
                 }
               }
             },
@@ -1509,10 +1240,7 @@
               },
               "inputs": {
                 "r": {
-                  "from": {
-                    "node": "record_shape",
-                    "port": "record"
-                  }
+                  "$ref": "record_shape.record"
                 }
               }
             },
@@ -1524,22 +1252,13 @@
               },
               "inputs": {
                 "repository": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "repository"
-                  }
+                  "$ref": "%loop.repository"
                 },
                 "revisions": {
-                  "from": {
-                    "node": "merge_reference",
-                    "port": "revisions"
-                  }
+                  "$ref": "merge_reference.revisions"
                 },
                 "deadline": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "deadline"
-                  }
+                  "$ref": "%loop.deadline"
                 }
               }
             },
@@ -1557,10 +1276,7 @@
               },
               "inputs": {
                 "e": {
-                  "from": {
-                    "node": "merge_facts",
-                    "port": "result"
-                  }
+                  "$ref": "merge_facts.result"
                 }
               }
             },
@@ -1588,10 +1304,7 @@
               "kind": "builtin.identity",
               "inputs": {
                 "input": {
-                  "from": {
-                    "node": "merge_facts",
-                    "port": "result"
-                  }
+                  "$ref": "merge_facts.result"
                 }
               }
             },
@@ -1601,22 +1314,13 @@
               "config": {},
               "inputs": {
                 "repository": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "repository"
-                  }
+                  "$ref": "%loop.repository"
                 },
                 "commit": {
-                  "from": {
-                    "node": "merge_reference",
-                    "port": "commit"
-                  }
+                  "$ref": "merge_reference.commit"
                 },
                 "deadline": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "deadline"
-                  }
+                  "$ref": "%loop.deadline"
                 }
               }
             },
@@ -1644,10 +1348,7 @@
               "kind": "builtin.identity",
               "inputs": {
                 "input": {
-                  "from": {
-                    "node": "fetch",
-                    "port": "result"
-                  }
+                  "$ref": "fetch.result"
                 }
               }
             },
@@ -1659,22 +1360,13 @@
               },
               "inputs": {
                 "repository": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "repository"
-                  }
+                  "$ref": "%loop.repository"
                 },
                 "revisions": {
-                  "from": {
-                    "node": "merge_reference",
-                    "port": "revisions"
-                  }
+                  "$ref": "merge_reference.revisions"
                 },
                 "deadline": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "deadline"
-                  }
+                  "$ref": "%loop.deadline"
                 }
               }
             },
@@ -1694,24 +1386,18 @@
               },
               "inputs": {
                 "r": {
-                  "from": {
-                    "node": "record_shape",
-                    "port": "record"
-                  }
+                  "$ref": "record_shape.record"
                 },
                 "e": {
                   "exclusive": [
                     {
-                      "node": "existing_merge",
-                      "port": "value"
+                      "$ref": "existing_merge.value"
                     },
                     {
-                      "node": "fetched_merge",
-                      "port": "result"
+                      "$ref": "fetched_merge.result"
                     },
                     {
-                      "node": "failed_fetch",
-                      "port": "value"
+                      "$ref": "failed_fetch.value"
                     }
                   ]
                 }
@@ -1735,34 +1421,19 @@
               },
               "inputs": {
                 "accepted": {
-                  "from": {
-                    "node": "verify_merge",
-                    "port": "accepted"
-                  }
+                  "$ref": "verify_merge.accepted"
                 },
                 "expired": {
-                  "from": {
-                    "node": "verify_merge",
-                    "port": "expired"
-                  }
+                  "$ref": "verify_merge.expired"
                 },
                 "r": {
-                  "from": {
-                    "node": "record_shape",
-                    "port": "record"
-                  }
+                  "$ref": "record_shape.record"
                 },
                 "k": {
-                  "from": {
-                    "node": "pick",
-                    "port": "candidate"
-                  }
+                  "$ref": "pick.candidate"
                 },
                 "c": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "current"
-                  }
+                  "$ref": "%loop.current"
                 }
               }
             },
@@ -1788,42 +1459,27 @@
               },
               "inputs": {
                 "k": {
-                  "from": {
-                    "node": "pick",
-                    "port": "candidate"
-                  }
+                  "$ref": "pick.candidate"
                 },
                 "remaining": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "remaining"
-                  }
+                  "$ref": "%loop.remaining"
                 },
                 "previous": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "comparison"
-                  }
+                  "$ref": "%loop.comparison"
                 },
                 "c": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "current"
-                  }
+                  "$ref": "%loop.current"
                 },
                 "d": {
                   "exclusive": [
                     {
-                      "node": "artifact_unavailable",
-                      "port": "decision"
+                      "$ref": "artifact_unavailable.decision"
                     },
                     {
-                      "node": "record_unusable",
-                      "port": "decision"
+                      "$ref": "record_unusable.decision"
                     },
                     {
-                      "node": "merge_decision",
-                      "port": "decision"
+                      "$ref": "merge_decision.decision"
                     }
                   ]
                 }
@@ -1837,10 +1493,7 @@
               },
               "inputs": {
                 "value": {
-                  "from": {
-                    "node": "advance",
-                    "port": "remaining"
-                  }
+                  "$ref": "advance.remaining"
                 }
               }
             },
@@ -1852,10 +1505,7 @@
               },
               "inputs": {
                 "value": {
-                  "from": {
-                    "node": "advance",
-                    "port": "comparison"
-                  }
+                  "$ref": "advance.comparison"
                 }
               }
             },
@@ -1867,10 +1517,7 @@
               },
               "inputs": {
                 "value": {
-                  "from": {
-                    "node": "advance",
-                    "port": "done"
-                  }
+                  "$ref": "advance.done"
                 }
               }
             }
@@ -1941,46 +1588,25 @@
       },
       "inputs": {
         "current": {
-          "from": {
-            "node": "candidate_state",
-            "port": "current"
-          }
+          "$ref": "candidate_state.current"
         },
         "remaining": {
-          "from": {
-            "node": "candidate_state",
-            "port": "remaining"
-          }
+          "$ref": "candidate_state.remaining"
         },
         "comparison": {
-          "from": {
-            "node": "candidate_state",
-            "port": "comparison"
-          }
+          "$ref": "candidate_state.comparison"
         },
         "done": {
-          "from": {
-            "node": "candidate_state",
-            "port": "done"
-          }
+          "$ref": "candidate_state.done"
         },
         "repository": {
-          "from": {
-            "node": "params",
-            "port": "repository"
-          }
+          "$ref": "params.repository"
         },
         "token": {
-          "from": {
-            "node": "params",
-            "port": "token"
-          }
+          "$ref": "params.token"
         },
         "deadline": {
-          "from": {
-            "node": "checkout",
-            "port": "deadline"
-          }
+          "$ref": "checkout.deadline"
         }
       }
     },
@@ -2004,10 +1630,7 @@
       "kind": "builtin.identity",
       "inputs": {
         "input": {
-          "from": {
-            "node": "search",
-            "port": "comparison"
-          }
+          "$ref": "search.comparison"
         }
       }
     },
@@ -2026,28 +1649,21 @@
       },
       "inputs": {
         "c": {
-          "from": {
-            "node": "ci_seed",
-            "port": "current"
-          }
+          "$ref": "ci_seed.current"
         },
         "comparison": {
           "exclusive": [
             {
-              "node": "explicit_cumulative",
-              "port": "value"
+              "$ref": "explicit_cumulative.value"
             },
             {
-              "node": "history_fallback",
-              "port": "comparison"
+              "$ref": "history_fallback.comparison"
             },
             {
-              "node": "ancestry_fallback",
-              "port": "value"
+              "$ref": "ancestry_fallback.value"
             },
             {
-              "node": "searched_comparison",
-              "port": "value"
+              "$ref": "searched_comparison.value"
             }
           ]
         }
@@ -2089,40 +1705,22 @@
       },
       "inputs": {
         "slug": {
-          "from": {
-            "node": "params",
-            "port": "github_repository"
-          }
+          "$ref": "params.github_repository"
         },
         "policy": {
-          "from": {
-            "node": "graph_policy",
-            "port": "value"
-          }
+          "$ref": "graph_policy.value"
         },
         "c": {
-          "from": {
-            "node": "changes",
-            "port": "context"
-          }
+          "$ref": "changes.context"
         },
         "artifacts": {
-          "from": {
-            "node": "params",
-            "port": "artifacts"
-          }
+          "$ref": "params.artifacts"
         },
         "profile": {
-          "from": {
-            "node": "params",
-            "port": "profile"
-          }
+          "$ref": "params.profile"
         },
         "precision": {
-          "from": {
-            "node": "params",
-            "port": "precision"
-          }
+          "$ref": "params.precision"
         }
       }
     },
@@ -2159,10 +1757,7 @@
       },
       "inputs": {
         "reason": {
-          "from": {
-            "node": "graph_settings",
-            "port": "reason"
-          }
+          "$ref": "graph_settings.reason"
         }
       }
     },
@@ -2182,22 +1777,13 @@
       },
       "inputs": {
         "path": {
-          "from": {
-            "node": "graph_settings",
-            "port": "path"
-          }
+          "$ref": "graph_settings.path"
         },
         "query": {
-          "from": {
-            "node": "graph_settings",
-            "port": "query"
-          }
+          "$ref": "graph_settings.query"
         },
         "token": {
-          "from": {
-            "node": "params",
-            "port": "token"
-          }
+          "$ref": "params.token"
         }
       }
     },
@@ -2218,10 +1804,7 @@
       },
       "inputs": {
         "e": {
-          "from": {
-            "node": "graph_history",
-            "port": "result"
-          }
+          "$ref": "graph_history.result"
         }
       }
     },
@@ -2258,10 +1841,7 @@
       },
       "inputs": {
         "reason": {
-          "from": {
-            "node": "graph_history_metadata",
-            "port": "reason"
-          }
+          "$ref": "graph_history_metadata.reason"
         }
       }
     },
@@ -2273,22 +1853,13 @@
       },
       "inputs": {
         "repository": {
-          "from": {
-            "node": "params",
-            "port": "repository"
-          }
+          "$ref": "params.repository"
         },
         "revisions": {
-          "from": {
-            "node": "graph_history_metadata",
-            "port": "heads"
-          }
+          "$ref": "graph_history_metadata.heads"
         },
         "ancestor_of": {
-          "from": {
-            "node": "graph_settings",
-            "port": "base"
-          }
+          "$ref": "graph_settings.base"
         }
       }
     },
@@ -2313,16 +1884,10 @@
       },
       "inputs": {
         "e": {
-          "from": {
-            "node": "graph_ancestry",
-            "port": "result"
-          }
+          "$ref": "graph_ancestry.result"
         },
         "runs": {
-          "from": {
-            "node": "graph_history_metadata",
-            "port": "runs"
-          }
+          "$ref": "graph_history_metadata.runs"
         }
       }
     },
@@ -2359,10 +1924,7 @@
       },
       "inputs": {
         "reason": {
-          "from": {
-            "node": "graph_candidates",
-            "port": "reason"
-          }
+          "$ref": "graph_candidates.reason"
         }
       }
     },
@@ -2415,7 +1977,7 @@
           "value": true
         },
         "body": {
-          "version": "2026-11-13",
+          "version": "2026-11-28",
           "dependencies": {},
           "nodes": [
             {
@@ -2434,10 +1996,7 @@
               },
               "inputs": {
                 "remaining": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "remaining"
-                  }
+                  "$ref": "%loop.remaining"
                 }
               }
             },
@@ -2457,16 +2016,10 @@
               },
               "inputs": {
                 "k": {
-                  "from": {
-                    "node": "pick",
-                    "port": "candidate"
-                  }
+                  "$ref": "pick.candidate"
                 },
                 "s": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "slug"
-                  }
+                  "$ref": "%loop.slug"
                 }
               }
             },
@@ -2484,22 +2037,13 @@
               },
               "inputs": {
                 "path": {
-                  "from": {
-                    "node": "artifact_query",
-                    "port": "path"
-                  }
+                  "$ref": "artifact_query.path"
                 },
                 "query": {
-                  "from": {
-                    "node": "artifact_query",
-                    "port": "query"
-                  }
+                  "$ref": "artifact_query.query"
                 },
                 "token": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "token"
-                  }
+                  "$ref": "%loop.token"
                 }
               }
             },
@@ -2521,22 +2065,13 @@
               },
               "inputs": {
                 "e": {
-                  "from": {
-                    "node": "artifacts",
-                    "port": "result"
-                  }
+                  "$ref": "artifacts.result"
                 },
                 "k": {
-                  "from": {
-                    "node": "pick",
-                    "port": "candidate"
-                  }
+                  "$ref": "pick.candidate"
                 },
                 "s": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "slug"
-                  }
+                  "$ref": "%loop.slug"
                 }
               }
             },
@@ -2573,10 +2108,7 @@
               },
               "inputs": {
                 "expired": {
-                  "from": {
-                    "node": "artifact_match",
-                    "port": "expired"
-                  }
+                  "$ref": "artifact_match.expired"
                 }
               }
             },
@@ -2593,22 +2125,13 @@
               },
               "inputs": {
                 "path": {
-                  "from": {
-                    "node": "artifact_match",
-                    "port": "path"
-                  }
+                  "$ref": "artifact_match.path"
                 },
                 "directory": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "directory"
-                  }
+                  "$ref": "%loop.directory"
                 },
                 "token": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "token"
-                  }
+                  "$ref": "%loop.token"
                 }
               }
             },
@@ -2629,22 +2152,13 @@
               },
               "inputs": {
                 "e": {
-                  "from": {
-                    "node": "download",
-                    "port": "result"
-                  }
+                  "$ref": "download.result"
                 },
                 "k": {
-                  "from": {
-                    "node": "pick",
-                    "port": "candidate"
-                  }
+                  "$ref": "pick.candidate"
                 },
                 "policy": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "policy"
-                  }
+                  "$ref": "%loop.policy"
                 }
               }
             },
@@ -2681,10 +2195,7 @@
               },
               "inputs": {
                 "expired": {
-                  "from": {
-                    "node": "graph_shape",
-                    "port": "expired"
-                  }
+                  "$ref": "graph_shape.expired"
                 }
               }
             },
@@ -2704,22 +2215,13 @@
               },
               "inputs": {
                 "k": {
-                  "from": {
-                    "node": "pick",
-                    "port": "candidate"
-                  }
+                  "$ref": "pick.candidate"
                 },
                 "directory": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "directory"
-                  }
+                  "$ref": "%loop.directory"
                 },
                 "profile": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "profile"
-                  }
+                  "$ref": "%loop.profile"
                 }
               }
             },
@@ -2746,36 +2248,24 @@
                 "d": {
                   "exclusive": [
                     {
-                      "node": "artifact_unavailable",
-                      "port": "decision"
+                      "$ref": "artifact_unavailable.decision"
                     },
                     {
-                      "node": "graph_unusable",
-                      "port": "decision"
+                      "$ref": "graph_unusable.decision"
                     },
                     {
-                      "node": "graph_decision",
-                      "port": "decision"
+                      "$ref": "graph_decision.decision"
                     }
                   ]
                 },
                 "k": {
-                  "from": {
-                    "node": "pick",
-                    "port": "candidate"
-                  }
+                  "$ref": "pick.candidate"
                 },
                 "remaining": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "remaining"
-                  }
+                  "$ref": "%loop.remaining"
                 },
                 "previous": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "descriptor"
-                  }
+                  "$ref": "%loop.descriptor"
                 }
               }
             },
@@ -2787,10 +2277,7 @@
               },
               "inputs": {
                 "value": {
-                  "from": {
-                    "node": "advance",
-                    "port": "descriptor"
-                  }
+                  "$ref": "advance.descriptor"
                 }
               }
             },
@@ -2802,10 +2289,7 @@
               },
               "inputs": {
                 "value": {
-                  "from": {
-                    "node": "advance",
-                    "port": "remaining"
-                  }
+                  "$ref": "advance.remaining"
                 }
               }
             },
@@ -2817,10 +2301,7 @@
               },
               "inputs": {
                 "value": {
-                  "from": {
-                    "node": "advance",
-                    "port": "done"
-                  }
+                  "$ref": "advance.done"
                 }
               }
             }
@@ -2861,52 +2342,28 @@
       },
       "inputs": {
         "slug": {
-          "from": {
-            "node": "params",
-            "port": "github_repository"
-          }
+          "$ref": "params.github_repository"
         },
         "token": {
-          "from": {
-            "node": "params",
-            "port": "token"
-          }
+          "$ref": "params.token"
         },
         "directory": {
-          "from": {
-            "node": "graph_settings",
-            "port": "directory"
-          }
+          "$ref": "graph_settings.directory"
         },
         "profile": {
-          "from": {
-            "node": "graph_settings",
-            "port": "profile"
-          }
+          "$ref": "graph_settings.profile"
         },
         "policy": {
-          "from": {
-            "node": "graph_policy",
-            "port": "value"
-          }
+          "$ref": "graph_policy.value"
         },
         "remaining": {
-          "from": {
-            "node": "graph_candidates",
-            "port": "remaining"
-          }
+          "$ref": "graph_candidates.remaining"
         },
         "descriptor": {
-          "from": {
-            "node": "graph_candidates",
-            "port": "initial"
-          }
+          "$ref": "graph_candidates.initial"
         },
         "done": {
-          "from": {
-            "node": "graph_candidates",
-            "port": "done"
-          }
+          "$ref": "graph_candidates.done"
         }
       }
     },
@@ -2917,20 +2374,16 @@
         "input": {
           "exclusive": [
             {
-              "node": "graph_disabled",
-              "port": "outcome"
+              "$ref": "graph_disabled.outcome"
             },
             {
-              "node": "graph_history_unavailable",
-              "port": "outcome"
+              "$ref": "graph_history_unavailable.outcome"
             },
             {
-              "node": "graph_ancestry_unavailable",
-              "port": "outcome"
+              "$ref": "graph_ancestry_unavailable.outcome"
             },
             {
-              "node": "graph_search",
-              "port": "descriptor"
+              "$ref": "graph_search.descriptor"
             }
           ]
         }
@@ -2942,28 +2395,20 @@
       "config": {},
       "inputs": {
         "repository": {
-          "from": {
-            "node": "params",
-            "port": "repository"
-          }
+          "$ref": "params.repository"
         },
         "request": {
           "exclusive": [
             {
-              "node": "local_request",
-              "port": "request"
+              "$ref": "local_request.request"
             },
             {
-              "node": "ci_request",
-              "port": "request"
+              "$ref": "ci_request.request"
             }
           ]
         },
         "artifacts": {
-          "from": {
-            "node": "params",
-            "port": "artifacts"
-          }
+          "$ref": "params.artifacts"
         }
       }
     },
@@ -2982,16 +2427,10 @@
       },
       "inputs": {
         "c": {
-          "from": {
-            "node": "changes",
-            "port": "context"
-          }
+          "$ref": "changes.context"
         },
         "g": {
-          "from": {
-            "node": "graph_outcome",
-            "port": "value"
-          }
+          "$ref": "graph_outcome.value"
         }
       }
     },
@@ -3001,10 +2440,7 @@
       "config": {},
       "inputs": {
         "context": {
-          "from": {
-            "node": "analysis_context",
-            "port": "context"
-          }
+          "$ref": "analysis_context.context"
         }
       }
     },
@@ -3041,10 +2477,7 @@
       },
       "inputs": {
         "plan": {
-          "from": {
-            "node": "plan",
-            "port": "plan"
-          }
+          "$ref": "plan.plan"
         }
       }
     },
@@ -3061,16 +2494,10 @@
       },
       "inputs": {
         "cwd": {
-          "from": {
-            "node": "execution_directory",
-            "port": "cwd"
-          }
+          "$ref": "execution_directory.cwd"
         },
         "stdin_json": {
-          "from": {
-            "node": "plan",
-            "port": "plan"
-          }
+          "$ref": "plan.plan"
         }
       }
     }

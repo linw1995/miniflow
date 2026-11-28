@@ -245,9 +245,8 @@ mod tests {
             "version": "2026-10-03", "dependencies": {},
             "nodes": [
                 {"id": "source", "kind": "unlinked.source"},
-                {"id": "echo", "kind": "unlinked.echo"}
+                {"id": "echo", "kind": "unlinked.echo", "inputs":{"input":{"$ref":"source.value"}}}
             ],
-            "edges": [{"from_node": "source", "from_output": "value", "to_node": "echo", "to_input": "input"}],
             "outputs": [{"name": "answer", "node": "echo", "port": "value"}]
         })
     }
@@ -280,9 +279,6 @@ mod tests {
             "nodes":[{"id":"invoke","kind":"workflow.call","config":{"flow":"child"}}],
             "outputs":[{"name":"answer","node":"invoke","port":"answer"}]
         });
-        // The child fixture uses the legacy edge spelling, so encode its modern authoring form.
-        child["nodes"][1]["inputs"] = json!({"input":{"from":{"node":"source","port":"value"}}});
-        child["edges"] = json!([]);
         fs::write(root.path().join("flows/child.json"), child.to_string()).unwrap();
         write_definition(root.path(), &parent);
         let output = root.path().join("out");
@@ -382,7 +378,7 @@ mod tests {
         assert!(matches!(error, EmbeddingError::DuplicateName { .. }));
         let mut invalid = definition();
         fs::write(root.path().join("valid.json"), invalid.to_string()).unwrap();
-        invalid["edges"][0]["to_node"] = json!("source");
+        invalid["nodes"][0]["inputs"]["input"] = json!({"$ref":"source.value"});
         write_definition(root.path(), &invalid);
         let error = pack(
             root.path(),
@@ -405,7 +401,7 @@ mod tests {
         let error = pack(root.path(), &[request()]).unwrap_err();
         assert!(error.source().unwrap().is::<crate::DefinitionParseError>());
         let mut value = definition();
-        value["edges"][0]["to_node"] = json!("source");
+        value["nodes"][0]["inputs"]["input"] = json!({"$ref":"source.value"});
         write_definition(root.path(), &value);
         let error = pack(root.path(), &[request()]).unwrap_err();
         let source = error

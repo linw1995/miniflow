@@ -72,8 +72,8 @@ fn source_free_runner_passes_through_parameter_edges_under_observation() {
                 "inputs":[{"name":"params.text", "value_type":"string", "required":true}],
                 "outputs":[{"name":"answer", "value_type":"string", "required":true}]
             }, "inputs":{
-                "flow":{"from":{"node":"params", "port":"policy"}},
-                "params.text":{"from":{"node":"params", "port":"text"}}
+                "flow":{"$ref":"params.policy"},
+                "params.text":{"$ref":"params.text"}
             }}
         ],
         "outputs":[{"name":"answer", "node":"apply", "port":"answer"}]

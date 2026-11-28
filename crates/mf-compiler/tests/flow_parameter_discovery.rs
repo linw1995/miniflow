@@ -74,7 +74,7 @@ fn generated_discovery_follows_new_provider_contracts_and_freezes_relative_param
                 "parameters":{"select":{"type":"string", "default":"left", "secret":false}}
             }},
             {"id":"custom", "kind":choose::KIND, "config":{"left":{"path":"bodies/body.json"}},
-                "inputs":{"select":{"from":{"node":"params", "port":"select"}}}}
+                "inputs":{"select":{"$ref":"params.select"}}}
         ],
         "outputs":[{"name":"content", "node":"custom", "port":"content"}]
     });

@@ -392,7 +392,7 @@ fn llm_workflows_match_memory_and_standalone_runners() {
             2,
         ),
         (
-            json!({"version": "2026-10-03", "nodes": [{"id": "iteration", "kind": "builtin.iteration", "config": {"mode": "parallel", "on_error": "terminate", "body": {"version":"2026-10-03", "dependencies":{}, "nodes": [{"id": "chat", "kind": "builtin.llm"}], "edges": [{"from_node": "%iteration", "from_output": "item", "to_node": "chat", "to_input": "messages"}], "outputs": [{"name":"result", "node": "chat", "port": "text"}]}}}], "outputs": [{"name": "results", "node": "iteration", "port": "results"}]}),
+            json!({"version": "2026-10-03", "nodes": [{"id": "iteration", "kind": "builtin.iteration", "config": {"mode": "parallel", "on_error": "terminate", "body": {"version":"2026-10-03", "dependencies":{}, "nodes": [{"id": "chat", "kind": "builtin.llm", "inputs":{"messages":{"$ref":"%iteration.item"}}}],  "outputs": [{"name":"result", "node": "chat", "port": "text"}]}}}], "outputs": [{"name": "results", "node": "iteration", "port": "results"}]}),
             json!({"iteration.items":[[{"role":"user","content":"one"}],[{"role":"user","content":"two"}]]}),
             2,
         ),
@@ -493,9 +493,9 @@ fn tool_calls_and_results_round_trip_in_memory_and_standalone_runners() {
         definition["dependencies"] = dependencies();
         definition["nodes"][0]["config"] = json!({"model":"example-model","base_url":server.base_url,"api_key_env":"OPENAI_API_KEY"});
         definition["nodes"][0]["inputs"] = json!({
-            "messages":{"from":{"node":"params","port":"messages"}},
-            "tools":{"from":{"node":"params","port":"tools"}},
-            "tool_results":{"from":{"node":"params","port":"tool_results"}}
+            "messages":{"$ref":"params.messages"},
+            "tools":{"$ref":"params.tools"},
+            "tool_results":{"$ref":"params.tool_results"}
         });
         definition["nodes"].as_array_mut().unwrap().push(json!({
             "id":"params","kind":"builtin.parameters","config":{"parameters":{
@@ -507,8 +507,8 @@ fn tool_calls_and_results_round_trip_in_memory_and_standalone_runners() {
         if stream {
             definition["execution"] = json!({});
             definition["nodes"].as_array_mut().unwrap().extend([
-                json!({"id":"text_preview","kind":"builtin.identity","inputs":{"input":{"from":{"node":"model","port":"delta"}}}}),
-                json!({"id":"tool_preview","kind":"builtin.identity","inputs":{"input":{"from":{"node":"model","port":"tool_call"}}}}),
+                json!({"id":"text_preview","kind":"builtin.identity","inputs":{"input":{"$ref":"model.delta"}}}),
+                json!({"id":"tool_preview","kind":"builtin.identity","inputs":{"input":{"$ref":"model.tool_call"}}}),
             ]);
             definition["outputs"].as_array_mut().unwrap().extend([
                 json!({"name":"text_delta","node":"text_preview","port":"value","optional":true}),
@@ -616,8 +616,7 @@ fn llm_stream_tasks_and_skips_preserve_existing_execution_contracts() {
     let mut value = json!({
         "version": "2026-10-03", "execution": {"limits": {"workers": 1, "max_pending_messages": 2}},
         "dependencies": dependencies(),
-        "nodes": [{"id":"read","kind":"builtin.readline"}, {"id":"request","kind":"builtin.code","config":{"language":"cel","inputs":{"prompt":"string"},"code":{"messages":"[{'role':'user','content':prompt}]"}}}, {"id":"chat","kind":"builtin.llm"}],
-        "edges": [{"from_node":"read","from_output":"line","to_node":"request","to_input":"prompt"}, {"from_node":"request","from_output":"messages","to_node":"chat","to_input":"messages"}],
+        "nodes": [{"id":"read","kind":"builtin.readline"}, {"id":"request","kind":"builtin.code","config":{"language":"cel","inputs":{"prompt":"string"},"code":{"messages":"[{'role':'user','content':prompt}]"}}, "inputs":{"prompt":{"$ref":"read.line"}}}, {"id":"chat","kind":"builtin.llm", "inputs":{"messages":{"$ref":"request.messages"}}}],
         "outputs": [{"name":"text","node":"chat","port":"text"}, {"name":"message","node":"chat","port":"message","optional":true}]
     });
     configure(&mut value, &server);
@@ -636,10 +635,9 @@ fn llm_stream_tasks_and_skips_preserve_existing_execution_contracts() {
             {"id": "enabled", "kind": "builtin.constant", "config": {"value": false}},
             {"id":"request","kind":"builtin.constant","config":{"value":[{"role":"user","content":"Hello"}]}},
             {"id": "gate", "kind": "builtin.if_else", "config": {"branches": [{"id": "go", "condition": {"source": {"output": "enabled.value", "path": ""}, "operator": "eq", "value": true}}]}},
-            {"id": "chat", "kind": "builtin.llm"}
+            {"id": "chat", "kind": "builtin.llm", "inputs":{"messages":{"$ref":"request.value"}}}
         ],
-        "control_edges": [{"from_node": "enabled", "from_output": "value", "to_node": "gate"}, {"from_node": "gate", "from_output": "go", "to_node": "chat"}],
-        "edges": [{"from_node":"request","from_output":"value","to_node":"chat","to_input":"messages"}],
+        "edges": [{"from_node": "enabled", "from_output": "value", "to_node": "gate"}, {"from_node": "gate", "from_output": "go", "to_node": "chat"}],
         "outputs": [{"name": "text", "node": "chat", "port": "text", "optional": true}]
     });
     configure(&mut skipped, &server);

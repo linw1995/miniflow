@@ -174,6 +174,7 @@ fn expanded_clusters_default_to_false_and_remain_old_schema_compatible() {
         "2026-10-28",
         "2026-11-11",
         "2026-11-13",
+        "2026-11-28",
     ] {
         for collapsed in [None, Some(false)] {
             let mut value = json!({
@@ -198,11 +199,131 @@ fn expanded_clusters_default_to_false_and_remain_old_schema_compatible() {
     }
 }
 
+fn context_input(binding: Value) -> Value {
+    json!({"nodes":[
+        {"id":"consumer", "kind":"test.sink", "inputs":{"given":binding}},
+        {"id":"producer.part", "kind":"test.source"}
+    ]})
+}
+
+#[test]
+fn input_refs_are_canonical_for_every_supported_schema_generation() {
+    let source = "producer.part.value.part";
+    for version in [
+        WorkflowDefinitionVersion::V2026_09_26,
+        WorkflowDefinitionVersion::V2026_10_19,
+        WorkflowDefinitionVersion::V2026_11_13,
+        WorkflowDefinitionVersion::CURRENT,
+    ] {
+        let parsed = WorkflowDefinition::from_value_with_version(
+            context_input(json!({"$ref":source,"path":""})),
+            version,
+        )
+        .unwrap();
+        assert_eq!(parsed.edges[0].from_node.as_str(), "producer.part");
+        assert_eq!(parsed.edges[0].from_output, "value.part");
+        let encoded = json!(parsed);
+        assert_eq!(encoded["version"], json!(version));
+        assert_eq!(
+            encoded["nodes"][0]["inputs"]["given"],
+            json!({"$ref":source})
+        );
+        assert_eq!(
+            serde_json::from_value::<WorkflowDefinition>(encoded).unwrap(),
+            parsed
+        );
+        let legacy = context_input(json!({"from":{"node":"producer.part","port":"value.part"}}));
+        assert!(WorkflowDefinition::from_value_with_version(legacy, version).is_err());
+        let endpoints = context_input(
+            json!({"exclusive":[{"node":"producer.part","port":"a"},{"node":"producer.part","port":"b"}]}),
+        );
+        assert!(WorkflowDefinition::from_value_with_version(endpoints, version).is_err());
+        let mut old_edges = json!({"nodes":[{"id":"producer.part", "kind":"test.source"}, {"id":"consumer", "kind":"test.sink"}]});
+        old_edges["edges"] = json!([{"from_node":"producer.part","from_output":"value", "to_node":"consumer", "to_input":"given"}]);
+        assert!(WorkflowDefinition::from_value_with_version(old_edges, version).is_err());
+    }
+}
+
+#[test]
+fn input_refs_reject_projections_templates_and_malformed_or_mixed_sources() {
+    let source = json!({"$ref":"producer.part.value"});
+    let legacy = json!({"from":{"node":"producer.part","port":"value"}});
+    for invalid in [
+        Value::Null,
+        json!("producer.part.value"),
+        json!({"$ref":1}),
+        json!({"$ref":""}),
+        json!({"$ref":"producer.part."}),
+        json!({"$ref":"missing.value"}),
+        json!({"$ref":"producer.part.value","path":"/item"}),
+        json!({"$template":"{{ producer.part.value }}"}),
+        legacy,
+        json!({"$ref":"producer.part.value","exclusive":[]}),
+        json!({"exclusive":[source, {"node":"producer.part","port":"other"}]}),
+        json!({"exclusive":[source]}),
+        json!({"exclusive":[source, source]}),
+    ] {
+        let error = WorkflowDefinition::from_value_with_version(
+            context_input(invalid.clone()),
+            WorkflowDefinitionVersion::CURRENT,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("consumer/inputs/given"),
+            "{invalid}: {error}"
+        );
+    }
+}
+
+#[test]
+fn input_refs_cannot_serialize_an_invalid_exclusive_group() {
+    let mut graph = WorkflowDefinition::from_value_with_version(
+        context_input(json!({"$ref":"producer.part.value"})),
+        WorkflowDefinitionVersion::CURRENT,
+    )
+    .unwrap();
+    graph.edges[0].exclusive = true;
+    assert!(
+        serde_json::to_value(&graph)
+            .unwrap_err()
+            .to_string()
+            .contains("at least two sources")
+    );
+    graph.edges.push(graph.edges[0].clone());
+    assert!(
+        serde_json::to_value(graph)
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate candidate")
+    );
+}
+
+#[test]
+fn ambiguous_input_refs_are_never_guessed_on_read_or_write() {
+    let mut input = context_input(json!({"$ref":"producer.part.value"}));
+    input["version"] = json!(WorkflowDefinitionVersion::CURRENT);
+    let mut graph: WorkflowDefinition = serde_json::from_value(input.clone()).unwrap();
+    let overlapping = json!({"id":"producer", "kind":"other"});
+    graph
+        .nodes
+        .push(serde_json::from_value(overlapping.clone()).unwrap());
+    input["nodes"].as_array_mut().unwrap().push(overlapping);
+    for error in [
+        serde_json::to_value(graph).unwrap_err(),
+        serde_json::from_value::<WorkflowDefinition>(input).unwrap_err(),
+    ] {
+        assert!(
+            error.to_string().contains("ambiguous")
+                && error.to_string().contains("producer.part.value"),
+            "{error}"
+        );
+    }
+}
+
 #[test]
 fn inherited_versions_enforce_their_own_wire_features() {
-    let value = json!({"nodes":[{"id":"n", "kind":"ordinary", "inputs":{
-        "value":{"from":{"node":"source", "port":"value"}}
-    }}]});
+    let value = json!({"nodes":[{"id":"source", "kind":"source"},{"id":"n", "kind":"ordinary"}],
+        "edges":[{"from_node":"source", "to_node":"n"}]});
     let error = WorkflowDefinition::from_value_with_version(
         value.clone(),
         WorkflowDefinitionVersion::V2026_10_03,
@@ -211,10 +332,10 @@ fn inherited_versions_enforce_their_own_wire_features() {
     assert!(
         error
             .to_string()
-            .contains("node-local inputs require version 2026-10-19")
+            .contains("node-success edges require version 2026-10-19")
     );
     assert!(
-        WorkflowDefinition::from_value_with_version(value, WorkflowDefinitionVersion::CURRENT,)
+        WorkflowDefinition::from_value_with_version(value, WorkflowDefinitionVersion::V2026_11_13)
             .is_ok()
     );
 }

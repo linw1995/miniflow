@@ -19,12 +19,8 @@ fn definition() -> Value {
         },
         "nodes":[
             {"id":"source","kind":"builtin.constant","config":{"value":[{"count":1},{"count":2}]}},
-            {"id":"identity","kind":"builtin.identity"},
-            {"id":"sink","kind":"fixture.typed_echo","config":{"type":"list_map_int64"}}
-        ],
-        "edges":[
-            {"from_node":"source","from_output":"value","to_node":"identity","to_input":"input"},
-            {"from_node":"identity","from_output":"value","to_node":"sink","to_input":"input"}
+            {"id":"identity","kind":"builtin.identity", "inputs":{"input":{"$ref":"source.value"}}},
+            {"id":"sink","kind":"fixture.typed_echo","config":{"type":"list_map_int64"}, "inputs":{"input":{"$ref":"identity.value"}}}
         ],
         "outputs":[{"name":"result","node":"sink","port":"value"}]
     })
@@ -80,7 +76,7 @@ fn generated_runner_matches_inference_and_preserves_installed_binary_on_conflict
             "id":"on","condition":{"source":{"output":"trigger.value","path":""},"operator":"eq","value":true}
         }]}}),
     ]);
-    inactive_conflict["control_edges"] = json!([
+    inactive_conflict["edges"] = json!([
         {"from_node":"trigger","from_output":"value","to_node":"route"},
         {"from_node":"route","from_output":"on","to_node":"sink"}
     ]);
@@ -124,9 +120,8 @@ fn generated_runner_rejects_a_false_output_derivation() {
         },
         "nodes":[
             {"id":"source","kind":"fixture.typed_source","config":{"type":"int64","value":7}},
-            {"id":"forward","kind":"fixture.dishonest_forward"}
+            {"id":"forward","kind":"fixture.dishonest_forward", "inputs":{"input":{"$ref":"source.value"}}}
         ],
-        "edges":[{"from_node":"source","from_output":"value","to_node":"forward","to_input":"input"}],
         "outputs":[{"name":"result","node":"forward","port":"value"}]
     });
     let expected = in_memory(&definition).unwrap_err();

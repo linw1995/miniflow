@@ -26,9 +26,9 @@ fn definition() -> Value {
                 "value": {"type": "int", "default": 7, "secret": false}
             }}},
             {"id": "write", "kind": "workflow.assign", "config": {"variable": "count"},
-             "inputs": {"value": {"from": {"node": "params", "port": "value"}}}},
+             "inputs": {"value": {"$ref":"params.value"}}},
             {"id": "read", "kind": "builtin.identity", "inputs": {
-                "input": {"from": {"node": "%root", "port": "count"}}
+                "input": {"$ref":"%root.count"}
             }}
         ],
         "edges": [{"from_node": "write", "from_output": "done", "to_node": "read"}],
@@ -163,8 +163,8 @@ fn skipped_writes_keep_initial_values_and_skip_dependent_readers() {
 fn stateful_domains_keep_prior_reads_and_multiple_updates_ordered() {
     let mut value = definition();
     value["nodes"].as_array_mut().unwrap().extend([
-        json!({"id":"before", "kind":"builtin.identity", "inputs":{"input":{"from":{"node":"%root", "port":"count"}}}}),
-        json!({"id":"second", "kind":"workflow.assign", "config":{"variable":"count"}, "inputs":{"value":{"from":{"node":"before", "port":"value"}}}})
+        json!({"id":"before", "kind":"builtin.identity", "inputs":{"input":{"$ref":"%root.count"}}}),
+        json!({"id":"second", "kind":"workflow.assign", "config":{"variable":"count"}, "inputs":{"value":{"$ref":"before.value"}}})
     ]);
     value["edges"].as_array_mut().unwrap().extend([
         json!({"from_node":"before", "from_output":"value", "to_node":"write"}),
@@ -373,8 +373,8 @@ fn nested() -> Value {
             "variables": [{"name": "count", "type": "int", "initial": 10}], "max_iterations": 2,
             "body": {"nodes": [
                 {"id":"inc", "kind":"builtin.code", "config": {"language":"cel", "inputs":{"count":"int"}, "code":{"next":"count + 1"}},
-                 "inputs":{"count":{"from":{"node":"%loop", "port":"count"}}}},
-                {"id":"save", "kind":"workflow.assign", "config":{"variable":"count"}, "inputs":{"value":{"from":{"node":"inc", "port":"next"}}}}
+                 "inputs":{"count":{"$ref":"%loop.count"}}},
+                {"id":"save", "kind":"workflow.assign", "config":{"variable":"count"}, "inputs":{"value":{"$ref":"inc.next"}}}
             ]}
         }})
     ]);
@@ -397,7 +397,7 @@ fn loop_output_updates() -> Value {
     body["nodes"][1]["config"]["variable"] = json!("observed");
     body["nodes"].as_array_mut().unwrap().push(json!({
         "id":"read_observed", "kind":"builtin.identity", "inputs":{
-            "input":{"from":{"node":"%loop", "port":"observed"}}
+            "input":{"$ref":"%loop.observed"}
         }
     }));
     body["edges"] = json!([{"from_node":"save", "from_output":"done", "to_node":"read_observed"}]);
@@ -415,7 +415,7 @@ fn exited_loop_output_updates() -> Value {
         json!({"id":"exit", "kind":"loop.exit"}),
         json!({"id":"zz_unvisited", "kind":"builtin.code", "config":{
             "language":"cel", "inputs":{"count":"int"}, "code":{"next":"count + 1000"}
-        }, "inputs":{"count":{"from":{"node":"%loop", "port":"count"}}}}),
+        }, "inputs":{"count":{"$ref":"%loop.count"}}}),
     ]);
     body["edges"].as_array_mut().unwrap().extend([
         json!({"from_node":"save", "from_output":"done", "to_node":"exit"}),
@@ -594,8 +594,8 @@ fn finite_stateful_calls_can_forward_task_streams_without_promoting_root_state()
     let child = json!({"version":"2026-11-13",
         "variables":[{"name":"count","type":"usize","initial":2}],
         "nodes":[
-        {"id":"step", "kind":"fixture.task_stream", "inputs":{"count":{"from":{"node":"%root","port":"count"}}}},
-        {"id":"save", "kind":"workflow.assign", "config":{"variable":"count"}, "inputs":{"value":{"from":{"node":"step","port":"total"}}}}
+        {"id":"step", "kind":"fixture.task_stream", "inputs":{"count":{"$ref":"%root.count"}}},
+        {"id":"save", "kind":"workflow.assign", "config":{"variable":"count"}, "inputs":{"value":{"$ref":"step.total"}}}
     ], "outputs":[{"name":"delta","node":"step","port":"delta"},{"name":"count","node":"%root","port":"count"}]});
     assert!(
         compile_error(child.clone())

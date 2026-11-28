@@ -39,12 +39,11 @@ fn definition() -> WorkflowDefinition {
     serde_json::from_value(json!({"version":"2026-10-03", "dependencies":{},
         "nodes":[
             {"id":"source", "kind":"builtin.constant", "config":{"value":42}},
-            {"id":"copy", "kind":"builtin.identity"},
+            {"id":"copy", "kind":"builtin.identity", "inputs":{"input":{"$ref":"source.value"}}},
             {"id":"probe", "kind":"test.target_probe"},
             {"id":"route", "kind":"builtin.if_else", "config":{"branches":[{"id":"yes", "condition":{"source":{"output":"source.value", "path":""}, "operator":"gt", "value":0}}]}}
         ],
-        "edges":[{"from_node":"source", "from_output":"value", "to_node":"copy", "to_input":"input"}],
-        "control_edges":[{"from_node":"source", "from_output":"value", "to_node":"route"}]
+        "edges":[{"from_node":"source", "from_output":"value", "to_node":"route"}]
     })).unwrap()
 }
 

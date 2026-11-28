@@ -116,7 +116,7 @@ fn parent(child: Value) -> Value {
         "nodes":[
             {"id":"source", "kind":"fixture.task_stream_feed", "config":{"counts":[3,7]}},
             {"id":OWNER, "kind":KIND, "config":{"local":{"definition":child}},
-             "inputs":{"count":{"from":{"node":"source", "port":"count"}}}}
+             "inputs":{"count":{"$ref":"source.count"}}}
         ],
         "outputs":[{"name":"total", "node":OWNER, "port":"total"}]
     })
@@ -302,7 +302,7 @@ fn terminal_only_receiver_rejects_streaming_child_interfaces() {
             "nodes":[
                 {"id":"item", "kind":"builtin.constant", "config":{"value":3}},
                 {"id":"leaf", "kind":"test.accumulate", "config":{"max_items":1},
-                 "inputs":{"item":{"from":{"node":"item", "port":"value"}}}}
+                 "inputs":{"item":{"$ref":"item.value"}}}
             ],
             "outputs":[{"name":"total", "node":"leaf", "port":"items"}]
         }),

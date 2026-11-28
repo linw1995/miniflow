@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-13",
+  "version": "2026-11-28",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -35,10 +35,7 @@
       },
       "inputs": {
         "value": {
-          "from": {
-            "node": "params",
-            "port": "value"
-          }
+          "$ref": "params.value"
         }
       }
     },
@@ -47,10 +44,7 @@
       "kind": "builtin.identity",
       "inputs": {
         "input": {
-          "from": {
-            "node": "%root",
-            "port": "count"
-          }
+          "$ref": "%root.count"
         }
       }
     }

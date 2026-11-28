@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-13",
+  "version": "2026-11-28",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -60,28 +60,16 @@
       },
       "inputs": {
         "params.messages": {
-          "from": {
-            "node": "params",
-            "port": "messages"
-          }
+          "$ref": "params.messages"
         },
         "params.model": {
-          "from": {
-            "node": "params",
-            "port": "model"
-          }
+          "$ref": "params.model"
         },
         "params.base_url": {
-          "from": {
-            "node": "params",
-            "port": "base_url"
-          }
+          "$ref": "params.base_url"
         },
         "params.api_key": {
-          "from": {
-            "node": "params",
-            "port": "api_key"
-          }
+          "$ref": "params.api_key"
         }
       }
     },
@@ -100,16 +88,10 @@
       },
       "inputs": {
         "compact": {
-          "from": {
-            "node": "params",
-            "port": "compact"
-          }
+          "$ref": "params.compact"
         },
         "result": {
-          "from": {
-            "node": "conversation",
-            "port": "append"
-          }
+          "$ref": "conversation.append"
         }
       }
     },
@@ -138,10 +120,7 @@
       "config": {},
       "inputs": {
         "input": {
-          "from": {
-            "node": "conversation",
-            "port": "append"
-          }
+          "$ref": "conversation.append"
         }
       }
     },
@@ -162,16 +141,10 @@
       },
       "inputs": {
         "messages": {
-          "from": {
-            "node": "params",
-            "port": "messages"
-          }
+          "$ref": "params.messages"
         },
         "result": {
-          "from": {
-            "node": "conversation",
-            "port": "append"
-          }
+          "$ref": "conversation.append"
         }
       }
     },
@@ -195,10 +168,7 @@
       },
       "inputs": {
         "messages": {
-          "from": {
-            "node": "summary_request",
-            "port": "value"
-          }
+          "$ref": "summary_request.value"
         }
       }
     },
@@ -218,22 +188,13 @@
       },
       "inputs": {
         "status": {
-          "from": {
-            "node": "summary",
-            "port": "status"
-          }
+          "$ref": "summary.status"
         },
         "outcome": {
-          "from": {
-            "node": "summary",
-            "port": "outcome"
-          }
+          "$ref": "summary.outcome"
         },
         "text": {
-          "from": {
-            "node": "summary",
-            "port": "text"
-          }
+          "$ref": "summary.text"
         }
       }
     },
@@ -256,28 +217,16 @@
       },
       "inputs": {
         "result": {
-          "from": {
-            "node": "conversation",
-            "port": "append"
-          }
+          "$ref": "conversation.append"
         },
         "accepted": {
-          "from": {
-            "node": "summary_success",
-            "port": "value"
-          }
+          "$ref": "summary_success.value"
         },
         "text": {
-          "from": {
-            "node": "summary",
-            "port": "text"
-          }
+          "$ref": "summary.text"
         },
         "usages": {
-          "from": {
-            "node": "summary",
-            "port": "usages"
-          }
+          "$ref": "summary.usages"
         }
       }
     }

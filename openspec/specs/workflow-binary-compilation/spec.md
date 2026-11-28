@@ -1048,7 +1048,7 @@ Raw stderr SHALL remain available. The supervisor MUST check transport failures 
 
 ### Requirement: Separate definition resources from inspection projections
 
-Manifest `2026-11-27` SHALL retain original definition resources, declared callback sites, and a public inspection descriptor containing
+Manifest `2026-11-28` SHALL retain original definition resources, declared callback sites, and a public inspection descriptor containing
 observation descriptions, workflow identity, actual execution mode, and prepared startup inputs. It MUST NOT persist
 compiler graphs, execution relationships, scheduling layouts, or typed optimization evidence. Provider-declared types,
 bindings, and stdin constraints SHALL remain readable without invoking providers or executing the runner. Full static

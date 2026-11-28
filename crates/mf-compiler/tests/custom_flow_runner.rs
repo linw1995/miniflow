@@ -53,12 +53,12 @@ fn old_root_iteration_keeps_complete_typed_scope_orders_in_a_source_free_runner(
             {"id": "each", "kind": "builtin.iteration", "config": {"body": {"version":"2026-10-03", "dependencies":{},
                 "nodes": [{"id": "custom", "kind": provider::KIND, "config": {
                     "left": {"definition": child("one")}, "right": {"definition": child("two")}
-                }}],
-                "edges": [{"from_node": "%iteration", "from_output": "item", "to_node": "custom", "to_input": "select"}],
+                },
+                "inputs":{"select":{"$ref":"%iteration.item"}}}],
                 "outputs": [{"name":"result", "node": "custom", "port": "content"}]
-            }}}
+            }},
+            "inputs":{"items":{"$ref":"items.value"}}}
         ],
-        "edges": [{"from_node": "items", "from_output": "value", "to_node": "each", "to_input": "items"}],
         "outputs": [{"name": "results", "node": "each", "port": "results"}]
     })).unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
@@ -176,7 +176,7 @@ fn source_free_generated_runner_executes_external_provider_flow_bindings() {
             }},
             {"id":"custom", "kind":provider::KIND, "config":{
                 "left":{"definition":child("one")}, "right":{"definition":child("two")}
-            }, "inputs":{"select":{"from":{"node":"params", "port":"select"}}}}
+            }, "inputs":{"select":{"$ref":"params.select"}}}
         ],
         "outputs":[{"name":"content", "node":"custom", "port":"content"}]
     }))

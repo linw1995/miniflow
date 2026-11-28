@@ -2482,7 +2482,7 @@ mod tests {
     fn selected_call_body_is_frozen_in_the_same_canonical_order_as_its_own_plan() {
         let child = definition(json!([
             {"id":"a-target", "kind":"test.ordinary", "inputs":{
-                "input":{"from":{"node":"z-source", "port":"value"}}
+                "input":{"$ref":"z-source.value"}
             }},
             {"id":"z-source", "kind":"test.ordinary"}
         ]));

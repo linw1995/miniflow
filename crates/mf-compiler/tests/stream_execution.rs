@@ -145,16 +145,13 @@ fn wait_until(mut predicate: impl FnMut() -> bool) {
         thread::sleep(Duration::from_millis(1));
     }
 }
-fn edge(source: &str, port: &str, target: &str, input: &str) -> Value {
-    json!({"from_node":source, "from_output":port, "to_node":target, "to_input":input})
-}
-fn graph(mut nodes: Value, edges: Vec<Value>, outputs: Value) -> Value {
+fn graph(mut nodes: Value, outputs: Value) -> Value {
     nodes
         .as_array_mut()
         .unwrap()
         .push(controlled::source(json!("int")));
     json!({"version":"2026-10-03", "execution":{}, "dependencies":{},
-        "nodes":nodes, "edges":edges, "outputs":outputs})
+        "nodes":nodes, "outputs":outputs})
 }
 fn start(value: Value, clock: Arc<dyn StreamClock>) -> SourceRun {
     let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
@@ -172,11 +169,7 @@ fn start(value: Value, clock: Arc<dyn StreamClock>) -> SourceRun {
 }
 fn accumulating() -> Value {
     graph(
-        json!([{"id":"collect", "kind":"test.accumulate"}, {"id":"copy", "kind":"builtin.identity"}]),
-        vec![
-            edge("feed", "item", "collect", "item"),
-            edge("collect", "items", "copy", "input"),
-        ],
+        json!([{"id":"collect", "inputs":{"item":{"$ref":"feed.item"}}, "kind":"test.accumulate"}, {"id":"copy", "inputs":{"input":{"$ref":"collect.items"}}, "kind":"builtin.identity"}]),
         json!([{"name":"batch", "node":"copy", "port":"value"}]),
     )
 }
@@ -202,8 +195,7 @@ fn idle_timers_flush_while_a_source_remains_open() {
 #[test]
 fn instances_own_their_nodes_and_frames_do_not_reuse_omitted_outputs() {
     let definition: WorkflowDefinition = serde_json::from_value(graph(
-        json!([{"id":"count", "kind":"test.counter"}]),
-        vec![edge("feed", "item", "count", "input")],
+        json!([{"id":"count", "inputs":{"input":{"$ref":"feed.item"}}, "kind":"test.counter"}]),
         json!([{"name":"count", "node":"count", "port":"value"}]),
     ))
     .unwrap();
@@ -247,17 +239,10 @@ fn blocking_business_work_does_not_stop_input_or_timer_progress() {
         .unwrap()
         .insert("timer-progress".into(), Arc::clone(&gate));
     let mut value = accumulating();
-    value["nodes"][1] =
-        json!({"id":"copy", "kind":"test.slow", "config":{"gate":"timer-progress"}});
+    value["nodes"][1] = json!({"id":"copy", "kind":"test.slow", "config":{"gate":"timer-progress"}, "inputs":{"input":{"$ref":"before.value"}}});
     value["nodes"].as_array_mut().unwrap().extend([
-        json!({"id":"before", "kind":"builtin.identity"}),
-        json!({"id":"after", "kind":"builtin.identity"}),
-    ]);
-    value["edges"] = json!([
-        edge("feed", "item", "collect", "item"),
-        edge("collect", "items", "before", "input"),
-        edge("before", "value", "copy", "input"),
-        edge("copy", "value", "after", "input"),
+        json!({"id":"before", "kind":"builtin.identity", "inputs":{"input":{"$ref":"collect.items"}}}),
+        json!({"id":"after", "kind":"builtin.identity", "inputs":{"input":{"$ref":"copy.value"}}}),
     ]);
     value["outputs"][0]["node"] = json!("after");
     let clock = Arc::new(ManualClock::default());
@@ -294,16 +279,15 @@ fn worker_concurrency_is_bounded_across_independent_domains() {
         .unwrap()
         .insert("worker-limit".into(), Arc::clone(&gate));
     let mut nodes = Vec::new();
-    let mut edges = Vec::new();
     for index in 0..3 {
         let collect = format!("collect_{index}");
         let slow = format!("slow_{index}");
-        nodes.push(json!({"id":collect, "kind":"test.accumulate"}));
-        nodes.push(json!({"id":slow, "kind":"test.slow", "config":{"gate":"worker-limit"}}));
-        edges.push(edge("feed", "item", &collect, "item"));
-        edges.push(edge(&collect, "items", &slow, "input"));
+        nodes.push(
+            json!({"id":collect, "kind":"test.accumulate", "inputs":{"item":{"$ref":"feed.item"}}}),
+        );
+        nodes.push(json!({"id":slow, "kind":"test.slow", "inputs":{"input":{"$ref":format!("{collect}.items")}}, "config":{"gate":"worker-limit"}}));
     }
-    let mut value = graph(json!(nodes), edges, json!([]));
+    let mut value = graph(json!(nodes), json!([]));
     value["execution"]["limits"] = json!({"workers":2});
     let clock = Arc::new(ManualClock::default());
     let instance = start(value, clock.clone());
@@ -326,18 +310,13 @@ fn worker_concurrency_is_bounded_across_independent_domains() {
 fn per_message_budgets_allow_a_long_lived_instance_and_preserve_fifo() {
     let mut value = graph(
         json!([
-            {"id":"left", "kind":"builtin.identity"},
-            {"id":"right", "kind":"builtin.identity"},
-            {"id":"copy", "kind":"builtin.identity"},
+            {"id":"left", "inputs":{"input":{"$ref":"feed.item"}}, "kind":"builtin.identity"},
+            {"id":"right", "inputs":{"input":{"$ref":"feed.item"}}, "kind":"builtin.identity"},
+            {"id":"copy", "inputs":{"input":{"$ref":"left.value"}}, "kind":"builtin.identity"},
         ]),
-        vec![
-            edge("feed", "item", "left", "input"),
-            edge("feed", "item", "right", "input"),
-            edge("left", "value", "copy", "input"),
-        ],
         json!([{"name":"value", "node":"copy", "port":"value"}]),
     );
-    value["control_edges"] = json!([
+    value["edges"] = json!([
         {"from_node":"right", "from_output":"value", "to_node":"copy"}
     ]);
     let instance = start(value, Arc::new(ManualClock::default()));
@@ -421,8 +400,7 @@ inventory::submit! {
 #[test]
 fn one_over_budget_frame_fails() {
     let value = graph(
-        json!([{"id":"exhaust", "kind":"test.exhaust"}]),
-        vec![edge("feed", "item", "exhaust", "input")],
+        json!([{"id":"exhaust", "inputs":{"input":{"$ref":"feed.item"}}, "kind":"test.exhaust"}]),
         json!([]),
     );
     let instance = start(value, Arc::new(ManualClock::default()));
@@ -449,7 +427,6 @@ fn controlled_producers_reject_sends_after_close_and_cancellation() {
     let instance = start(
         graph(
             json!([]),
-            vec![],
             json!([{"name":"item","node":"feed","port":"item"}]),
         ),
         Arc::new(ManualClock::default()),

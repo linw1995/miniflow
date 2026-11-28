@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-13",
+  "version": "2026-11-28",
   "dependencies": {
     "core": {
       "package": "mfn-core"
@@ -70,28 +70,16 @@
       },
       "inputs": {
         "params.messages": {
-          "from": {
-            "node": "params",
-            "port": "messages"
-          }
+          "$ref": "params.messages"
         },
         "params.state": {
-          "from": {
-            "node": "params",
-            "port": "state"
-          }
+          "$ref": "params.state"
         },
         "params.keep_recent_tokens": {
-          "from": {
-            "node": "params",
-            "port": "keep_recent_tokens"
-          }
+          "$ref": "params.keep_recent_tokens"
         },
         "params.custom_instructions": {
-          "from": {
-            "node": "params",
-            "port": "custom_instructions"
-          }
+          "$ref": "params.custom_instructions"
         }
       }
     },
@@ -119,10 +107,7 @@
       "kind": "builtin.identity",
       "inputs": {
         "input": {
-          "from": {
-            "node": "params",
-            "port": "messages"
-          }
+          "$ref": "params.messages"
         }
       }
     },
@@ -171,40 +156,22 @@
       },
       "inputs": {
         "params.enabled": {
-          "from": {
-            "node": "plan",
-            "port": "has_history"
-          }
+          "$ref": "plan.has_history"
         },
         "params.messages": {
-          "from": {
-            "node": "plan",
-            "port": "history_request"
-          }
+          "$ref": "plan.history_request"
         },
         "params.error_prefix": {
-          "from": {
-            "node": "history_error_prefix",
-            "port": "value"
-          }
+          "$ref": "history_error_prefix.value"
         },
         "params.model": {
-          "from": {
-            "node": "params",
-            "port": "model"
-          }
+          "$ref": "params.model"
         },
         "params.base_url": {
-          "from": {
-            "node": "params",
-            "port": "base_url"
-          }
+          "$ref": "params.base_url"
         },
         "params.api_key": {
-          "from": {
-            "node": "params",
-            "port": "api_key"
-          }
+          "$ref": "params.api_key"
         }
       }
     },
@@ -223,16 +190,10 @@
       },
       "inputs": {
         "history_ok": {
-          "from": {
-            "node": "summarize_history",
-            "port": "ok"
-          }
+          "$ref": "summarize_history.ok"
         },
         "has_turn_prefix": {
-          "from": {
-            "node": "plan",
-            "port": "has_turn_prefix"
-          }
+          "$ref": "plan.has_turn_prefix"
         }
       }
     },
@@ -244,40 +205,22 @@
       },
       "inputs": {
         "params.enabled": {
-          "from": {
-            "node": "turn_prefix_eligible",
-            "port": "run"
-          }
+          "$ref": "turn_prefix_eligible.run"
         },
         "params.messages": {
-          "from": {
-            "node": "plan",
-            "port": "turn_prefix_request"
-          }
+          "$ref": "plan.turn_prefix_request"
         },
         "params.error_prefix": {
-          "from": {
-            "node": "turn_prefix_error_prefix",
-            "port": "value"
-          }
+          "$ref": "turn_prefix_error_prefix.value"
         },
         "params.model": {
-          "from": {
-            "node": "params",
-            "port": "model"
-          }
+          "$ref": "params.model"
         },
         "params.base_url": {
-          "from": {
-            "node": "params",
-            "port": "base_url"
-          }
+          "$ref": "params.base_url"
         },
         "params.api_key": {
-          "from": {
-            "node": "params",
-            "port": "api_key"
-          }
+          "$ref": "params.api_key"
         }
       }
     },
@@ -306,40 +249,22 @@
       },
       "inputs": {
         "history_ok": {
-          "from": {
-            "node": "summarize_history",
-            "port": "ok"
-          }
+          "$ref": "summarize_history.ok"
         },
         "turn_prefix_ok": {
-          "from": {
-            "node": "summarize_turn_prefix",
-            "port": "ok"
-          }
+          "$ref": "summarize_turn_prefix.ok"
         },
         "history_error": {
-          "from": {
-            "node": "summarize_history",
-            "port": "error"
-          }
+          "$ref": "summarize_history.error"
         },
         "turn_prefix_error": {
-          "from": {
-            "node": "summarize_turn_prefix",
-            "port": "error"
-          }
+          "$ref": "summarize_turn_prefix.error"
         },
         "history_usages": {
-          "from": {
-            "node": "summarize_history",
-            "port": "usages"
-          }
+          "$ref": "summarize_history.usages"
         },
         "turn_prefix_usages": {
-          "from": {
-            "node": "summarize_turn_prefix",
-            "port": "usages"
-          }
+          "$ref": "summarize_turn_prefix.usages"
         }
       }
     },
@@ -381,40 +306,22 @@
       },
       "inputs": {
         "is_split_turn": {
-          "from": {
-            "node": "plan",
-            "port": "is_split_turn"
-          }
+          "$ref": "plan.is_split_turn"
         },
         "has_history": {
-          "from": {
-            "node": "plan",
-            "port": "has_history"
-          }
+          "$ref": "plan.has_history"
         },
         "has_turn_prefix": {
-          "from": {
-            "node": "plan",
-            "port": "has_turn_prefix"
-          }
+          "$ref": "plan.has_turn_prefix"
         },
         "previous_summary": {
-          "from": {
-            "node": "plan",
-            "port": "previous_summary"
-          }
+          "$ref": "plan.previous_summary"
         },
         "history_summary": {
-          "from": {
-            "node": "summarize_history",
-            "port": "text"
-          }
+          "$ref": "summarize_history.text"
         },
         "turn_prefix_summary": {
-          "from": {
-            "node": "summarize_turn_prefix",
-            "port": "text"
-          }
+          "$ref": "summarize_turn_prefix.text"
         }
       }
     },
@@ -438,22 +345,13 @@
       },
       "inputs": {
         "body": {
-          "from": {
-            "node": "compose_body",
-            "port": "body"
-          }
+          "$ref": "compose_body.body"
         },
         "read_files": {
-          "from": {
-            "node": "plan",
-            "port": "read_files"
-          }
+          "$ref": "plan.read_files"
         },
         "modified_files": {
-          "from": {
-            "node": "plan",
-            "port": "modified_files"
-          }
+          "$ref": "plan.modified_files"
         }
       }
     },
@@ -487,46 +385,25 @@
       },
       "inputs": {
         "system_messages": {
-          "from": {
-            "node": "plan",
-            "port": "system_messages"
-          }
+          "$ref": "plan.system_messages"
         },
         "kept_messages": {
-          "from": {
-            "node": "plan",
-            "port": "kept_messages"
-          }
+          "$ref": "plan.kept_messages"
         },
         "body": {
-          "from": {
-            "node": "compose_body",
-            "port": "body"
-          }
+          "$ref": "compose_body.body"
         },
         "summary": {
-          "from": {
-            "node": "compose_summary",
-            "port": "summary"
-          }
+          "$ref": "compose_summary.summary"
         },
         "read_files": {
-          "from": {
-            "node": "plan",
-            "port": "read_files"
-          }
+          "$ref": "plan.read_files"
         },
         "modified_files": {
-          "from": {
-            "node": "plan",
-            "port": "modified_files"
-          }
+          "$ref": "plan.modified_files"
         },
         "tokens_before": {
-          "from": {
-            "node": "params",
-            "port": "tokens_before"
-          }
+          "$ref": "params.tokens_before"
         }
       }
     },
@@ -548,10 +425,7 @@
       "kind": "builtin.identity",
       "inputs": {
         "input": {
-          "from": {
-            "node": "params",
-            "port": "messages"
-          }
+          "$ref": "params.messages"
         }
       }
     },
@@ -574,10 +448,7 @@
       },
       "inputs": {
         "error": {
-          "from": {
-            "node": "summarize_status",
-            "port": "error"
-          }
+          "$ref": "summarize_status.error"
         }
       }
     },
@@ -588,16 +459,13 @@
         "input": {
           "exclusive": [
             {
-              "node": "nothing_result",
-              "port": "status"
+              "$ref": "nothing_result.status"
             },
             {
-              "node": "succeeded_meta",
-              "port": "status"
+              "$ref": "succeeded_meta.status"
             },
             {
-              "node": "failed_result",
-              "port": "status"
+              "$ref": "failed_result.status"
             }
           ]
         }
@@ -610,16 +478,13 @@
         "input": {
           "exclusive": [
             {
-              "node": "nothing_result",
-              "port": "compacted"
+              "$ref": "nothing_result.compacted"
             },
             {
-              "node": "succeeded_meta",
-              "port": "compacted"
+              "$ref": "succeeded_meta.compacted"
             },
             {
-              "node": "failed_result",
-              "port": "compacted"
+              "$ref": "failed_result.compacted"
             }
           ]
         }
@@ -632,16 +497,13 @@
         "input": {
           "exclusive": [
             {
-              "node": "nothing_messages",
-              "port": "value"
+              "$ref": "nothing_messages.value"
             },
             {
-              "node": "compose_messages",
-              "port": "messages"
+              "$ref": "compose_messages.messages"
             },
             {
-              "node": "failed_messages",
-              "port": "value"
+              "$ref": "failed_messages.value"
             }
           ]
         }
@@ -654,16 +516,13 @@
         "input": {
           "exclusive": [
             {
-              "node": "nothing_result",
-              "port": "summary"
+              "$ref": "nothing_result.summary"
             },
             {
-              "node": "compose_summary",
-              "port": "summary"
+              "$ref": "compose_summary.summary"
             },
             {
-              "node": "failed_result",
-              "port": "summary"
+              "$ref": "failed_result.summary"
             }
           ]
         }
@@ -676,12 +535,10 @@
         "input": {
           "exclusive": [
             {
-              "node": "nothing_usages",
-              "port": "value"
+              "$ref": "nothing_usages.value"
             },
             {
-              "node": "summarize_status",
-              "port": "usages"
+              "$ref": "summarize_status.usages"
             }
           ]
         }
@@ -694,16 +551,13 @@
         "input": {
           "exclusive": [
             {
-              "node": "nothing_result",
-              "port": "read_files"
+              "$ref": "nothing_result.read_files"
             },
             {
-              "node": "compose_messages",
-              "port": "read_files"
+              "$ref": "compose_messages.read_files"
             },
             {
-              "node": "failed_result",
-              "port": "read_files"
+              "$ref": "failed_result.read_files"
             }
           ]
         }
@@ -716,16 +570,13 @@
         "input": {
           "exclusive": [
             {
-              "node": "nothing_result",
-              "port": "modified_files"
+              "$ref": "nothing_result.modified_files"
             },
             {
-              "node": "compose_messages",
-              "port": "modified_files"
+              "$ref": "compose_messages.modified_files"
             },
             {
-              "node": "failed_result",
-              "port": "modified_files"
+              "$ref": "failed_result.modified_files"
             }
           ]
         }
@@ -738,16 +589,13 @@
         "input": {
           "exclusive": [
             {
-              "node": "nothing_result",
-              "port": "error"
+              "$ref": "nothing_result.error"
             },
             {
-              "node": "succeeded_meta",
-              "port": "error"
+              "$ref": "succeeded_meta.error"
             },
             {
-              "node": "failed_result",
-              "port": "error"
+              "$ref": "failed_result.error"
             }
           ]
         }

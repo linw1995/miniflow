@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-13",
+  "version": "2026-11-28",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -82,10 +82,7 @@
       },
       "inputs": {
         "messages": {
-          "from": {
-            "node": "params",
-            "port": "messages"
-          }
+          "$ref": "params.messages"
         }
       }
     },
@@ -105,10 +102,7 @@
       },
       "inputs": {
         "messages": {
-          "from": {
-            "node": "params",
-            "port": "messages"
-          }
+          "$ref": "params.messages"
         }
       }
     },
@@ -120,46 +114,25 @@
       },
       "inputs": {
         "params.prompt": {
-          "from": {
-            "node": "title_source",
-            "port": "prompt"
-          }
+          "$ref": "title_source.prompt"
         },
         "params.text": {
-          "from": {
-            "node": "model",
-            "port": "text"
-          }
+          "$ref": "model.text"
         },
         "params.status": {
-          "from": {
-            "node": "model",
-            "port": "status"
-          }
+          "$ref": "model.status"
         },
         "params.context": {
-          "from": {
-            "node": "params",
-            "port": "context"
-          }
+          "$ref": "params.context"
         },
         "params.model": {
-          "from": {
-            "node": "params",
-            "port": "model"
-          }
+          "$ref": "params.model"
         },
         "params.base_url": {
-          "from": {
-            "node": "params",
-            "port": "base_url"
-          }
+          "$ref": "params.base_url"
         },
         "params.api_key": {
-          "from": {
-            "node": "params",
-            "port": "api_key"
-          }
+          "$ref": "params.api_key"
         }
       }
     },
@@ -182,16 +155,10 @@
       },
       "inputs": {
         "left": {
-          "from": {
-            "node": "model",
-            "port": "usages"
-          }
+          "$ref": "model.usages"
         },
         "right": {
-          "from": {
-            "node": "title",
-            "port": "usages"
-          }
+          "$ref": "title.usages"
         }
       }
     },
@@ -218,10 +185,7 @@
       "kind": "builtin.identity",
       "inputs": {
         "input": {
-          "from": {
-            "node": "title",
-            "port": "title"
-          }
+          "$ref": "title.title"
         }
       }
     },
@@ -239,12 +203,10 @@
         "input": {
           "exclusive": [
             {
-              "node": "selected_title",
-              "port": "value"
+              "$ref": "selected_title.value"
             },
             {
-              "node": "missing_title",
-              "port": "value"
+              "$ref": "missing_title.value"
             }
           ]
         }
@@ -274,34 +236,19 @@
       },
       "inputs": {
         "status": {
-          "from": {
-            "node": "model",
-            "port": "status"
-          }
+          "$ref": "model.status"
         },
         "messages": {
-          "from": {
-            "node": "model",
-            "port": "messages"
-          }
+          "$ref": "model.messages"
         },
         "primary_usages": {
-          "from": {
-            "node": "model",
-            "port": "usages"
-          }
+          "$ref": "model.usages"
         },
         "usages": {
-          "from": {
-            "node": "usages",
-            "port": "value"
-          }
+          "$ref": "usages.value"
         },
         "title": {
-          "from": {
-            "node": "title_value",
-            "port": "value"
-          }
+          "$ref": "title_value.value"
         }
       }
     }

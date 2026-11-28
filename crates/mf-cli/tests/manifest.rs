@@ -193,8 +193,7 @@ fn release_lto_and_strip_preserve_standalone_factory_free_manifest() {
             "package":"fixture-multi-nodes", "path":crates.join("mf-compiler/tests/fixtures/multi-nodes"),
             "features":["double"], "default-features":false
         }},
-        "nodes":[{"id":"a", "kind":"fixture.source", "config":{"print":true}}, {"id":"b", "kind":"fixture.echo"}],
-        "edges":[{"from_node":"a","from_output":"value","to_node":"b","to_input":"input"}],
+        "nodes":[{"id":"a", "kind":"fixture.source", "config":{"print":true}}, {"id":"b", "kind":"fixture.echo", "inputs":{"input":{"$ref":"a.value"}}}],
         "outputs":[{"name":"result","node":"b","port":"value"}]
     })).unwrap();
     let plan = plan_definition(&definition).unwrap();

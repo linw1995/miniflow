@@ -126,7 +126,7 @@ fn stream_export() -> serde_json::Value {
     let mut document = root_export();
     document["nodes"].as_array_mut().unwrap().push(json!({
         "id":"consume","kind":"builtin.identity",
-        "inputs":{"input":{"from":{"node":"group.count","port":"delta"}}}
+        "inputs":{"input":{"$ref":"group.count.delta"}}
     }));
     document["outputs"] = json!([{"name":"increment","node":"consume","port":"value"}]);
     document
@@ -169,7 +169,7 @@ fn selected_incremental_and_terminal_outputs_keep_their_message_domains() {
 #[test]
 fn flow_constants_retain_stream_contracts_and_producer_ownership() {
     let mut body = root_export();
-    body["nodes"][0]["inputs"] = json!({"count":{"from":{"node":"seed", "port":"value"}}});
+    body["nodes"][0]["inputs"] = json!({"count":{"$ref":"seed.value"}});
     body["nodes"].as_array_mut().unwrap().insert(
         0,
         json!({
@@ -184,7 +184,7 @@ fn flow_constants_retain_stream_contracts_and_producer_ownership() {
                 "inputs":[],
                 "outputs":[{"name":"total", "value_type":"usize", "required":true}],
                 "stream_outputs":[{"name":"increment", "value_type":"usize", "required":true}]
-            }, "inputs":{"flow":{"from":{"node":"policy", "port":"value"}}}}
+            }, "inputs":{"flow":{"$ref":"policy.value"}}}
         ],
         "outputs":[{"name":"total", "node":"apply", "port":"total"},
             {"name":"increment", "node":"apply", "port":"increment"}]
@@ -362,7 +362,7 @@ fn planner_separates_terminal_and_stream_domains_and_rejects_implicit_joins() {
     let mut document = root_export();
     document["execution"] = json!({});
     document["nodes"].as_array_mut().unwrap().push(json!({
-        "id":"consume","kind":"builtin.identity", "inputs":{"input":{"from":{"node":"group.count","port":"delta"}}}
+        "id":"consume","kind":"builtin.identity", "inputs":{"input":{"$ref":"group.count.delta"}}
     }));
     let definition = serde_json::from_value(document.clone()).unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
@@ -390,8 +390,8 @@ fn planner_separates_terminal_and_stream_domains_and_rejects_implicit_joins() {
     );
     document["execution"] = json!({});
     document["nodes"][1] = json!({"id":"consume","kind":"fixture.task_stream_join", "inputs":{
-        "delta":{"from":{"node":"group.count","port":"delta"}},
-        "total":{"from":{"node":"group.count","port":"total"}}
+        "delta":{"$ref":"group.count.delta"},
+        "total":{"$ref":"group.count.total"}
     }});
     let error = compile_definition(&serde_json::from_value(document).unwrap(), &registry)
         .unwrap_err()
@@ -435,7 +435,7 @@ fn terminal_dependencies_progress_while_an_increment_is_unacknowledged() {
     document["outputs"] = json!([{"name":"delta","node":"consume","port":"value"}]);
     document["nodes"].as_array_mut().unwrap().push(json!({
         "id":"finish", "kind":"fixture.task_stream_finish", "config":{"path":marker},
-        "inputs":{"total":{"from":{"node":"group.count","port":"total"}}}
+        "inputs":{"total":{"$ref":"group.count.total"}}
     }));
     let definition = serde_json::from_value(document).unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
@@ -465,7 +465,7 @@ fn combined_terminal_results_support_output_and_success_dependencies() {
         "nodes": [
             {"id":"source", "kind":"fixture.task_stream"},
             {"id":"after", "kind":"fixture.task_stream", "inputs": {
-                "count":{"from":{"node":"source", "port":"total"}}
+                "count":{"$ref":"source.total"}
             }}
         ],
         "edges": [{"from_node":"source", "to_node":"after"}],
@@ -632,7 +632,7 @@ fn data_and_control_dependencies_infer_streaming_from_incremental_ports() {
         } else {
             value["nodes"].as_array_mut().unwrap().push(json!({
                 "id":"consume", "kind":"builtin.identity", "inputs":{
-                    "input":{"from":{"node":"group.count", "port":"delta"}}
+                    "input":{"$ref":"group.count.delta"}
                 }
             }));
         }

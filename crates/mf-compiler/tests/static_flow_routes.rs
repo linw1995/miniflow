@@ -146,7 +146,7 @@ inventory::submit! {
     } }
 }
 fn edge(node: &str, port: &str) -> Value {
-    json!({"from":{"node":node,"port":port}})
+    json!({"$ref":format!("{node}.{port}")})
 }
 fn effect(first: bool) -> Value {
     json!({"version":"2026-11-13","nodes":[{"id":"effect","kind":"test.static-route-effect","config":{"first":first}}],

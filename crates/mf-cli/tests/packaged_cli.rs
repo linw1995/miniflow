@@ -90,15 +90,14 @@ fn packaged_cli_acceptance() {
             {"id":"route","kind":"builtin.if_else","config":{"branches":[
                 {"id":"accepted","condition":{"source":{"output":"source.value","path":""},"operator":"gt","value":0}}
             ]}},
-            {"id":"echo","kind":"fixture.echo"},
+            {"id":"echo","kind":"fixture.echo", "inputs":{"input":{"$ref":"source.value"}}},
             {"id":"inactive","kind":"fixture.context","config":{"ports":["value"],"fail":true}}
         ],
-        "control_edges":[
+        "edges":[
             {"from_node":"source","from_output":"value","to_node":"route"},
             {"from_node":"route","from_output":"accepted","to_node":"echo"},
             {"from_node":"route","from_output":"else","to_node":"inactive"}
         ],
-        "edges":[{"from_node":"source","from_output":"value","to_node":"echo","to_input":"input"}],
         "outputs":[{"name":"result","node":"echo","port":"value"},{"name":"inactive","node":"inactive","port":"value","optional":true}]
     });
     let definition = project.join("flow.json");
@@ -143,9 +142,8 @@ fn packaged_cli_acceptance() {
         },
         "nodes": [
             {"id": "source", "kind": "fixture.typed_source", "config": {"type": "any", "value": [1, 2]}},
-            {"id": "sink", "kind": "fixture.typed_echo", "config": {"type": "list_int64"}}
+            {"id": "sink", "kind": "fixture.typed_echo", "config": {"type": "list_int64"}, "inputs":{"input":{"$ref":"source.value"}}}
         ],
-        "edges": [{"from_node": "source", "from_output": "value", "to_node": "sink", "to_input": "input"}],
         "outputs": [{"name": "result", "node": "sink", "port": "value"}]
     });
     let typed_definition = project.join("typed.json");

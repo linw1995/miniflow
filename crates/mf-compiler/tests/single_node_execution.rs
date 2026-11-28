@@ -99,9 +99,8 @@ fn args(value: Value) -> WorkflowArguments {
 }
 fn chain(stream: bool) -> Value {
     let mut value = json!({"version":"2026-10-03", "dependencies":{},
-        "nodes":[{"id":"before", "kind":if stream {"test.isolation_producer"} else {"test.isolation_tripwire"}}, {"id":"target", "kind":"builtin.identity"}, {"id":"after", "kind":"test.isolation_tripwire"}],
-        "edges":[{"from_node":"before", "from_output":"value", "to_node":"target", "to_input":"input"}, {"from_node":"target", "from_output":"value", "to_node":"after", "to_input":"input"}],
-        "control_edges":[{"from_node":"before", "from_output":"value", "to_node":"target"}],
+        "nodes":[{"id":"before", "kind":if stream {"test.isolation_producer"} else {"test.isolation_tripwire"}}, {"id":"target", "kind":"builtin.identity", "inputs":{"input":{"$ref":"before.value"}}}, {"id":"after", "kind":"test.isolation_tripwire", "inputs":{"input":{"$ref":"target.value"}}}],
+        "edges":[{"from_node":"before", "from_output":"value", "to_node":"target"}],
         "outputs":[{"name":"alias", "node":"after", "port":"value"}]
     });
     if stream {
@@ -205,7 +204,7 @@ fn routers_read_only_explicit_context_and_omit_skipped_outputs() {
     let plan = plan(
         json!({"version":"2026-10-03", "dependencies":{},
             "nodes":[{"id":"source", "kind":"test.isolation_tripwire"}, {"id":"route", "kind":"builtin.if_else", "config":{"branches":[{"id":"yes", "condition":{"source":{"output":"source.value", "path":""}, "operator":"gt", "value":0}}]}}],
-            "control_edges":[{"from_node":"source", "from_output":"value", "to_node":"route"}]
+            "edges":[{"from_node":"source", "from_output":"value", "to_node":"route"}]
         }),
         &registry,
     );
@@ -317,14 +316,13 @@ fn selected_parallel_iteration_keeps_order_worker_bounds_and_error_policy() {
     for policy in ["terminate", "continue_on_error", "remove_failed"] {
         let plan = plan(
             json!({"version":"2026-10-03", "dependencies":{}, "nodes":[
-            {"id":"source", "kind":"builtin.constant", "config":{"value":[1,2,3]}},
-            {"id":"iteration", "kind":"builtin.iteration", "config":{"mode":"parallel", "on_error":policy, "body":{"version":"2026-10-03", "dependencies":{},
-                "nodes":[{"id":"map", "kind":"test.isolation_item"}], "edges":[
-                    {"from_node":"%iteration", "from_output":"item", "to_node":"map", "to_input":"item"},
-                    {"from_node":"%iteration", "from_output":"index", "to_node":"map", "to_input":"index"}],
-                "outputs": [{"name":"result", "node":"map", "port":"value"}]
-            }}}
-        ], "edges":[{"from_node":"source", "from_output":"value", "to_node":"iteration", "to_input":"items"}]}),
+                {"id":"source", "kind":"builtin.constant", "config":{"value":[1,2,3]}},
+                {"id":"iteration", "kind":"builtin.iteration", "config":{"mode":"parallel", "on_error":policy, "body":{"version":"2026-10-03", "dependencies":{},
+                    "nodes":[{"id":"map", "kind":"test.isolation_item", "inputs":{"item":{"$ref":"%iteration.item"}, "index":{"$ref":"%iteration.index"}}}],
+                    "outputs": [{"name":"result", "node":"map", "port":"value"}]
+                }},
+                "inputs":{"items":{"$ref":"source.value"}}}
+            ]}),
             &registry,
         );
         let records = targets(&plan, &registry);
@@ -753,8 +751,8 @@ fn selected_metadata_excludes_values_and_snapshot_sink_failures_preserve_results
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = plan(
         json!({"version":"2026-10-03", "dependencies":{}, "nodes":[
-        {"id":"source", "kind":"builtin.constant", "config":{"value":"private-build-value"}}, {"id":"copy", "kind":"builtin.identity"}
-    ], "edges":[{"from_node":"source", "from_output":"value", "to_node":"copy", "to_input":"input"}]}),
+            {"id":"source", "kind":"builtin.constant", "config":{"value":"private-build-value"}}, {"id":"copy", "kind":"builtin.identity", "inputs":{"input":{"$ref":"source.value"}}}
+        ]}),
         &registry,
     );
     let artifacts = plan
@@ -833,10 +831,10 @@ fn selected_stream_iteration_keeps_the_original_worker_ceiling() {
             "nodes":[{"id":"producer", "kind":"test.isolation_producer"},
             {"id":"source", "kind":"builtin.constant", "config":{"value":[1,2,3]}},
             {"id":"iteration", "kind":"builtin.iteration", "config":{"mode":"parallel", "body":{"version":"2026-10-03", "dependencies":{},
-                "nodes":[{"id":"map", "kind":"test.isolation_item", "config":{"workers":1}}],
-                "edges":[{"from_node":"%iteration", "from_output":"item", "to_node":"map", "to_input":"item"}, {"from_node":"%iteration", "from_output":"index", "to_node":"map", "to_input":"index"}],
+                "nodes":[{"id":"map", "kind":"test.isolation_item", "config":{"workers":1}, "inputs":{"item":{"$ref":"%iteration.item"}, "index":{"$ref":"%iteration.index"}}}],
                 "outputs": [{"name":"result", "node":"map", "port":"value"}]
-            }}}], "edges":[{"from_node":"source", "from_output":"value", "to_node":"iteration", "to_input":"items"}]
+            }},
+            "inputs":{"items":{"$ref":"source.value"}}}]
         }),
         &registry,
     );

@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-11",
+  "version": "2026-11-28",
   "dependencies": {
     "core": {
       "package": "mfn-core"
@@ -52,10 +52,7 @@
       "kind": "builtin.identity",
       "inputs": {
         "input": {
-          "from": {
-            "node": "params",
-            "port": "prefix"
-          }
+          "$ref": "params.prefix"
         }
       }
     },
@@ -78,16 +75,10 @@
       },
       "inputs": {
         "prefix": {
-          "from": {
-            "node": "params",
-            "port": "prefix"
-          }
+          "$ref": "params.prefix"
         },
         "generated": {
-          "from": {
-            "node": "params",
-            "port": "generated"
-          }
+          "$ref": "params.generated"
         }
       }
     },
@@ -98,12 +89,10 @@
         "input": {
           "exclusive": [
             {
-              "node": "prefix_only",
-              "port": "value"
+              "$ref": "prefix_only.value"
             },
             {
-              "node": "continue_request",
-              "port": "messages"
+              "$ref": "continue_request.messages"
             }
           ]
         }

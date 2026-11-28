@@ -94,8 +94,7 @@ fn configuration_and_graph_placement_are_validated_without_reading_sources() {
         .as_array_mut()
         .unwrap()
         .push(json!({"id":"before", "kind":"builtin.constant", "config":{"value":"text"}}));
-    value["edges"] =
-        json!([{"from_node":"before", "from_output":"value", "to_node":"params", "to_input":"x"}]);
+    value["nodes"][0]["inputs"]["x"] = json!({"$ref":"before.value"});
     for secret in [false, true] {
         let mut connected = value.clone();
         connected["nodes"][0]["config"]["parameters"]["x"]["secret"] = json!(secret);

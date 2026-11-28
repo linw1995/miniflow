@@ -2,14 +2,14 @@
 
 ## JSON format
 
-Use version `2026-11-13` for new workflows. Each node has a unique nonblank `id`, a registered `kind`, optional
+Use version `2026-11-28` for new workflows. Each node has a unique nonblank `id`, a registered `kind`, optional
 `config`, and optional `inputs`. Inputs reference producer outputs; `edges` declare execution prerequisites. An
 `outputs` entry selects a node port and names the executable's JSON result. Version `2026-10-23` also supports
 display-only [node clusters](#node-clusters).
 
 The [conditional convergence example](../examples/exclusive-inputs.json) and the [basic
-example](../examples/hello-workflow.json) use this format with annotated clusters. Existing supported versions keep their
-original field meanings and feature restrictions; new fields are not inferred from their shape.
+example](../examples/hello-workflow.json) use this format with annotated clusters. All supported versions use the same
+input binding syntax; other features, such as node-success prerequisites, still depend on the scope version.
 
 The root graph must specify `version`. An executable child may omit it to inherit the original root
 version, including children loaded from another file. An explicit child version overrides that default
@@ -20,22 +20,29 @@ provider dependencies are not inherited by this shorthand. Canonical serializati
 
 ### Input references
 
-Declare a source next to its consumer input:
+Use the same `$ref` object as a [configuration reference](#configuration-templates) to name a source next to its consumer input:
 
 ```json
 {
   "id": "print",
   "kind": "example.print",
   "inputs": {
-    "text": {"from": {"node": "read", "port": "text"}}
+    "text": {"$ref": "read.text"}
   }
 }
 ```
 
 The kind above is illustrative. This reference binds `read.text` to `print.text` and establishes the scheduling
-dependency. It needs no additional execution edge. Source node and port names are separate opaque strings; dots are not
-parsed. References select whole output values, preserving sharing, types, and secret metadata. Use existing
-transformation nodes to select fields or construct another value.
+dependency. It needs no additional execution edge. An input selects a whole output, preserving sharing, types, and
+secret metadata. Nonempty JSON Pointer paths, `$template`, and literals are not port connections. Use a transformation
+node to select fields or construct a new value. In provider `config`, a reference reads context and does **not**
+establish a scheduling dependency. `mf run ./runner --preview` shows ordinary input bindings as data edges and
+each exclusive candidate as an exclusive edge. The default view can bundle or hide redundant connections; press
+`e` to cycle to [Ports](observability.md#graph-presentation) for every port mapping. A configuration reference adds no line.
+
+Node and port names can both contain dots. Structural planning runs before provider ports are known, so the reference
+must have exactly one matching `node.` prefix in its scope (including implicit scope sources), with a nonempty port
+after it. For example, `a.b.result` is ambiguous if the scope contains both `a` and `a.b`; rename one before migrating.
 
 Input names must match the provider's ports. Duplicate keys, unknown fields, null bindings, and mixed binding variants
 fail. A connected optional input still skips its consumer when its source skips. Unbound inputs keep their existing
@@ -54,8 +61,8 @@ Scope values are available without declaring a source node in `nodes`:
 | `%loop` | The enclosing `loop.run` node's `config.variables` and `config.inputs` | Loop variables, read-only inputs, and `index` |
 | `%iteration` | The enclosing `builtin.iteration` node | Current `item`, `key`, `index`, and read-only `config.inputs` |
 
-For example, `{"from":{"node":"%loop","port":"count"}}` reads a Loop variable directly;
-there is no `%loop` node to declare first. Workflow outputs use the same source and port fields.
+For example, `{"$ref": "%loop.count"}` reads a Loop variable directly;
+there is no `%loop` node to declare first. Workflow outputs continue to name `node` and `port` separately.
 `workflow.assign` likewise needs only its target `config.variable` and a `value` input, not a variable
 source declaration. A reader requiring an updated value still needs the assignment's `done` dependency.
 
@@ -80,7 +87,7 @@ sources in `flows`; Cargo node packages remain in `dependencies`:
       "kind": "workflow.call",
       "config": { "flow": "normalize" },
       "inputs": {
-        "input.text": { "from": { "node": "read", "port": "text" } }
+        "input.text": {"$ref": "read.text"}
       }
     }
   ]
@@ -293,7 +300,7 @@ Its caller supplies the value with the same `inputs` syntax used for numbers and
   "kind": "workflow.call",
   "config": {"flow": "A"},
   "inputs": {
-    "params.policy": {"from": {"node": "policy", "port": "value"}}
+    "params.policy": {"$ref": "policy.value"}
   }
 }
 ```
@@ -311,7 +318,7 @@ configuration declares the expected ordinary input/output ports and the callable
     "outputs": [{"name": "answer", "value_type": "string", "required": true}]
   },
   "inputs": {
-    "flow": {"from": {"node": "params", "port": "policy"}}
+    "flow": {"$ref": "params.policy"}
   }
 }
 ```
@@ -393,7 +400,7 @@ expose `Map(Any)`, with checked edges validating narrower destination types.
   "id": "tools",
   "kind": "builtin.object",
   "config": {"fields": {"calculator": "flow"}},
-  "inputs": {"calculator": {"from": {"node": "calculator", "port": "value"}}}
+  "inputs": {"calculator": {"$ref": "calculator.value"}}
 }
 ```
 
@@ -409,7 +416,7 @@ static calls and loop/iteration bodies, not tool values, routed copies, or callb
 Multiple sites with the same name have no implicit winner. Embedders install `HostCallback` values
 with `NodeRegistry::bind_callbacks`; no callback is a JSON startup argument.
 
-A runner with manifest `2026-11-27` works standalone. Without any grant, `./flow` and
+A runner with manifest `2026-11-28` works standalone. Without any grant, `./flow` and
 `mf run ./flow` use the local bodies and do not open a socket. Both disable stdin and
 publish only selected business JSON on stdout (one object or ordered JSON Lines). Pass startup
 parameters or use file sources; diagnostics use stderr. Telemetry uses its separate OTLP endpoint.
@@ -1093,9 +1100,8 @@ node ports, and Loop bodies remain static.
 | `{"$template": "{{ params.settings#/models/0 }}"}` | Interpolate a selected subtree |
 | `"{{ params.name }}"` | Ordinary literal string; it is not evaluated |
 
-References name complete output IDs. The producer must be an explicit ancestor through data bindings or execution
-dependencies;
-a template does not add an implicit dependency. References remain within the existing scope and message-domain
+References in provider configuration name complete output IDs. The producer must be an ancestor through an input
+reference or execution dependency; a template does not add an implicit dependency. References remain within the existing scope and message-domain
 boundaries. Compilation rejects unknown outputs and missing dependencies. Execution rejects missing or skipped
 values, missing paths, and incompatible field types. Interpolation accepts strings without implicit conversion;
 use a whole-value reference for numbers, booleans, arrays, or objects. JSON Pointer uses `~0` for `~` and `~1` for `/`.
@@ -1511,8 +1517,8 @@ assistant message containing all calls. This follows the
 
 ```json
 "inputs": {
-  "messages": {"from": {"node": "conversation", "port": "messages"}},
-  "tool_results": {"from": {"node": "execute_tools", "port": "results"}}
+  "messages": {"$ref": "conversation.messages"},
+  "tool_results": {"$ref": "execute_tools.results"}
 }
 ```
 
@@ -1605,7 +1611,7 @@ Use `workflow.assign` to overwrite a declared variable:
   "id": "assign",
   "kind": "workflow.assign",
   "config": {"variable": "count"},
-  "inputs": {"value": {"from": {"node": "params", "port": "value"}}}
+  "inputs": {"value": {"$ref": "params.value"}}
 }
 ```
 
@@ -1661,7 +1667,7 @@ grammar, and at least one of `until` or `max_iterations`. Read-only `inputs` are
 `version` may inherit the root, and empty `dependencies` may be omitted. The old top-level `loop`
 field is not supported. Each variable creates a Loop input and a required Loop output for its final
 value; the input is optional when the variable declares an `initial` literal. Loop returns its
-variables rather than a second set of child results. A body using version `2026-11-13` may select
+variables rather than a second set of child results. A body using version `2026-11-13` or later may select
 terminal `outputs` as end-of-pass variable updates; older bodies require empty terminal outputs. The
 body reads current values, read-only inputs, and a zero-based `index` through the implicit `%loop`
 source. The compiler supplies it; do not declare a `%loop` node in the body. Every body node ID is local
@@ -1671,7 +1677,7 @@ including when initializing a nested Loop.
 
 ```json
 {
-  "version": "2026-11-13",
+  "version": "2026-11-28",
   "dependencies": {
     "core": {"package": "mfn-core", "path": "../crates/builtin-nodes/core"}
   },
@@ -1707,8 +1713,8 @@ including when initializing a nested Loop.
                 "code": {"next": "count + step"}
               },
               "inputs": {
-                "count": {"from": {"node": "%loop", "port": "count"}},
-                "step": {"from": {"node": "%loop", "port": "step"}}
+                "count": {"$ref": "%loop.count"},
+                "step": {"$ref": "%loop.step"}
               }
             }
           ],
@@ -1716,7 +1722,7 @@ including when initializing a nested Loop.
         }
       },
       "inputs": {
-        "step": {"from": {"node": "params", "port": "step"}}
+        "step": {"$ref": "params.step"}
       }
     }
   ],
@@ -1725,7 +1731,7 @@ including when initializing a nested Loop.
 ```
 
 This example is a complete workflow, not a node or body fragment. Its dependency paths assume the
-file is saved under `examples/` in this checkout. The body inherits version `2026-11-13` from the
+file is saved under `examples/` in this checkout. The body inherits version `2026-11-28` from the
 root and declares its own code dependency. Its `outputs` update Loop state; the root `outputs`
 select the final result after the Loop completes. With `params.step` set to `2`,
 the result is `{"count":4}`: the updated count is checked against `until` after each pass.
@@ -1864,10 +1870,10 @@ array after the body has passed validation. Other input shapes fail at execution
     "mode": "sequential",
     "on_error": "terminate",
     "body": {
-      "version": "2026-10-28",
+      "version": "2026-11-28",
       "dependencies": {},
       "nodes": [{ "id": "copy", "kind": "builtin.identity",
-        "inputs": { "input": { "from": { "node": "%iteration", "port": "item" } } }
+        "inputs": { "input": {"$ref": "%iteration.item"} }
       }],
       "outputs": [{ "name": "result", "node": "copy", "port": "value" }]
     }
@@ -1953,7 +1959,8 @@ Only one build can hold a Flow's dependency lock at a time. Contention reports a
 
 ## Execution dependencies
 
-In version `2026-10-19`, `edges` is optional and never binds a target input. It supports two forms:
+`edges` is optional and never binds a target input. Output gates are available in all supported versions;
+node-success prerequisites require `2026-10-19` or later:
 
 ```json
 {
@@ -2000,8 +2007,8 @@ Declare alternative outputs with an `exclusive` input binding:
   "inputs": {
     "input": {
       "exclusive": [
-        {"node": "local", "port": "value"},
-        {"node": "ci", "port": "value"}
+        {"$ref": "local.value"},
+        {"$ref": "ci.value"}
       ]
     }
   }
@@ -2036,27 +2043,22 @@ on a shared consumer. Ordinary inputs remain jointly required.
 
 ## Migrating legacy definitions
 
-In older versions, `edges` maps outputs to inputs using `from_node`, `from_output`, `to_node`, and `to_input`. Marking
-every edge to one input with `exclusive: true` declares alternatives. Legacy `control_edges` contains output gates
-without `to_input`. Updated readers continue to support these definitions without rewriting files.
+Old connection spellings are rejected regardless of the declared version. Update each affected scope, including
+inline and file-backed children, before recompiling the runner:
 
-To migrate a definition and its bodies:
+1. Replace `{"from":{"node":"read","port":"text"}}` with `{"$ref":"read.text"}` in the consumer's `inputs` map.
+2. Move any top-level data edge into its consumer's `inputs[to_input]` as a whole-output reference.
+   Keep mutually exclusive alternatives together: `{"exclusive":[{"$ref":"local.value"},{"$ref":"ci.value"}]}`.
+3. Move old `control_edges` entries unchanged into `edges` and remove `control_edges`, including empty arrays.
+   Do not replace a branch-output gate with node success: a router can succeed while skipping that branch.
 
-1. Set the root version to `2026-10-19`.
-2. Move each data edge into its consumer's `inputs`, using `from` or grouping its exclusive alternatives.
-3. Move the old `control_edges` entries unchanged into `edges`, and remove `control_edges`, including empty arrays.
-4. Add portless success edges only where successful Task completion is the intended prerequisite.
-
-Never replace a branch-output gate with node success: a router can succeed while skipping that branch. The new version
-rejects `control_edges`, `to_input` and `exclusive` on execution edges; older versions reject node-local inputs. Bodies
-cannot override or mix versions. New definitions require updated support packages and readers; unsupported versions fail
-explicitly.
+Changing the version alone is not a migration. Provider configuration and selected workflow outputs do not change.
 
 ## Optional workflow results
 
 A selection such as `{"name":"result","node":"branch","port":"value","optional":true}` omits its key when the source port or node is explicitly skipped. A produced null remains `"result": null`. Missing outputs without a skip marker remain errors. Output selections are required by default, so selecting a skipped required output fails with its name and source ID. All omitted selections produce `{}`.
 
-The optional field requires updated support packages. Existing `2026-09-26` definitions retain strict defaults; default-false selections and empty control-edge arrays are omitted when serialized. Old runtimes reject new fields rather than silently changing behavior.
+The optional field requires updated support packages. Existing `2026-09-26` definitions retain strict defaults; default-false selections are omitted when serialized. Old runtimes reject new fields rather than silently changing behavior.
 
 ## If, else-if, and else
 

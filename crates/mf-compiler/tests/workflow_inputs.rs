@@ -95,11 +95,11 @@ fn secret_arguments_survive_typed_nodes_and_edges_but_are_redacted_from_snapshot
         "version": "2026-10-03", "dependencies": {},
         "nodes": [
             {"id": "first", "kind": "builtin.identity"},
-            {"id": "second", "kind": "builtin.identity"}
+            {"id": "second", "kind": "builtin.identity", "inputs":{"input":{"$ref":"first.value"}}}
         ],
-        "edges": [{"from_node": "first", "from_output": "value", "to_node": "second", "to_input": "input"}],
         "outputs": [{"name": "result", "node": "second", "port": "value"}]
-    })).unwrap();
+    }))
+    .unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
     let flow = instantiate_compiled(&plan, &registry).unwrap();
     let secret = mf_runtime::ValueRef::from(json!({"token": "sentinel-secret"})).into_secret();
@@ -341,9 +341,7 @@ fn preserves_noninitial_and_body_required_inputs_and_legacy_validation() {
     body["nodes"] = json!([
         {"id":"repeat", "kind":"builtin.identity"}
     ]);
-    body["edges"] = json!([
-        {"from_node":"%loop", "from_output":"x", "to_node":"repeat", "to_input":"input"}
-    ]);
+    body["nodes"][0]["inputs"]["input"] = json!({"$ref":"%loop.x"});
     nested.outputs = serde_json::from_value(json!([
         {"name":"value", "node":"repeat", "port":"x"}
     ]))

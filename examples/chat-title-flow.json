@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-13",
+  "version": "2026-11-28",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -77,10 +77,7 @@
       },
       "inputs": {
         "messages": {
-          "from": {
-            "node": "params",
-            "port": "messages"
-          }
+          "$ref": "params.messages"
         }
       }
     },
@@ -99,16 +96,10 @@
       },
       "inputs": {
         "context": {
-          "from": {
-            "node": "params",
-            "port": "context"
-          }
+          "$ref": "params.context"
         },
         "status": {
-          "from": {
-            "node": "model",
-            "port": "status"
-          }
+          "$ref": "model.status"
         }
       }
     },
@@ -148,16 +139,10 @@
       },
       "inputs": {
         "messages": {
-          "from": {
-            "node": "params",
-            "port": "messages"
-          }
+          "$ref": "params.messages"
         },
         "text": {
-          "from": {
-            "node": "model",
-            "port": "text"
-          }
+          "$ref": "model.text"
         }
       }
     },
@@ -181,10 +166,7 @@
       },
       "inputs": {
         "messages": {
-          "from": {
-            "node": "title_prompt",
-            "port": "messages"
-          }
+          "$ref": "title_prompt.messages"
         }
       }
     },
@@ -207,16 +189,10 @@
       },
       "inputs": {
         "left": {
-          "from": {
-            "node": "model",
-            "port": "usages"
-          }
+          "$ref": "model.usages"
         },
         "right": {
-          "from": {
-            "node": "title_model",
-            "port": "usages"
-          }
+          "$ref": "title_model.usages"
         }
       }
     },
@@ -225,10 +201,7 @@
       "kind": "builtin.identity",
       "inputs": {
         "input": {
-          "from": {
-            "node": "model",
-            "port": "usages"
-          }
+          "$ref": "model.usages"
         }
       }
     },
@@ -239,12 +212,10 @@
         "input": {
           "exclusive": [
             {
-              "node": "combined_usages",
-              "port": "value"
+              "$ref": "combined_usages.value"
             },
             {
-              "node": "conversation_usages",
-              "port": "value"
+              "$ref": "conversation_usages.value"
             }
           ]
         }
@@ -274,10 +245,7 @@
       "kind": "builtin.identity",
       "inputs": {
         "input": {
-          "from": {
-            "node": "title_model",
-            "port": "text"
-          }
+          "$ref": "title_model.text"
         }
       }
     },
@@ -302,16 +270,13 @@
         "input": {
           "exclusive": [
             {
-              "node": "title",
-              "port": "value"
+              "$ref": "title.value"
             },
             {
-              "node": "failed_title",
-              "port": "value"
+              "$ref": "failed_title.value"
             },
             {
-              "node": "skipped_title",
-              "port": "value"
+              "$ref": "skipped_title.value"
             }
           ]
         }
@@ -341,34 +306,19 @@
       },
       "inputs": {
         "status": {
-          "from": {
-            "node": "model",
-            "port": "status"
-          }
+          "$ref": "model.status"
         },
         "messages": {
-          "from": {
-            "node": "model",
-            "port": "messages"
-          }
+          "$ref": "model.messages"
         },
         "primary_usages": {
-          "from": {
-            "node": "model",
-            "port": "usages"
-          }
+          "$ref": "model.usages"
         },
         "usages": {
-          "from": {
-            "node": "usages",
-            "port": "value"
-          }
+          "$ref": "usages.value"
         },
         "title": {
-          "from": {
-            "node": "title_value",
-            "port": "value"
-          }
+          "$ref": "title_value.value"
         }
       }
     }

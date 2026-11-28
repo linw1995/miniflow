@@ -560,7 +560,7 @@ fn chat_host_composes_builtin_compact_into_replace_context_across_reopen() {
                     "attribution": { "purpose": "conversation" }
                 },
                 "inputs": {
-                    "messages": { "from": { "node": "params", "port": "messages" } }
+                    "messages": {"$ref":"params.messages"}
                 }
             },
             {
@@ -574,7 +574,7 @@ fn chat_host_composes_builtin_compact_into_replace_context_across_reopen() {
                     }
                 },
                 "inputs": {
-                    "enabled": { "from": { "node": "params", "port": "compact" } }
+                    "enabled": {"$ref":"params.compact"}
                 }
             },
             {
@@ -582,14 +582,14 @@ fn chat_host_composes_builtin_compact_into_replace_context_across_reopen() {
                 "kind": "workflow.call",
                 "config": { "flow": "compact" },
                 "inputs": {
-                    "params.messages": { "from": { "node": "params", "port": "messages" } },
-                    "params.append_messages": { "from": { "node": "model", "port": "messages" } },
-                    "params.usages": { "from": { "node": "model", "port": "usages" } },
-                    "params.context": { "from": { "node": "compact_context", "port": "value" } },
-                    "params.force": { "from": { "node": "params", "port": "compact" } },
-                    "params.model": { "from": { "node": "params", "port": "model" } },
-                    "params.base_url": { "from": { "node": "params", "port": "base_url" } },
-                    "params.api_key": { "from": { "node": "params", "port": "api_key" } }
+                    "params.messages": {"$ref":"params.messages"},
+                    "params.append_messages": {"$ref":"model.messages"},
+                    "params.usages": {"$ref":"model.usages"},
+                    "params.context": {"$ref":"compact_context.value"},
+                    "params.force": {"$ref":"params.compact"},
+                    "params.model": {"$ref":"params.model"},
+                    "params.base_url": {"$ref":"params.base_url"},
+                    "params.api_key": {"$ref":"params.api_key"}
                 }
             },
             {
@@ -620,8 +620,8 @@ fn chat_host_composes_builtin_compact_into_replace_context_across_reopen() {
                     "code": { "value": "left + right" }
                 },
                 "inputs": {
-                    "left": { "from": { "node": "model", "port": "usages" } },
-                    "right": { "from": { "node": "compact", "port": "usages" } }
+                    "left": {"$ref":"model.usages"},
+                    "right": {"$ref":"compact.usages"}
                 }
             },
             {
@@ -635,9 +635,9 @@ fn chat_host_composes_builtin_compact_into_replace_context_across_reopen() {
                     }
                 },
                 "inputs": {
-                    "status": { "from": { "node": "model", "port": "status" } },
-                    "messages": { "from": { "node": "model", "port": "messages" } },
-                    "usages": { "from": { "node": "combined_usages", "port": "value" } }
+                    "status": {"$ref":"model.status"},
+                    "messages": {"$ref":"model.messages"},
+                    "usages": {"$ref":"combined_usages.value"}
                 }
             },
             {
@@ -652,10 +652,10 @@ fn chat_host_composes_builtin_compact_into_replace_context_across_reopen() {
                     }
                 },
                 "inputs": {
-                    "status": { "from": { "node": "model", "port": "status" } },
-                    "context_messages": { "from": { "node": "compact", "port": "messages" } },
-                    "display_messages": { "from": { "node": "model", "port": "messages" } },
-                    "usages": { "from": { "node": "combined_usages", "port": "value" } }
+                    "status": {"$ref":"model.status"},
+                    "context_messages": {"$ref":"compact.messages"},
+                    "display_messages": {"$ref":"model.messages"},
+                    "usages": {"$ref":"combined_usages.value"}
                 }
             }
         ],
@@ -1428,7 +1428,7 @@ fn chatflow_reusing_builtin_compact_receives_host_policy_and_suppresses_host_com
                     "capture_errors": true
                 },
                 "inputs": {
-                    "messages": { "from": { "node": "params", "port": "messages" } }
+                    "messages": {"$ref":"params.messages"}
                 }
             },
             {
@@ -1444,7 +1444,7 @@ fn chatflow_reusing_builtin_compact_receives_host_policy_and_suppresses_host_com
                     }
                 },
                 "inputs": {
-                    "text": { "from": { "node": "chat", "port": "text" } }
+                    "text": {"$ref":"chat.text"}
                 }
             },
             {
@@ -1452,13 +1452,13 @@ fn chatflow_reusing_builtin_compact_receives_host_policy_and_suppresses_host_com
                 "kind": "workflow.call",
                 "config": { "flow": "compact" },
                 "inputs": {
-                    "params.messages": { "from": { "node": "params", "port": "messages" } },
-                    "params.append_messages": { "from": { "node": "turn", "port": "append_messages" } },
-                    "params.usages": { "from": { "node": "chat", "port": "usages" } },
-                    "params.context": { "from": { "node": "params", "port": "context" } },
-                    "params.model": { "from": { "node": "params", "port": "model" } },
-                    "params.base_url": { "from": { "node": "params", "port": "base_url" } },
-                    "params.api_key": { "from": { "node": "params", "port": "api_key" } }
+                    "params.messages": {"$ref":"params.messages"},
+                    "params.append_messages": {"$ref":"turn.append_messages"},
+                    "params.usages": {"$ref":"chat.usages"},
+                    "params.context": {"$ref":"params.context"},
+                    "params.model": {"$ref":"params.model"},
+                    "params.base_url": {"$ref":"params.base_url"},
+                    "params.api_key": {"$ref":"params.api_key"}
                 }
             },
             {
@@ -1490,9 +1490,9 @@ fn chatflow_reusing_builtin_compact_receives_host_policy_and_suppresses_host_com
                     }
                 },
                 "inputs": {
-                    "append_messages": { "from": { "node": "turn", "port": "append_messages" } },
-                    "turn_usages": { "from": { "node": "chat", "port": "usages" } },
-                    "compact_usages": { "from": { "node": "compact", "port": "usages" } }
+                    "append_messages": {"$ref":"turn.append_messages"},
+                    "turn_usages": {"$ref":"chat.usages"},
+                    "compact_usages": {"$ref":"compact.usages"}
                 }
             },
             {
@@ -1511,10 +1511,10 @@ fn chatflow_reusing_builtin_compact_receives_host_policy_and_suppresses_host_com
                     }
                 },
                 "inputs": {
-                    "append_messages": { "from": { "node": "turn", "port": "append_messages" } },
-                    "turn_usages": { "from": { "node": "chat", "port": "usages" } },
-                    "context_messages": { "from": { "node": "compact", "port": "messages" } },
-                    "compact_usages": { "from": { "node": "compact", "port": "usages" } }
+                    "append_messages": {"$ref":"turn.append_messages"},
+                    "turn_usages": {"$ref":"chat.usages"},
+                    "context_messages": {"$ref":"compact.messages"},
+                    "compact_usages": {"$ref":"compact.usages"}
                 }
             }
         ],
@@ -1930,7 +1930,7 @@ fn user_workflow_reusing_compact_receives_discovered_context_window_in_context()
                     "capture_errors": true
                 },
                 "inputs": {
-                    "messages": { "from": { "node": "params", "port": "messages" } }
+                    "messages": {"$ref":"params.messages"}
                 }
             },
             {
@@ -1946,7 +1946,7 @@ fn user_workflow_reusing_compact_receives_discovered_context_window_in_context()
                     }
                 },
                 "inputs": {
-                    "text": { "from": { "node": "chat", "port": "text" } }
+                    "text": {"$ref":"chat.text"}
                 }
             },
             {
@@ -1954,13 +1954,13 @@ fn user_workflow_reusing_compact_receives_discovered_context_window_in_context()
                 "kind": "workflow.call",
                 "config": { "flow": "compact" },
                 "inputs": {
-                    "params.messages": { "from": { "node": "params", "port": "messages" } },
-                    "params.append_messages": { "from": { "node": "turn", "port": "append_messages" } },
-                    "params.usages": { "from": { "node": "chat", "port": "usages" } },
-                    "params.context": { "from": { "node": "params", "port": "context" } },
-                    "params.model": { "from": { "node": "params", "port": "model" } },
-                    "params.base_url": { "from": { "node": "params", "port": "base_url" } },
-                    "params.api_key": { "from": { "node": "params", "port": "api_key" } }
+                    "params.messages": {"$ref":"params.messages"},
+                    "params.append_messages": {"$ref":"turn.append_messages"},
+                    "params.usages": {"$ref":"chat.usages"},
+                    "params.context": {"$ref":"params.context"},
+                    "params.model": {"$ref":"params.model"},
+                    "params.base_url": {"$ref":"params.base_url"},
+                    "params.api_key": {"$ref":"params.api_key"}
                 }
             },
             {
@@ -1992,9 +1992,9 @@ fn user_workflow_reusing_compact_receives_discovered_context_window_in_context()
                     }
                 },
                 "inputs": {
-                    "append_messages": { "from": { "node": "turn", "port": "append_messages" } },
-                    "turn_usages": { "from": { "node": "chat", "port": "usages" } },
-                    "compact_usages": { "from": { "node": "compact", "port": "usages" } }
+                    "append_messages": {"$ref":"turn.append_messages"},
+                    "turn_usages": {"$ref":"chat.usages"},
+                    "compact_usages": {"$ref":"compact.usages"}
                 }
             },
             {
@@ -2013,10 +2013,10 @@ fn user_workflow_reusing_compact_receives_discovered_context_window_in_context()
                     }
                 },
                 "inputs": {
-                    "context_messages": { "from": { "node": "compact", "port": "messages" } },
-                    "display_messages": { "from": { "node": "turn", "port": "append_messages" } },
-                    "turn_usages": { "from": { "node": "chat", "port": "usages" } },
-                    "compact_usages": { "from": { "node": "compact", "port": "usages" } }
+                    "context_messages": {"$ref":"compact.messages"},
+                    "display_messages": {"$ref":"turn.append_messages"},
+                    "turn_usages": {"$ref":"chat.usages"},
+                    "compact_usages": {"$ref":"compact.usages"}
                 }
             }
         ],

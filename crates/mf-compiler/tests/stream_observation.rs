@@ -210,8 +210,7 @@ inventory::submit! { mf_runtime::NodeRegistration {
 fn partial_event_publication_keeps_only_admitted_data_and_failed_outcome() {
     let plan = plan(
         json!({"version":"2026-10-03", "execution":{}, "dependencies":{},
-        "nodes":[{"id":"start", "kind":"builtin.identity"}, {"id":"partial","kind":"test.partial_capture"}],
-        "edges":[{"from_node":"start","from_output":"value","to_node":"partial","to_input":"value"}],
+        "nodes":[{"id":"start", "kind":"builtin.identity"}, {"id":"partial","kind":"test.partial_capture", "inputs":{"value":{"$ref":"start.value"}}}],
         "outputs":[{"name":"value","node":"partial","port":"value"}]}),
     );
     let harness = Harness::new(true);
@@ -351,7 +350,7 @@ fn definition() -> Value {
         .as_array_mut()
         .unwrap()
         .retain(|node| node["id"] != "convert");
-    value["nodes"][0]["inputs"]["item"] = json!({"from":{"node":"feed","port":"item"}});
+    value["nodes"][0]["inputs"]["item"] = json!({"$ref":"feed.item"});
     *value["nodes"]
         .as_array_mut()
         .unwrap()
@@ -387,8 +386,7 @@ fn startup_loop_observation_needs_no_synthetic_message_or_source() {
         json!({"version":"2026-10-03", "execution":{}, "dependencies":{},
         "nodes":[{"id":"repeat", "kind":"loop.run", "config":{"max_iterations":2,
             "variables":[{"name":"x", "type":"int"}], "body":{"version":"2026-10-03", "dependencies":{},
-                "nodes":[{"id":"copy", "kind":"builtin.identity"}],
-                "edges":[{"from_node":"%loop", "from_output":"x", "to_node":"copy", "to_input":"input"}]
+                "nodes":[{"id":"copy", "kind":"builtin.identity", "inputs":{"input":{"$ref":"%loop.x"}}}]
             }}}], "outputs":[{"name":"value", "node":"repeat", "port":"x"}]}),
     );
     let harness = Harness::new(true);
@@ -601,7 +599,7 @@ fn task_failures_preserve_outcomes_and_raw_snapshots_need_no_telemetry() {
         .as_array_mut()
         .unwrap()
         .push(json!({"id":"before", "kind":"builtin.identity",
-            "inputs":{"input":{"from":{"node":"collect","port":"items"}}}}));
+            "inputs":{"input":{"$ref":"collect.items"}}}));
     value["outputs"][0]["port"] = json!("hit");
     value["edges"] = json!([{"from_node":"before", "from_output":"value", "to_node":"consume"}]);
     let plan = plan(value);
@@ -666,13 +664,13 @@ fn loop_paths_and_iteration_details_keep_the_containing_message_identity() {
     let value = json!({"version":"2026-10-03", "execution":{}, "dependencies":{},
         "nodes":[
             {"id":"repeat", "kind":"loop.run", "config":{"max_iterations":2, "variables":[{"name":"x", "type":"int"}], "body":{"version":"2026-10-03", "dependencies":{},
-                "nodes":[{"id":"copy", "kind":"builtin.identity"}], "edges":[{"from_node":"%loop", "from_output":"x", "to_node":"copy", "to_input":"input"}]}}},
-            {"id":"collect", "kind":"builtin.batch", "config":{"max_items":1, "max_wait_ms":100}},
-            {"id":"iterate", "kind":"builtin.iteration", "config":{"body":{"version":"2026-10-03", "dependencies":{}, "nodes":[{"id":"copy", "kind":"builtin.identity"}],
-                "edges":[{"from_node":"%iteration", "from_output":"item", "to_node":"copy", "to_input":"input"}], "outputs": [{"name":"result", "node":"copy", "port":"value"}]}}}
-        , controlled::source(json!("int"))], "edges":[{"from_node":"feed", "from_output":"item", "to_node":"repeat", "to_input":"x"},
-            {"from_node":"repeat", "from_output":"x", "to_node":"collect", "to_input":"item"},
-            {"from_node":"collect", "from_output":"items", "to_node":"iterate", "to_input":"items"}],
+                "nodes":[{"id":"copy", "kind":"builtin.identity", "inputs":{"input":{"$ref":"%loop.x"}}}]}},
+            "inputs":{"x":{"$ref":"feed.item"}}},
+            {"id":"collect", "kind":"builtin.batch", "config":{"max_items":1, "max_wait_ms":100}, "inputs":{"item":{"$ref":"repeat.x"}}},
+            {"id":"iterate", "kind":"builtin.iteration", "config":{"body":{"version":"2026-10-03", "dependencies":{}, "nodes":[{"id":"copy", "kind":"builtin.identity", "inputs":{"input":{"$ref":"%iteration.item"}}}],
+                 "outputs": [{"name":"result", "node":"copy", "port":"value"}]}},
+            "inputs":{"items":{"$ref":"collect.items"}}}
+        , controlled::source(json!("int"))],
         "outputs":[{"name":"value", "node":"iterate", "port":"results"}]
     });
     let plan = plan(value);

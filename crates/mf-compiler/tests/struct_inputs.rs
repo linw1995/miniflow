@@ -181,7 +181,6 @@ fn struct_inputs_define_startup_contracts_and_validate_before_business_dispatch(
 #[test]
 fn ordinary_compiler_validation_rejects_disjoint_derived_inputs() {
     let mut value = serde_json::to_value(definition(json!({}))).unwrap();
-    let mut edges = Vec::new();
     for (index, (port, input)) in [
         ("count", json!("wrong")),
         ("ratio", json!(1.5)),
@@ -196,11 +195,8 @@ fn ordinary_compiler_validation_rejects_disjoint_derived_inputs() {
             .as_array_mut()
             .unwrap()
             .push(json!({"id":id,"kind":"builtin.constant","config":{"value":input}}));
-        edges.push(
-            json!({"from_node":id,"from_output":"value","to_node":"typed./~","to_input":port}),
-        );
+        value["nodes"][0]["inputs"][port] = json!({"$ref":format!("{id}.value")});
     }
-    value["edges"] = json!(edges);
     let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
     let error =
         compile_definition(&definition, &NodeRegistry::from_inventory().unwrap()).unwrap_err();

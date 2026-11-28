@@ -11,10 +11,10 @@ fn profile(server: &Server) -> WorkflowProfile {
             }}},
             {"id":"model","kind":"builtin.llm","config":{
                 "model":"fixture-model","base_url":server.base_url,"api_key":{"$ref":"params.api_key"}
-            },"inputs":{"messages":{"from":{"node":"params","port":"messages"}}}},
+            },"inputs":{"messages":{"$ref":"params.messages"}}},
             {"id":"compact","kind":"builtin.code","config":{"language":"cel","inputs":{"messages":{"list":"object"}},
                 "code":{"value":"messages[messages.size() - 1].content == 'compact'"}
-            },"inputs":{"messages":{"from":{"node":"params","port":"messages"}}}},
+            },"inputs":{"messages":{"$ref":"params.messages"}}},
             {"id":"route","kind":"builtin.if_else","config":{"branches":[{"id":"compact","condition":{
                 "source":{"output":"compact.value","path":""},"operator":"eq","value":true
             }}]}},
@@ -22,17 +22,17 @@ fn profile(server: &Server) -> WorkflowProfile {
             {"id":"normal","kind":"builtin.object","config":{"fields":{
                 "status":"string","messages":{"list":"object"},"usages":{"list":"object"}
             }},"inputs":{
-                "status":{"from":{"node":"model","port":"status"}},
-                "messages":{"from":{"node":"model","port":"messages"}},
-                "usages":{"from":{"node":"model","port":"usages"}}
+                "status":{"$ref":"model.status"},
+                "messages":{"$ref":"model.messages"},
+                "usages":{"$ref":"model.usages"}
             }},
             {"id":"replacement","kind":"builtin.object","config":{"fields":{
                 "status":"string","context_messages":{"list":"object"},"display_messages":{"list":"object"},"usages":{"list":"object"}
             }},"inputs":{
-                "status":{"from":{"node":"model","port":"status"}},
-                "context_messages":{"from":{"node":"snapshot","port":"value"}},
-                "display_messages":{"from":{"node":"model","port":"messages"}},
-                "usages":{"from":{"node":"model","port":"usages"}}
+                "status":{"$ref":"model.status"},
+                "context_messages":{"$ref":"snapshot.value"},
+                "display_messages":{"$ref":"model.messages"},
+                "usages":{"$ref":"model.usages"}
             }}
         ],
         "edges":[

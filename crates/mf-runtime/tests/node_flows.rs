@@ -442,8 +442,7 @@ fn typed_builtin_configs_accept_the_same_direct_body_field() {
 fn parent_and_child_edge_formats_are_decoded_independently() {
     let old_body: WorkflowDefinition = serde_json::from_value(json!({
         "version": "2026-09-29", "dependencies": {},
-        "nodes": [{"id": "source", "kind": "user.source"}, {"id": "sink", "kind": "user.sink"}],
-        "edges": [{"from_node": "source", "from_output": "value", "to_node": "sink", "to_input": "value"}]
+        "nodes": [{"id": "source", "kind": "user.source"}, {"id": "sink", "kind": "user.sink", "inputs":{"value":{"$ref":"source.value"}}}]
     })).unwrap();
     let mut parent = definition("2026-10-28");
     for mut node in nodes() {
@@ -455,7 +454,10 @@ fn parent_and_child_edge_formats_are_decoded_independently() {
     for node in &decoded.nodes {
         let name = parameter(node);
         assert_eq!(node.flow_parameters(&[name]).unwrap()[name], old_body);
-        assert_eq!(node.config[name]["edges"][0]["to_input"], "value");
+        assert_eq!(
+            node.config[name]["nodes"][1]["inputs"]["value"],
+            json!({"$ref":"source.value"})
+        );
     }
     let modern_body: WorkflowDefinition = serde_json::from_value(json!({
         "version": "2026-10-28", "dependencies": {},
@@ -490,9 +492,9 @@ fn unsupported_parent_schemas_still_reject_resolved_calls() {
 fn current_schema_parsing_rejects_unintroduced_and_invalid_versions() {
     assert_eq!(
         WorkflowDefinitionVersion::CURRENT,
-        WorkflowDefinitionVersion::V2026_11_13
+        WorkflowDefinitionVersion::V2026_11_28
     );
-    let current = definition("2026-11-13");
+    let current = definition("2026-11-28");
     assert_eq!(
         WorkflowDefinition::from_json(&serde_json::to_string(&current).unwrap()).unwrap(),
         current

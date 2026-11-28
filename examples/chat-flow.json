@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-13",
+  "version": "2026-11-28",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -60,10 +60,7 @@
       },
       "inputs": {
         "messages": {
-          "from": {
-            "node": "params",
-            "port": "messages"
-          }
+          "$ref": "params.messages"
         }
       }
     },
@@ -84,16 +81,10 @@
       },
       "inputs": {
         "status": {
-          "from": {
-            "node": "chat",
-            "port": "status"
-          }
+          "$ref": "chat.status"
         },
         "usages": {
-          "from": {
-            "node": "chat",
-            "port": "usages"
-          }
+          "$ref": "chat.usages"
         }
       }
     },
@@ -114,28 +105,16 @@
       },
       "inputs": {
         "status": {
-          "from": {
-            "node": "chat",
-            "port": "status"
-          }
+          "$ref": "chat.status"
         },
         "messages": {
-          "from": {
-            "node": "chat",
-            "port": "messages"
-          }
+          "$ref": "chat.messages"
         },
         "usages": {
-          "from": {
-            "node": "chat",
-            "port": "usages"
-          }
+          "$ref": "chat.usages"
         },
         "error": {
-          "from": {
-            "node": "error",
-            "port": "value"
-          }
+          "$ref": "error.value"
         }
       }
     }

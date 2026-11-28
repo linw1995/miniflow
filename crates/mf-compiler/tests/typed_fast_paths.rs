@@ -12,8 +12,7 @@ fn text_definition() -> WorkflowDefinition {
     serde_json::from_value(json!({
         "version":"2026-10-03",
         "dependencies":{"arbitrary.alias":{"package":"fixture-multi-nodes", "path": common::crates_dir().join("mf-compiler/tests/fixtures/multi-nodes")}},
-        "nodes":[{"id":"a", "kind":"fixture.typed_text"}, {"id":"b", "kind":"fixture.typed_text"}, {"id":"c", "kind":"fixture.typed_text"}],
-        "edges":[{"from_node":"a", "from_output":"text", "to_node":"b", "to_input":"text"}, {"from_node":"b", "from_output":"text", "to_node":"c", "to_input":"text"}],
+        "nodes":[{"id":"a", "kind":"fixture.typed_text"}, {"id":"b", "kind":"fixture.typed_text", "inputs":{"text":{"$ref":"a.text"}}}, {"id":"c", "kind":"fixture.typed_text", "inputs":{"text":{"$ref":"b.text"}}}],
         "outputs":[{"name":"result", "node":"c", "port":"text"}]
     })).unwrap()
 }
@@ -22,8 +21,7 @@ fn identity_definition() -> WorkflowDefinition {
     serde_json::from_value(json!({
         "version":"2026-10-03",
         "dependencies":{"arbitrary.core":{"package":"mfn-core", "path": common::crates_dir().join("builtin-nodes/core")}},
-        "nodes":[{"id":"a", "kind":"builtin.identity"}, {"id":"b", "kind":"builtin.identity"}, {"id":"c", "kind":"builtin.identity"}],
-        "edges":[{"from_node":"a", "from_output":"value", "to_node":"b", "to_input":"input"}, {"from_node":"b", "from_output":"value", "to_node":"c", "to_input":"input"}],
+        "nodes":[{"id":"a", "kind":"builtin.identity"}, {"id":"b", "kind":"builtin.identity", "inputs":{"input":{"$ref":"a.value"}}}, {"id":"c", "kind":"builtin.identity", "inputs":{"input":{"$ref":"b.value"}}}],
         "outputs":[{"name":"result", "node":"c", "port":"value"}]
     })).unwrap()
 }
@@ -305,14 +303,12 @@ fn definition_for_extended() -> WorkflowDefinition {
     let mut value = serde_json::to_value(text_definition()).unwrap();
     for node in value["nodes"].as_array_mut().unwrap() {
         node["kind"] = json!("fixture.typed_extended");
+        node.as_object_mut().unwrap().remove("inputs");
     }
-    value["edges"] = json!([]);
     value["outputs"] = json!([]);
     for field in ["count", "size", "ratio", "payload"] {
-        for (source, target) in [("a", "b"), ("b", "c")] {
-            value["edges"].as_array_mut().unwrap().push(json!({
-                "from_node":source,"from_output":field,"to_node":target,"to_input":field
-            }));
+        for (source, target) in [("a", 1), ("b", 2)] {
+            value["nodes"][target]["inputs"][field] = json!({"$ref":format!("{source}.{field}")});
         }
         value["outputs"]
             .as_array_mut()

@@ -46,7 +46,7 @@ fn exclusive_success_graph(value: i64, path: &Path) -> WorkflowDefinition {
             json!({"id":"left","kind":"builtin.constant","config":{"value":11}}),
             json!({"id":"right","kind":"builtin.constant","config":{"value":22}}),
             json!({"id":"select","kind":"builtin.identity","inputs":{"input":{"exclusive":[
-                {"node":"left","port":"value"},{"node":"right","port":"value"}
+                {"$ref":"left.value"},{"$ref":"right.value"}
             ]}}}),
             task("after_select", path),
             task("chained", path),
@@ -328,7 +328,7 @@ fn router_success_does_not_prove_branches_but_gated_task_success_does() {
         task("right_gate", &path),
         json!({"id":"left","kind":"builtin.constant","config":{"value":1}}),
         json!({"id":"right","kind":"builtin.constant","config":{"value":2}}),
-        json!({"id":"join","kind":"builtin.identity","inputs":{"input":{"exclusive":[{"node":"left","port":"value"},{"node":"right","port":"value"}]}}}),
+        json!({"id":"join","kind":"builtin.identity","inputs":{"input":{"exclusive":[{"$ref":"left.value"},{"$ref":"right.value"}]}}}),
     ];
     let gates = json!([
         {"from_node":"value","to_node":"route"},
@@ -509,7 +509,7 @@ fn success_edges_cannot_join_startup_and_message_domains() {
     let path = root.path().join("trace");
     let mut target = task("target", &path);
     target["config"]["inputs"] = json!(["item"]);
-    target["inputs"] = json!({"item":{"from":{"node":"feed","port":"item"}}});
+    target["inputs"] = json!({"item":{"$ref":"feed.item"}});
     let mut graph = definition(
         vec![
             controlled::source(json!("int")),
@@ -708,8 +708,8 @@ fn standalone_success_dependencies_match_memory_and_preserve_manifests() {
     let mut typed = definition(
         vec![
             value,
-            json!({"id":"source","kind":"builtin.identity","inputs":{"input":{"from":{"node":"value","port":"value"}}}}),
-            json!({"id":"target","kind":"builtin.identity","inputs":{"input":{"from":{"node":"source","port":"value"}}}}),
+            json!({"id":"source","kind":"builtin.identity","inputs":{"input":{"$ref":"value.value"}}}),
+            json!({"id":"target","kind":"builtin.identity","inputs":{"input":{"$ref":"source.value"}}}),
             task("after_typed", &path),
             task("peer", &path),
         ],

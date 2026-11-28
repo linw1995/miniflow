@@ -173,7 +173,7 @@ fn caller() -> Value {
             {"id":"custom", "kind":KIND, "config":{
                 "label":"provider-specific config survives expansion",
                 "left":{"definition":child("one")}, "right":{"definition":child("two")}
-            }, "inputs":{"select":{"from":{"node":"params", "port":"select"}}}}
+            }, "inputs":{"select":{"$ref":"params.select"}}}
         ],
         "outputs":[{"name":"content", "node":"custom", "port":"content"}]
     })
@@ -521,7 +521,7 @@ fn selected_body_validation_failure_propagates_through_the_external_call_binding
                 "condition":{"source":{"output":"leaf.value", "path":""}, "operator":"eq", "value":"approved"}
             }},
             {"id":"publish", "kind":"builtin.identity", "inputs":{
-                "input":{"from":{"node":"leaf", "port":"value"}}
+                "input":{"$ref":"leaf.value"}
             }}
         ],
         "edges":[{"from_node":"leaf", "to_node":"validate"}, {"from_node":"validate", "to_node":"publish"}],
@@ -598,16 +598,16 @@ fn iteration_checks_all_self_contained_flow_fields_for_transitive_containers() {
     let mut nested = caller();
     nested["nodes"][0] =
         json!({"id":"params", "kind":"builtin.constant", "config":{"value":"left"}});
-    nested["nodes"][1]["inputs"]["select"]["from"]["port"] = json!("value");
+    nested["nodes"][1]["inputs"]["select"]["$ref"] = json!("params.value");
     let mut value = caller();
     value["nodes"] = json!([
         {"id":"items", "kind":"builtin.constant", "config":{"value":["left", "left"]}},
         {"id":"each", "kind":"builtin.iteration", "config":{"body":{"version":"2026-10-28", "dependencies":{},
             "nodes":[{"id":"custom", "kind":KIND, "config":{
                 "label":"iteration caller", "left":{"definition":nested}
-            }, "inputs":{"select":{"from":{"node":"%iteration", "port":"item"}}}}],
+            }, "inputs":{"select":{"$ref":"%iteration.item"}}}],
             "outputs": [{"name":"result", "node":"custom", "port":"content"}]
-        }}, "inputs":{"items":{"from":{"node":"items", "port":"value"}}}}
+        }}, "inputs":{"items":{"$ref":"items.value"}}}
     ]);
     value["outputs"] = json!([{"name":"results", "node":"each", "port":"results"}]);
     let plan = compile_definition(&definition(value.clone()), &registry).unwrap();

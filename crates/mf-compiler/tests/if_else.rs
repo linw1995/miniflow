@@ -24,7 +24,7 @@ fn graph(amount: Value) -> Value {
         {"id":"medium","kind":"fixture.context","config":{"ports":["value"],"read":"load_order.value"}},
         {"id":"fallback","kind":"fixture.context","config":{"ports":["value"],"read":"load_order.value"}}
     ],
-    "control_edges":[
+    "edges":[
         {"from_node":"load_order","from_output":"value","to_node":"audit"},
         {"from_node":"audit","from_output":"done","to_node":"route"},
         {"from_node":"route","from_output":"large","to_node":"large"},
@@ -74,9 +74,8 @@ fn nested_instances_skip_unselected_failure_nodes() {
         {"id":"never","condition":{"source":{"output":"load_order.value","path":"/amount"},"operator":"lt","value":0}}
     ]}});
     value["nodes"].as_array_mut().unwrap().push(nested);
-    value["control_edges"][2] =
-        json!({"from_node":"route","from_output":"large","to_node":"nested"});
-    value["control_edges"]
+    value["edges"][2] = json!({"from_node":"route","from_output":"large","to_node":"nested"});
+    value["edges"]
         .as_array_mut()
         .unwrap()
         .push(json!({"from_node":"nested","from_output":"never","to_node":"large"}));
@@ -113,7 +112,7 @@ fn compiled_branches_match_memory_and_rebuild_when_precedence_changes() {
         value["nodes"].as_array_mut().unwrap().push(json!({
             "id":"inactive", "kind":"fixture.context", "config":{"ports":[], "fail":true}
         }));
-        value["control_edges"].as_array_mut().unwrap().push(json!({
+        value["edges"].as_array_mut().unwrap().push(json!({
             "from_node":"audit", "from_output":"unused", "to_node":"inactive"
         }));
         if reverse {
@@ -122,15 +121,11 @@ fn compiled_branches_match_memory_and_rebuild_when_precedence_changes() {
                 .unwrap()
                 .reverse();
         }
-        value["nodes"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({"id":"joined", "kind":"builtin.identity"}));
-        value["edges"] = json!([
-            {"from_node":"large", "from_output":"value", "to_node":"joined", "to_input":"input", "exclusive":true},
-            {"from_node":"medium", "from_output":"value", "to_node":"joined", "to_input":"input", "exclusive":true},
-            {"from_node":"fallback", "from_output":"value", "to_node":"joined", "to_input":"input", "exclusive":true}
-        ]);
+        value["nodes"].as_array_mut().unwrap().push(
+            json!({"id":"joined", "kind":"builtin.identity", "inputs":{"input":{"exclusive":[
+                {"$ref":"large.value"}, {"$ref":"medium.value"}, {"$ref":"fallback.value"}
+            ]}}}),
+        );
         value["outputs"]
             .as_array_mut()
             .unwrap()
@@ -252,9 +247,8 @@ fn selected_branch_fanout_runs_all_consumers_and_keeps_aliases() {
     value["nodes"]
         .as_array_mut()
         .unwrap()
-        .push(json!({"id":"copy","kind":"builtin.identity"}));
-    value["edges"] = json!([{"from_node":"load_order","from_output":"value","to_node":"copy","to_input":"input"}]);
-    value["control_edges"]
+        .push(json!({"id":"copy","kind":"builtin.identity", "inputs":{"input":{"$ref":"load_order.value"}}}));
+    value["edges"]
         .as_array_mut()
         .unwrap()
         .push(json!({"from_node":"route","from_output":"large","to_node":"copy"}));

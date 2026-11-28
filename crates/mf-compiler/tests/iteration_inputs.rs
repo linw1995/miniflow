@@ -24,10 +24,10 @@ fn definition(mode: &str, result: &str) -> Value {
                     "outputs":[{"name":"result", "node":"%iteration", "port":result}]
                 }
             }, "inputs":{
-                "items":{"from":{"node":"params", "port":"items"}},
-                "flow_0":{"from":{"node":"params", "port":"flow"}},
-                "label":{"from":{"node":"params", "port":"label"}},
-                "settings":{"from":{"node":"params", "port":"settings"}}
+                "items":{"$ref":"params.items"},
+                "flow_0":{"$ref":"params.flow"},
+                "label":{"$ref":"params.label"},
+                "settings":{"$ref":"params.settings"}
             }}
         ],
         "outputs":[
@@ -118,7 +118,7 @@ fn compiled_iteration_can_invoke_a_shared_flow_from_each_item_scope() {
             "version":"2026-10-28", "dependencies":{},
             "nodes":[{"id":"invoke", "kind":"workflow.call", "config":{
                 "inputs":[], "outputs":[{"name":"answer", "value_type":"string", "required":true}]
-            }, "inputs":{"flow":{"from":{"node":"%iteration", "port":"flow_0"}}}}],
+            }, "inputs":{"flow":{"$ref":"%iteration.flow_0"}}}],
             "outputs":[{"name":"result", "node":"invoke", "port":"answer"}]
         });
         let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
@@ -171,7 +171,7 @@ fn iteration_shared_inputs_reject_writeback() {
     let mut owner = definition("sequential", "label")["nodes"][1].clone();
     owner["config"]["body"]["nodes"] = json!([
         {"id":"write", "kind":"workflow.assign", "config":{"variable":"label"},
-         "inputs":{"value":{"from":{"node":"%iteration", "port":"label"}}}}
+         "inputs":{"value":{"$ref":"%iteration.label"}}}
     ]);
     let mut value = definition("sequential", "label");
     value["nodes"][1] = owner;

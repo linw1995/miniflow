@@ -4,11 +4,11 @@ use serde_json::{Value, json};
 
 fn reference_workflow() -> Value {
     json!({
-        "version":"2026-10-19", "dependencies":{},
+        "version":mf_compiler::WorkflowDefinitionVersion::CURRENT, "dependencies":{},
         "nodes":[
             {"id":"source.with.dots", "kind":"builtin.constant", "config":{"value":42}},
             {"id":"consumer", "kind":"builtin.identity", "inputs":{
-                "input":{"from":{"node":"source.with.dots", "port":"value"}}
+                "input":{"$ref":"source.with.dots.value"}
             }}
         ],
         "outputs":[{"name":"result", "node":"consumer", "port":"value"}]
@@ -17,7 +17,9 @@ fn reference_workflow() -> Value {
 
 #[test]
 fn references_normalize_before_every_compiler_entry() {
-    let definition: WorkflowDefinition = serde_json::from_value(reference_workflow()).unwrap();
+    let value = reference_workflow();
+    let source = value["nodes"][1]["inputs"]["input"].clone();
+    let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
     let original = definition.clone();
     assert_eq!(definition.edges.len(), 1);
     let registry = NodeRegistry::from_inventory().unwrap();
@@ -33,32 +35,13 @@ fn references_normalize_before_every_compiler_entry() {
     assert_eq!(definition, original);
     let encoded = serde_json::to_value(&prepared.graph.definition).unwrap();
     assert!(encoded.get("control_edges").is_none());
-    assert!(encoded["nodes"][1].get("inputs").is_some());
+    assert_eq!(encoded["nodes"][1]["inputs"]["input"], source);
 }
 
 #[test]
-fn legacy_and_reference_bindings_have_equivalent_graphs() {
-    let modern: WorkflowDefinition = serde_json::from_value(reference_workflow()).unwrap();
-    let mut legacy = modern.clone();
-    legacy.version = mf_compiler::WorkflowDefinitionVersion::V2026_10_03;
-    let encoded = serde_json::to_value(&legacy).unwrap();
-    assert!(encoded["nodes"][1].get("inputs").is_none());
-    assert_eq!(encoded["edges"][0]["to_input"], "input");
-    let decoded: WorkflowDefinition = serde_json::from_value(encoded).unwrap();
-    assert_eq!(decoded, legacy);
-    assert_eq!(
-        plan_definition(&legacy).unwrap().graph.execution_order,
-        plan_definition(&modern).unwrap().graph.execution_order
-    );
-}
-
-#[test]
-fn versions_and_edge_shapes_cannot_be_mixed() {
+fn legacy_and_internal_graph_fields_are_rejected() {
     let base = reference_workflow();
     let mut invalid = Vec::new();
-    let mut legacy = base.clone();
-    legacy["version"] = json!("2026-10-03");
-    invalid.push(legacy);
     let mut controls = base.clone();
     controls["control_edges"] = json!([]);
     invalid.push(controls);
@@ -85,7 +68,7 @@ fn versions_and_edge_shapes_cannot_be_mixed() {
 
 #[test]
 fn duplicate_input_keys_and_malformed_groups_fail() {
-    let input = r#"{"version":"2026-10-19","dependencies":{},"nodes":[{"id":"n","kind":"k","inputs":{"x":{"from":{"node":"a","port":"p"}},"x":{"from":{"node":"b","port":"p"}}}}]}"#;
+    let input = r#"{"version":"2026-10-19","dependencies":{},"nodes":[{"id":"n","kind":"k","inputs":{"x":{"$ref":"a.p"},"x":{"$ref":"b.p"}}}]}"#;
     assert!(
         serde_json::from_str::<WorkflowDefinition>(input)
             .unwrap_err()
@@ -95,7 +78,7 @@ fn duplicate_input_keys_and_malformed_groups_fail() {
     for binding in [
         json!(null),
         json!({"exclusive":[]}),
-        json!({"exclusive":[{"node":"a","port":"p"},{"node":"a","port":"p"}]}),
+        json!({"exclusive":[{"$ref":"source.with.dots.value"},{"$ref":"source.with.dots.value"}]}),
         json!({"from":{"node":"a","port":"p"},"exclusive":[]}),
         json!({"from":{"node":"a","port":"p","path":"/x"}}),
         json!({"from":{"node":"a","port":""}}),
@@ -132,7 +115,7 @@ fn nested_iteration_uses_its_own_version_and_preserves_bindings() {
     let mut value = reference_workflow();
     value["nodes"] = json!([{"id":"each","kind":"builtin.iteration","config":{
         "body":{"version":"2026-10-19", "dependencies":{}, "nodes":[{"id":"echo","kind":"builtin.identity","inputs":{
-            "input":{"from":{"node":"%iteration","port":"item"}}
+            "input":{"$ref":"%iteration.item"}
         }}],"outputs": [{"name":"result", "node":"echo","port":"value"}]}
     }}]);
     value["outputs"] = json!([]);
@@ -150,44 +133,52 @@ fn nested_iteration_uses_its_own_version_and_preserves_bindings() {
 }
 
 #[test]
-fn migrated_conditional_example_preserves_legacy_branches_and_interfaces() {
+fn exclusive_example_describes_both_routes_and_executes_only_the_selected_value() {
     let mut modern: WorkflowDefinition =
         serde_json::from_str(include_str!("../../../examples/exclusive-inputs.json")).unwrap();
-    let mut legacy: WorkflowDefinition =
-        serde_json::from_str(include_str!("fixtures/exclusive-inputs-legacy.json")).unwrap();
+    let encoded = serde_json::to_value(&modern).unwrap();
+    let consumer = encoded["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == "consume")
+        .unwrap();
+    assert_eq!(
+        consumer["inputs"]["input"],
+        json!({"exclusive":[{"$ref":"ci.value"}, {"$ref":"local.value"}]})
+    );
+    assert_eq!(
+        serde_json::from_value::<WorkflowDefinition>(encoded).unwrap(),
+        modern
+    );
     modern.dependencies.clear();
-    legacy.dependencies.clear();
     let registry = NodeRegistry::from_inventory().unwrap();
     let modern = compile_definition(&modern, &registry).unwrap();
-    let legacy = compile_definition(&legacy, &registry).unwrap();
-    assert_eq!(modern.graph.execution_order, legacy.graph.execution_order);
-    assert_eq!(modern.graph.definition.nodes, legacy.graph.definition.nodes);
-    assert_eq!(modern.graph.definition.edges, legacy.graph.definition.edges);
-    assert_eq!(
-        modern.graph.definition.control_edges,
-        legacy.graph.definition.control_edges
-    );
-    assert_eq!(
-        mf_compiler::describe_workflow_inputs(&modern, &registry).unwrap(),
-        mf_compiler::describe_workflow_inputs(&legacy, &registry).unwrap()
-    );
+    let description = mf_compiler::describe_compiled(&modern).unwrap();
+    assert_eq!(description.data_edges.len(), 2);
+    for (edge, source) in description.data_edges.iter().zip(["ci", "local"]) {
+        assert!(edge.exclusive);
+        assert_eq!(
+            (
+                edge.from_node.as_str(),
+                edge.from_output.as_str(),
+                edge.to_node.as_str(),
+                edge.to_input.as_str()
+            ),
+            (source, "value", "consume", "input")
+        );
+    }
     for ci in [false, true] {
         let arguments = mf_runtime::WorkflowArguments::try_from(json!({"params.ci":ci})).unwrap();
         let current =
-            mf_compiler::execute_compiled_with_inputs(&modern, &registry, arguments.clone(), None)
-                .unwrap();
-        let previous =
-            mf_compiler::execute_compiled_with_inputs(&legacy, &registry, arguments, None).unwrap();
-        assert_eq!(json!(current), json!(previous));
+            mf_compiler::execute_compiled_with_inputs(&modern, &registry, arguments, None).unwrap();
         assert_eq!(
             json!(current),
             json!({"result":{"mode":if ci { "ci" } else { "local" }}})
         );
     }
-    let mut incomplete: Value =
-        serde_json::from_str(include_str!("fixtures/exclusive-inputs-legacy.json")).unwrap();
-    incomplete["version"] = json!("2026-10-19");
-    assert!(serde_json::from_value::<WorkflowDefinition>(incomplete).is_err());
+    let legacy = include_str!("fixtures/exclusive-inputs-legacy.json");
+    assert!(WorkflowDefinition::from_json(legacy).is_err());
 }
 
 #[test]
@@ -210,8 +201,8 @@ fn unknown_versions_and_binding_diagnostics_identify_the_declaration() {
 #[test]
 fn redundant_success_prerequisites_do_not_consume_typed_payloads() {
     let definition:WorkflowDefinition=serde_json::from_value(json!({
-        "version":"2026-10-19","dependencies":{"core":{"package":"mfn-core","path":std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../builtin-nodes/core")}},
-        "nodes":[{"id":"source","kind":"builtin.identity"},{"id":"target","kind":"builtin.identity","inputs":{"input":{"from":{"node":"source","port":"value"}}}}],
+        "version":"2026-11-28","dependencies":{"core":{"package":"mfn-core","path":std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../builtin-nodes/core")}},
+        "nodes":[{"id":"source","kind":"builtin.identity"},{"id":"target","kind":"builtin.identity","inputs":{"input":{"$ref":"source.value"}}}],
         "edges":[{"from_node":"source","to_node":"target"}],"outputs":[{"name":"result","node":"target","port":"value"}]
     })).unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();

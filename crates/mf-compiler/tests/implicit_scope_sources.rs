@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 fn definition(source: &str) -> Value {
     let assignment = json!({
         "id":"assign", "kind":"workflow.assign", "config":{"variable":"count"},
-        "inputs":{"value":{"from":{"node":source, "port":"count"}}}
+        "inputs":{"value":{"$ref":format!("{source}.count")}}
     });
     match source {
         ROOT_SOURCE_ID => json!({
@@ -36,7 +36,7 @@ fn definition(source: &str) -> Value {
                         "nodes":[],
                         "outputs":[{"name":"result", "node":source, "port":"item"}]
                     }
-                }, "inputs":{"items":{"from":{"node":"items", "port":"value"}}}},
+                }, "inputs":{"items":{"$ref":"items.value"}}},
                 {"id":"items", "kind":"builtin.constant", "config":{"value":[2,4]}}
             ],
             "outputs":[{"name":"value", "node":"scope", "port":"results"}]

@@ -15,7 +15,7 @@ fn graph() -> Value {
             {"id":"c","kind":"fixture.context","config":{"ports":["value"],"fail":true}},
             {"id":"d","kind":"fixture.context","config":{"ports":["value"],"fail":true}}
         ],
-        "control_edges":[
+        "edges":[
             {"from_node":"a","from_output":"value","to_node":"b"},
             {"from_node":"a","from_output":"off","to_node":"c"},
             {"from_node":"c","from_output":"value","to_node":"d"}
@@ -45,17 +45,13 @@ fn controls_check_availability_and_runs_have_fresh_contexts() {
 fn skips_fanout_and_checks_missing_data_before_skipping() {
     let mut definition = graph();
     definition["nodes"][1]["config"]["inputs"] = json!(["extra"]);
-    definition["edges"] =
-        json!([{"from_node":"a","from_output":"off","to_node":"b","to_input":"extra"}]);
+    definition["nodes"][1]["inputs"]["extra"] = json!({"$ref":"a.off"});
     definition["outputs"] = json!([]);
     flow(definition.clone()).execute().unwrap();
     definition["nodes"][0]["config"]["outputs"] = json!({});
     let error = flow(definition.clone()).execute().unwrap_err().to_string();
     assert!(error.contains("a.value") && error.contains("b"));
-    definition["control_edges"]
-        .as_array_mut()
-        .unwrap()
-        .reverse();
+    definition["edges"].as_array_mut().unwrap().reverse();
     assert_eq!(flow(definition).execute().unwrap_err().to_string(), error);
 }
 #[test]

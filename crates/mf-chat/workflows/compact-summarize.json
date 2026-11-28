@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-13",
+  "version": "2026-11-28",
   "dependencies": {
     "core": {
       "package": "mfn-core"
@@ -89,10 +89,7 @@
       },
       "inputs": {
         "messages": {
-          "from": {
-            "node": "params",
-            "port": "messages"
-          }
+          "$ref": "params.messages"
         }
       }
     },
@@ -118,34 +115,19 @@
       },
       "inputs": {
         "status": {
-          "from": {
-            "node": "model",
-            "port": "status"
-          }
+          "$ref": "model.status"
         },
         "outcome": {
-          "from": {
-            "node": "model",
-            "port": "outcome"
-          }
+          "$ref": "model.outcome"
         },
         "text": {
-          "from": {
-            "node": "model",
-            "port": "text"
-          }
+          "$ref": "model.text"
         },
         "usages": {
-          "from": {
-            "node": "model",
-            "port": "usages"
-          }
+          "$ref": "model.usages"
         },
         "error_prefix": {
-          "from": {
-            "node": "params",
-            "port": "error_prefix"
-          }
+          "$ref": "params.error_prefix"
         }
       }
     },
@@ -176,12 +158,10 @@
         "input": {
           "exclusive": [
             {
-              "node": "check",
-              "port": "ok"
+              "$ref": "check.ok"
             },
             {
-              "node": "skipped",
-              "port": "ok"
+              "$ref": "skipped.ok"
             }
           ]
         }
@@ -194,12 +174,10 @@
         "input": {
           "exclusive": [
             {
-              "node": "check",
-              "port": "text"
+              "$ref": "check.text"
             },
             {
-              "node": "skipped",
-              "port": "text"
+              "$ref": "skipped.text"
             }
           ]
         }
@@ -212,12 +190,10 @@
         "input": {
           "exclusive": [
             {
-              "node": "model",
-              "port": "usages"
+              "$ref": "model.usages"
             },
             {
-              "node": "skipped_usages",
-              "port": "value"
+              "$ref": "skipped_usages.value"
             }
           ]
         }
@@ -230,12 +206,10 @@
         "input": {
           "exclusive": [
             {
-              "node": "check",
-              "port": "error"
+              "$ref": "check.error"
             },
             {
-              "node": "skipped",
-              "port": "error"
+              "$ref": "skipped.error"
             }
           ]
         }
