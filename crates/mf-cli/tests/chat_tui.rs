@@ -943,6 +943,11 @@ impl ChatTerminal {
     }
 
     fn wait_for(&mut self, labels: &[&str]) -> String {
+        self.wait_for_without(labels, &[])
+    }
+
+    // One PTY read can contain the new queue rows but not yet the cleared editor below them.
+    fn wait_for_without(&mut self, labels: &[&str], absent: &[&str]) -> String {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             let mut bytes = [0; 16384];
@@ -950,12 +955,14 @@ impl ChatTerminal {
                 self.screen.feed(&bytes[..n]);
             }
             let text = self.screen.text();
-            if labels.iter().all(|label| text.contains(label)) {
+            if labels.iter().all(|label| text.contains(label))
+                && absent.iter().all(|label| !text.contains(label))
+            {
                 return text;
             }
             assert!(
                 Instant::now() < deadline && self.child.try_wait().unwrap().is_none(),
-                "waiting for {labels:?}: {text}"
+                "waiting for {labels:?} without {absent:?}: {text}"
             );
             thread::sleep(Duration::from_millis(10));
         }

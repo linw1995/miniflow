@@ -257,7 +257,7 @@ fn one_execution_lane_rejects_queued_submissions_and_cancels_without_switching()
     );
 }
 
-pub(super) const HOSTED_RUNNER: &str = r#"#!/usr/bin/env python3
+pub const HOSTED_RUNNER: &str = r#"#!/usr/bin/env python3
 import json, os, socket, sys, time
 from pathlib import Path
 assert sys.stdin.read() == '' and not sys.argv[1:]

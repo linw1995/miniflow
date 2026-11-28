@@ -245,10 +245,14 @@ No tool is interrupted or replayed. A closed inbox rejects late steering without
 or turning it into a follow-up. Withdrawing from either queue leaves the other queue, the active
 turn and newer edits alone. An already claimed input cannot be withdrawn.
 
-Above the editor, the scrollable transcript shows each waiting message verbatim under
-`Queued (next turn)` or `Steering requested`. Withdrawal or claim removes it from that list;
-claiming a message is not a saved user message. The final labels come from what happened, not
-which key was pressed:
+A dim queue strip stays above the editor even when you scroll the transcript or open the Flow
+execution panel. Each `Steering:` or `Follow-up:` row previews the first line of a waiting message;
+long lines end in `...`. The hint shows how to return the full text to the editor. On a short
+terminal the strip leaves room for the conversation and reports how many more entries are waiting.
+Claiming or withdrawing an entry removes its preview; an empty queue takes no space.
+
+These previews show the requested destination, not a saved user message. Final labels come from
+what happened, not which key was pressed:
 
 - `You [steering]`: the Flow placed the input after tool results, before the answer.
 - `You [queued]`: the Flow placed it after an assistant answer as a follow-up in the **same** turn,

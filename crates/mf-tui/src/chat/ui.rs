@@ -22,6 +22,8 @@ use std::{
     io::{IsTerminal, Write},
     time::Instant,
 };
+use unicode_segmentation::UnicodeSegmentation;
+
 const MAX_EDITOR_BYTES: usize = 256 * 1024;
 const LOADING_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -752,21 +754,96 @@ struct PendingInputs {
 }
 
 impl PendingInputs {
-    fn render(&self, transcript: &mut super::transcript::Transcript) {
-        for (label, entries) in [
-            ("Steering requested", &self.steering),
-            ("Queued (next turn)", &self.next),
+    fn height(&self, available: u16) -> u16 {
+        let count = self.steering.len() + self.next.len();
+        if count == 0 {
+            return 0;
+        }
+        // A full queue must not take the entire transcript viewport away from a running turn.
+        (count + 2).min(usize::from(available / 2)) as u16
+    }
+
+    fn render(&self, frame: &mut ratatui::Frame, area: Rect) {
+        if area.height == 0 || area.width <= 2 {
+            return;
+        }
+        let area = Rect::new(area.x + 1, area.y, area.width - 2, area.height);
+        let height = usize::from(area.height);
+        let count = self.steering.len() + self.next.len();
+        let spacer = height >= count + 2;
+        let hint = height > 1;
+        let slots = height - usize::from(spacer) - usize::from(hint);
+        // Keep both destinations visible when a tall FIFO has to be clipped.
+        let steering = self
+            .steering
+            .len()
+            .min(slots - usize::from(slots > 1 && !self.next.is_empty()));
+        let mut rows = Vec::with_capacity(height);
+        if spacer {
+            rows.push(Line::default());
+        }
+        for (prefix, entries, limit) in [
+            ("Steering: ", &self.steering, steering),
+            ("Follow-up: ", &self.next, slots - steering),
         ] {
-            for (id, text) in entries {
-                let key = format!("pending:{id:?}");
-                transcript.plain(
-                    format!("{key}:label"),
-                    vec![role_label(label, Color::Yellow, None)],
-                );
-                transcript.deferred(key, &Text::from(text.clone()), Format::Literal);
-            }
+            rows.extend(
+                entries
+                    .iter()
+                    .take(limit)
+                    .map(|(_, text)| Line::from(pending_line(prefix, text, area.width))),
+            );
+        }
+        if hint {
+            let keys = if self.next.is_empty() {
+                "Alt+Down to edit last steering"
+            } else if self.steering.is_empty() {
+                "Alt+Up to edit last follow-up"
+            } else {
+                "Alt+Down/Alt+Up to edit last steering/follow-up"
+            };
+            let prefix = if count > slots {
+                format!("↳ +{} more · ", count - slots)
+            } else {
+                "↳ ".into()
+            };
+            rows.push(Line::from(pending_line(&prefix, keys, area.width)));
+        }
+        frame.render_widget(
+            Paragraph::new(rows).style(Style::default().add_modifier(Modifier::DIM)),
+            area,
+        );
+    }
+}
+
+// Clip the first line in terminal cells without copying the rest of a potentially large prompt.
+fn pending_line(prefix: &str, text: &str, width: u16) -> String {
+    let width = usize::from(width);
+    let mut line = String::new();
+    let mut cells = 0;
+    let mut before_ellipsis = 0;
+    for grapheme in prefix.graphemes(true).chain(text.graphemes(true)) {
+        if grapheme.contains('\n') {
+            break;
+        }
+        let escaped;
+        let literal = if grapheme.chars().any(char::is_control) {
+            escaped = crate::markdown::safe(grapheme);
+            &escaped
+        } else {
+            grapheme
+        };
+        cells += Span::raw(literal).width();
+        if cells > width {
+            line.truncate(before_ellipsis);
+            line.push_str(&"..."[..width.min(3)]);
+            break;
+        }
+        line.push_str(literal);
+        if cells <= width.saturating_sub(3) {
+            before_ellipsis = line.len();
         }
     }
+    line
 }
 
 struct ActivePrompt {
@@ -2021,9 +2098,11 @@ impl ChatView {
         let input_height = (input_lines as u16)
             .saturating_add(2)
             .clamp(3, (area.height / 3).max(3));
-        let [header, body, input_area, footer] = Layout::vertical([
+        let queue_height = pending.height(area.height.saturating_sub(input_height + 3));
+        let [header, body, queue, input_area, footer] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(0),
+            Constraint::Length(queue_height),
             Constraint::Length(input_height),
             Constraint::Length(2),
         ])
@@ -2285,7 +2364,6 @@ impl ChatView {
             }
             transcript.plain(format!("turn:{turn}:status"), status);
         }
-        pending.render(&mut transcript);
         if transcript.is_empty() {
             transcript.plain(
                 "welcome".into(),
@@ -2302,12 +2380,13 @@ impl ChatView {
             !matches!(self.mode, Mode::Commands | Mode::Sessions | Mode::Models),
         ));
         drop(transcript);
+        pending.render(frame, queue);
         let hint = match self.mode {
             Mode::Input if self.running && self.supports_steering => {
-                " Alt+Enter queue | Alt+S steer | Alt+Up undo next | Alt+Down undo steer "
+                " Alt+Enter queue | Alt+S steer | Enter newline "
             }
             Mode::Input if self.running || matches!(self.pending, Some(Admission::Queued(_))) => {
-                " Alt+Enter queue | Alt+Up undo next | Enter newline "
+                " Alt+Enter queue | Enter newline "
             }
             Mode::Input => " Alt+Enter send | Enter newline | Esc browse ",
             Mode::Browse => " Enter send | i edit | j/k tool | Space fold | arrows scroll ",
@@ -2434,10 +2513,16 @@ mod tests {
             .unwrap_or_else(|| panic!("{needle} missing:\n{screen}"))
     }
     fn render(view: &ChatView, width: u16, height: u16) -> String {
+        render_with_pending(view, width, height, &PendingInputs::default())
+    }
+    fn render_with_pending(
+        view: &ChatView,
+        width: u16,
+        height: u16,
+        pending: &PendingInputs,
+    ) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal
-            .draw(|frame| view.render(frame, &PendingInputs::default()))
-            .unwrap();
+        terminal.draw(|frame| view.render(frame, pending)).unwrap();
         let buffer = terminal.backend().buffer();
         (0..height)
             .map(|y| {
@@ -2449,6 +2534,85 @@ mod tests {
             .join("\n")
     }
     const TOOL_RESULT_BODY: &str = "**literal tool**\n![inert](tool.png)\n\u{1b}[31m";
+
+    #[test]
+    fn pending_previews_clip_terminal_cells_without_wrapping_or_interpreting_input() {
+        assert_eq!(pending_line("", "a🦀e\u{301}", 4), "a🦀e\u{301}");
+        assert_eq!(pending_line("", "🦀e\u{301}abcdefgh", 6), "🦀e\u{301}...");
+        assert_eq!(pending_line("", "a🦀abcdefgh", 5), "a...");
+        assert_eq!(pending_line("", "long", 2), "..");
+        assert_eq!(pending_line("", "long", 0), "");
+        assert_eq!(
+            pending_line("Steering: ", "**literal**\t\x1b[31m\r\nhidden", 72),
+            "Steering: **literal**    \\u{1b}[31m"
+        );
+    }
+
+    #[test]
+    fn pending_strip_stays_with_the_editor_when_history_scrolls_or_space_shrinks() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
+        view.outcome = (0..50)
+            .map(|n| format!("Working row {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        view.editor.insert("draft");
+        let id = Invocation::new("session");
+        let inbox = mf_chat::SteeringInbox::new(id.clone());
+        inbox
+            .submit("Consider the boundary\nnot previewed".into())
+            .unwrap();
+        let mut next = NextTurnQueue::<Arc<str>>::new(id);
+        next.enqueue(format!("Separate task {}", "x".repeat(95)).into())
+            .unwrap();
+        let mut pending = PendingInputs {
+            steering: inbox.pending(),
+            next: next.pending().cloned().collect(),
+        };
+        let check_rows = |screen: &str| {
+            let steer = row_of(screen, " Steering: Consider the boundary");
+            assert_eq!(row_of(screen, " Follow-up: Separate task"), steer + 1);
+            assert_eq!(row_of(screen, " ↳ Alt+Down"), steer + 2);
+            assert_eq!(row_of(screen, "Alt+Enter send"), steer + 3);
+            assert!(!screen.contains("not previewed"));
+            steer
+        };
+        let tail = render_with_pending(&view, 72, 24, &pending);
+        assert!(tail.contains("Working row 49"));
+        let index = check_rows(&tail);
+        let mut terminal = Terminal::new(TestBackend::new(72, 24)).unwrap();
+        terminal.draw(|frame| view.render(frame, &pending)).unwrap();
+        for row in index..=index + 2 {
+            assert!(
+                terminal.backend().buffer()[(1, row as u16)]
+                    .modifier
+                    .contains(Modifier::DIM)
+            );
+        }
+        view.scroll.set(14);
+        let scrolled = render_with_pending(&view, 72, 24, &pending);
+        assert!(!scrolled.contains("Working row 49"));
+        assert_eq!(check_rows(&scrolled), index);
+        let narrow = render_with_pending(&view, 37, 15, &pending);
+        check_rows(&narrow);
+        assert!(narrow.contains(" Follow-up: Separate task xxxxxxx..."));
+        assert!(narrow.contains("↳ Alt+Down/Alt+Up"));
+        for n in 0..6 {
+            inbox.submit(format!("Other {n}")).unwrap();
+        }
+        pending.steering = inbox.pending();
+        let short = render_with_pending(&view, 72, 12, &pending);
+        assert!(short.contains("Steering: Consider") && short.contains("Follow-up: Separate"));
+        assert!(short.contains("↳ +6 more") && short.contains("draft"));
+        assert_eq!(
+            inbox.withdraw(pending.steering[0].0).as_deref(),
+            Some("Consider the boundary\nnot previewed")
+        );
+        assert_eq!(pending.height(2), 1);
+        assert_eq!(PendingInputs::default().height(18), 0);
+        assert!(!render(&view, 72, 24).contains("Follow-up:"));
+    }
 
     fn assert_grouped_tools(screen: &str, first_open: bool, second_open: bool) {
         let headers: Vec<_> = screen

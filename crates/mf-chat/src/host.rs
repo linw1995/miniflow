@@ -560,11 +560,9 @@ impl Inner {
             };
             let result = self.run_job(request.clone(), &profile, &control, presentation);
             let result = if queued && !admitted.load(Ordering::Acquire) {
-                result
-                    .map_err(Box::new)
-                    .with_context(|_| NextTurnAdmissionSnafu {
-                        prompt: std::mem::take(&mut request.prompt),
-                    })
+                result.with_context(|_| NextTurnAdmissionSnafu {
+                    prompt: std::mem::take(&mut request.prompt),
+                })
             } else {
                 result
             };

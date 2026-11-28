@@ -894,8 +894,9 @@ SHALL run off the terminal rendering thread, with independent cancellation.
 #### Scenario: Show pending text without predicting the Flow's decision
 
 - **WHEN** either FIFO contains unclaimed messages
-- **THEN** the terminal SHALL show their literal text in FIFO order per destination, distinguishing a queued next turn from a steering request
-- **AND** withdrawing or claiming an entry SHALL remove its pending row without fabricating a transcript message
+- **THEN** a strip fixed above the editor SHALL preview the first literal line of each visible entry, with `Steering:` rows before `Follow-up:` rows and FIFO order within each destination
+- **AND** scrolling the transcript SHALL NOT scroll the strip; width clipping and limited height MUST NOT change the text available for withdrawal or delivery
+- **AND** the strip SHALL show the applicable withdrawal shortcuts when space permits and disappear when both queues are empty, without fabricating a transcript message
 
 #### Scenario: Label how input entered the conversation
 

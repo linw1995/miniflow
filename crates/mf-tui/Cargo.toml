@@ -15,6 +15,7 @@ mf-telemetry = { workspace = true, features = ["snapshot"] }
 # Terminal input, rendering, and workflow graph layout.
 chrono = { workspace = true, features = ["std"] }
 crossterm.workspace = true
+unicode-segmentation.workspace = true
 ratatui = { workspace = true, features = ["crossterm", "unstable-rendered-line-info"] }
 rust-sugiyama.workspace = true
 

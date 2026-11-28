@@ -41,6 +41,7 @@ pub enum ChatError {
     #[snafu(display("could not admit the queued prompt: {source}"))]
     NextTurnAdmission {
         prompt: String,
+        #[snafu(source(from(ChatError, Box::new)))]
         source: Box<ChatError>,
     },
     #[snafu(display("this turn is not accepting steering input"))]
