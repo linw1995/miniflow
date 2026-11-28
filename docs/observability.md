@@ -726,20 +726,17 @@ expand the selected node's cluster; collapsed clusters render as one aggregate n
 connections, and hide internal connections. On a body owner, `c` cycles its display view and `l` expands it directly.
 An owner whose body contains statically bound Router routes has an intermediate summary (`[~]`): it hides the
 enclosing orchestration and displays the outermost bound route subgraphs under the owner, labeled by route name.
-A `builtin.router` also has an intermediate summary (`[~]`): each static route renders as one compact aggregate
-node labeled by route name that merges its branch's observed state, so the dispatch set stays visible without
-laying out the route subgraphs. Expanding the router (`[-]`) lays out every route body, and folding it (`[+]`)
-hides them. Selecting a route aggregate expands or folds the router's entire route set.
-Across `--tui`, chat Inspect, and the chat Flow execution panel, bodies start in this default summary view (`[~]`),
-falling back to folded (`[+]`) when there are no statically bound routes under the body. Routers follow the same
-default and start at `[~]` with one aggregate node per static route. For example, the DeepSeek
+A `builtin.router` with static routes has only two views. Half-folded (`[~]`), it shows the nodes and connections
+of each route inline; nested bodies keep their own fold state. Fully folded (`[+]`), it hides all routes.
+On the Router, `c` toggles between these views and `l` opens `[~]`; there is no separate `[-]` view.
+Across `--tui`, chat Inspect, and the chat Flow execution panel, bodies start in the summary view (`[~]`),
+falling back to folded (`[+]`) when there are no statically bound routes. For example, the DeepSeek
 `agent` call starts at `[~]`, showing `search` and `fetch` without the Agent Loop and dispatch chain, and the context
 example's `conversation` call starts at `[~]`, showing `calculator`. Dynamic Flow values do not create summary bodies;
 their active invocations continue to appear in PiPs and Details.
 
 A summary keeps the route's original scope and observation identity. It does not change cluster
-folding, external edges, or the separate PiP layout. A router's route aggregate reports its branch members and
-merged status in Details. Tab selects the displayed nodes. `h` or Esc
+folding, external edges, or the separate PiP layout. Tab selects the displayed nodes. `h` or Esc
 folds the selected open body or its nearest visible enclosing body; Esc closes visible Details
 first. `[` and `]` inspect older and newer retained pass
 frames or Iteration items for the selected node's scope, with nested bodies following their enclosing pass.

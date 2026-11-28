@@ -650,9 +650,9 @@ empty-Agent definition.
 
 In the TUI, `--tui`, chat Inspect, and the chat Flow execution panel share the same default summary
 view: bodies with statically bound Router routes start at `[~]` showing only their bound tool
-subgraphs, and bodies without static routes start folded (`[+]`). A `builtin.router` starts at `[~]`
-as well, rendering one compact aggregate node per static route; expanding it lays out the route
-subgraphs, and folding it hides them. When the Agent body is expanded,
+subgraphs, and bodies without static routes start folded (`[+]`). On `builtin.router` itself, `c` toggles
+between showing the actual route subgraphs inline (`[~]`, the default) and hiding them all (`[+]`).
+When the Agent body is expanded,
 its [node clusters](#node-clusters) still fold preparation, reply handling, and state updates by
 default while keeping the model turn and tool dispatch visible. Press `l` to expand a body, or `c`
 to cycle a body's view or toggle a cluster. These folds do not change execution order, streams, or
