@@ -415,8 +415,8 @@ fn zero_one_and_three_tool_supersets_keep_the_same_agent_source_and_ports() {
         ]
     );
     assert_eq!(
-        dispatch["inputs"]["params.model_call_id"]["from"],
-        json!({"node":"collect_usages", "port":"model_call_id"})
+        dispatch["inputs"]["params.model_call_id"],
+        json!({"$ref":"collect_usages.model_call_id"})
     );
     assert!(dispatch["config"].get("body").is_none());
 
