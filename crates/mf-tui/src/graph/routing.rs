@@ -2138,6 +2138,35 @@ mod tests {
         assert!(!segment(5, 15, 15, 15).conflicts_with_frame(frame));
         assert!(!segment(15, 15, 25, 15).conflicts_with_frame(frame));
         assert!(!segment(15, 15, 20, 15).conflicts_with_frame(frame));
+        assert!(!segment(10, 10, 20, 10).conflicts_with_frame(GraphRect {
+            x: 10,
+            y: 10,
+            width: 1,
+            height: 10,
+        }));
+    }
+
+    #[test]
+    fn frame_borders_block_validation_and_search_steps() {
+        let (nodes, edges, preferred) = search_fixture();
+        let frame = GraphRect {
+            x: 26,
+            y: 11,
+            width: 20,
+            height: 10,
+        };
+        let mut router = Router::new(
+            &nodes,
+            &edges,
+            std::slice::from_ref(&preferred),
+            &[frame],
+            RoutingLimits::default(),
+        );
+        assert_eq!(
+            router.validate(0, &preferred),
+            Err(UnresolvedReason::Congestion)
+        );
+        assert_eq!(router.step_cost(0, segment(26, 11, 41, 11)), Ok(None));
     }
 
     #[test]

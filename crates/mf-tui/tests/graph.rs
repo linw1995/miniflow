@@ -1037,6 +1037,38 @@ fn cluster_frames_stay_legible_when_connections_cross_them() {
 }
 
 #[test]
+fn cluster_junctions_skip_unresolved_routes() {
+    use mf_tui::graph::routing::RoutingLimits;
+
+    let mut graph = description();
+    graph.version = WorkflowDescriptionVersion::V2026_10_23;
+    graph.execution = Some(ExecutionDescription {
+        mode: ExecutionMode::Single,
+    });
+    graph.clusters = vec![ClusterDescription {
+        collapsed: false,
+        label: "Complete graph".into(),
+        annotation: "Every connection is deliberately left unresolved.".into(),
+        nodes: graph.nodes.iter().map(|node| node.id.clone()).collect(),
+    }];
+    let layout = GraphLayout::with_view_and_limits_collapsed(
+        &graph,
+        ConnectionView::Ports,
+        RoutingLimits {
+            max_geometry_items: 0,
+            ..RoutingLimits::default()
+        },
+        &BTreeSet::new(),
+    )
+    .unwrap();
+    assert_eq!(layout.unresolved_count(), layout.edges().len());
+    let (width, height) = layout.size();
+    let mut buffer = Buffer::empty(Rect::new(0, 0, width as u16, height as u16));
+    GraphView::new(&layout).render(buffer.area, &mut buffer);
+    assert!(buffer_text(&buffer).contains("Complete graph"));
+}
+
+#[test]
 fn cluster_annotations_wrap_in_the_graph_and_stay_clear_of_connections() {
     let mut graph = description();
     graph.version = WorkflowDescriptionVersion::V2026_10_23;

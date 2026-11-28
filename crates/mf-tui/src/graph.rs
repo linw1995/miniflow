@@ -1927,9 +1927,7 @@ impl<'a> GraphView<'a> {
                 let low = segment.low();
                 let high = segment.high();
                 for &(owner, frame) in frames.candidates(segment) {
-                    let Some(cluster) = owner else {
-                        continue;
-                    };
+                    let cluster = owner.expect("cluster frame index");
                     let right = frame.x + frame.width - 1;
                     let bottom = frame.y + frame.height - 1;
                     match segment.axis() {
