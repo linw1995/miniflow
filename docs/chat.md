@@ -245,27 +245,30 @@ No tool is interrupted or replayed. A closed inbox rejects late steering without
 or turning it into a follow-up. Withdrawing from either queue leaves the other queue, the active
 turn and newer edits alone. An already claimed input cannot be withdrawn.
 
-The standard Agent declares a finite `workflow.call` named `callback:on_reply`. The calculator,
-context, and DeepSeek examples need no steering-specific startup ports, nodes or forwarding. The
-host binds the unique declared site to the invocation's inbox. Embedded execution calls it directly;
-a compiled runner uses the [host callback RPC](workflows.md#host-callback-rpc).
-The Agent supplies only the position and outcome, not its transcript. With no host binding the
+The standard Agent declares a finite zero-argument `workflow.call` named `callback:steering`. The
+calculator, context, and DeepSeek examples need no steering-specific startup ports, nodes or
+forwarding. The host binds the unique declared site to the invocation's inbox. Embedded execution
+calls it directly; a compiled runner uses the [host callback RPC](workflows.md#host-callback-rpc).
+The Flow calls it only when it wants pending steering messages, with no arguments; it never sends
+or exposes its transcript to the callback, and skips it on failed replies. With no host binding the
 ordinary local body returns an empty list. Only the invoked conversation Flow is inspected; the
 host's title and compaction calls and movable tool Flows do not inherit the binding. In a custom
-chatflow, reserve `on_reply` for the main exchange. Multiple static sites of that name disable
+chatflow, reserve `steering` for the main exchange. Multiple static sites of that name disable
 steering rather than guessing which Agent should receive the input. Neither tools nor the model
 receive the callable or its transport. `ChatJob::steer` returns an ID;
 `job.steering().unwrap().withdraw(id)` returns the text only if withdrawal won the race with the
-pull. A cloned inbox can also recover unsent steering after cancellation. Each queue accepts up to
-32 pending messages totaling 256 KiB of UTF-8.
+pull. A cloned inbox can also recover unsent steering after cancellation or failure. Each queue
+accepts up to 32 pending messages totaling 256 KiB of UTF-8.
 
 The host keeps delivery receipts in memory for the active call and any pending save-only recovery.
-It checks exact text, order, and positions in the display delta. Steering does not read or write
-SQLite at a reply boundary: user messages become durable only in the ordinary turn settlement.
-A Flow cannot invent user input for the audit. A failed turn still publishes no model context. Cancellation or
-failure does not deliver pending input; the TUI restores it beside any newer draft while open.
-Late submissions are rejected without clearing the editor. Closing the application discards the
-in-memory queue; reopening does not resume it.
+How the Flow places delivered steering messages is validated on the final output: the host checks
+that user additions in the display delta match the delivered text and order verbatim. Steering does
+not read or write SQLite during execution: user messages become durable only in the ordinary turn
+settlement. A Flow cannot invent user input for the audit. A failed turn still publishes no model
+context. Cancellation, failure, or closing the invocation never delivers remaining pending input;
+the TUI restores it beside any newer draft while open. Late submissions after the invocation closes
+are rejected without clearing the editor. Closing the application discards the in-memory queue;
+reopening does not resume it.
 
 ## Turn lifecycle
 
@@ -652,8 +655,8 @@ then sends finite or streaming business records and structured diagnostics. Ther
 file, business stdout reader, or callback-only chat mode. Raw stderr and OTLP remain separate.
 Recompile older runners before using them for chat.
 
-Hosted I/O does not grant steering. Only an explicitly bound `callback:on_reply` can pull user input
-at a reply boundary, on the same connection. A missing or broken session fails the turn without
+Hosted I/O does not grant steering. Only an explicitly bound `callback:steering` can pull user
+input during execution, on the same connection. A missing or broken session fails the turn without
 relaunching the runner or trying stdout, even if it printed a valid-looking result and exited zero.
 
 Optional `answer` and `tool_call_delta` records are previews; exactly one complete alternative result is required. Capture validates the whole invocation and

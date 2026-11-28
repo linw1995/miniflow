@@ -4,7 +4,7 @@
 
 The backend SHALL bind one unambiguous required `messages` startup input with the shared
 `List(Object)` message contract and optional application-owned `context`. The host MAY bind a declared
-`on_reply` callback for this invocation. It SHALL deliver input only on demand; admission and
+zero-argument `steering` callback for this invocation. It SHALL deliver input only on demand; admission and
 withdrawal remain host-owned until the batch is claimed. The callback SHALL NOT expose the separate
 next-turn queue. Input messages SHALL be
 the admitted model context plus the current user exactly once. Effective context SHALL incorporate
@@ -59,7 +59,7 @@ The backend SHALL decode bounded unique-key JSON containing exactly one self-con
 replace_context result object. Required status/usages, optional error/title, and message fields SHALL
 come from that same payload, never other branches or outputs. The host normalizes its facts and
 internal update enum. Both alternatives yield newly generated assistant/tool display messages and
-any verbatim user steering delivered by the host at the corresponding positions in this invocation;
+any verbatim user steering delivered by the host in order during this invocation;
 no kind field or single update port SHALL be required.
 Success SHALL require complete display tool exchanges and a final nonempty assistant answer without
 pending calls or a nonempty error. Failure SHALL require an error, forbid a title, and MAY return an
@@ -80,7 +80,7 @@ Stored success MUST win over late errors or conflicting output, with separate di
 
 #### Scenario: Reject invented steering
 
-- **WHEN** a workflow returns a user display addition without the matching host delivery at that position
+- **WHEN** a workflow returns user display additions that do not match host-delivered steering text and order
 - **THEN** neither settlement nor save-only recovery accepts the terminal result
 
 #### Scenario: Interrupt a steered turn before settlement

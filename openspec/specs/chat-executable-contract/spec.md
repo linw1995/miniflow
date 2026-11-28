@@ -204,11 +204,11 @@ state SHALL retain precedence.
 
 ### Requirement: Capture native output independently of rendering
 
-Every `mf run --chat` invocation SHALL supply startup arguments and receive finite or streamed output on an authenticated runner session, without a turn argument file or stdout fallback. The host SHALL consume structured runner diagnostics while capturing raw stderr separately from OTLP. Declaring or binding a reply callback is not required for I/O; only a bound callback SHALL authorize steering.
+Every `mf run --chat` invocation SHALL supply startup arguments and receive finite or streamed output on an authenticated runner session, without a turn argument file or stdout fallback. The host SHALL consume structured runner diagnostics while capturing raw stderr separately from OTLP. Declaring or binding a steering callback is not required for I/O; only a bound callback SHALL authorize steering.
 
 The host SHALL drain records independently of rendering, bound pending records, retain the final recovery result instead of all preview history, and preserve typed capture errors. Cancellation SHALL interrupt a blocked consumer.
 
-#### Scenario: A hosted turn without a reply callback
+#### Scenario: A hosted turn without a steering callback
 
 - **WHEN** its runner emits an answer fragment, then a valid terminal result and completes the event drain
 - **THEN** the fragment can be presented before exit and only the validated terminal result can settle the turn after successful process completion

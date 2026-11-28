@@ -620,10 +620,10 @@ unchanged.
 The Agent accepts complete `params.messages` as a read-only Loop prefix and calls `mfn-llm.tool-catalog`
 once before the first request. The Loop carries only the generated suffix and continues while the
 model requests tools or a [steering message](chat.md#queuing-and-steering) arrives at a complete
-reply boundary, without a fixed round limit. `callback:on_reply` is a finite host-bindable Call,
-not a transport endpoint or model tool. After collecting the reply and all its tool results, the Agent
-calls it with `reply.position: Int` (the length of the generated suffix) and `reply.outcome: String`.
-The source returns only new `messages: List(Object)`; it never receives or rewrites the transcript.
+reply boundary, without a fixed round limit. `callback:steering` is a finite, zero-argument
+host-bindable Call, not a transport endpoint or model tool. After a completed reply or a completed
+tool batch, the Agent calls it with no arguments to pull any pending `messages: List(Object)`. It
+skips the call on failed outcomes and never sends or lets the callback rewrite its transcript.
 A completed text answer continues only on nonempty input; a failed outcome never continues. Without
 a caller source the local default returns an empty list, leaving the suffix unchanged. The
 [request Flow](../crates/builtin-nodes/llm/workflows/agent-request.json) forwards the prefix unchanged

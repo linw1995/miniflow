@@ -27,19 +27,19 @@ fn admitted() -> (tempfile::TempDir, ChatDatabase, Invocation) {
 use std::thread;
 
 #[test]
-fn failure_closes_admission_without_consuming_or_replaying_pending_input() {
+fn closing_admission_preserves_pending_input_without_consuming_or_replaying_it() {
     let inbox = SteeringInbox::new(Invocation::new("session"));
     assert!(inbox.submit(" \n".into()).is_err());
     assert!(inbox.submit("x".repeat(MAX_PENDING_BYTES + 1)).is_err());
-    assert!(inbox.take_at(PullMode::Open).unwrap().is_empty());
+    assert!(inbox.take().unwrap().is_empty());
     for i in 0..MAX_PENDING_MESSAGES {
         inbox.submit(format!("note {i}")).unwrap();
     }
     assert!(inbox.submit("one too many".into()).is_err());
     assert!(inbox.take_unsent().is_empty());
-    assert!(inbox.take_at(PullMode::Close).unwrap().is_empty());
-    assert!(inbox.submit("after failure".into()).is_err());
-    assert!(inbox.take_at(PullMode::Open).is_err());
+    inbox.close();
+    assert!(inbox.submit("after close".into()).is_err());
+    assert!(inbox.take().is_err());
     assert_eq!(inbox.take_unsent().len(), MAX_PENDING_MESSAGES);
     assert!(inbox.take_unsent().is_empty());
 }
@@ -53,7 +53,7 @@ fn withdrawal_and_claiming_a_batch_have_one_winner() {
     assert!(other.withdraw(first).is_none());
     assert_eq!(inbox.withdraw(second).as_deref(), Some("same"));
     assert!(inbox.withdraw(second).is_none());
-    let claimed = inbox.take_at(PullMode::Open).unwrap();
+    let claimed = inbox.take().unwrap();
     assert_eq!(
         claimed.into_iter().collect::<Vec<_>>(),
         [(first, "same".to_string())]
@@ -63,7 +63,8 @@ fn withdrawal_and_claiming_a_batch_have_one_winner() {
     let late = inbox.submit("later boundary".into()).unwrap();
     assert_eq!(inbox.withdraw_last().as_deref(), Some("later boundary"));
     assert!(inbox.withdraw(late).is_none());
-    assert!(inbox.take_at(PullMode::Last).unwrap().is_empty());
+    assert!(inbox.take().unwrap().is_empty());
+    inbox.close();
     assert!(inbox.submit("after close".into()).is_err());
 }
 
@@ -75,7 +76,7 @@ fn concurrent_withdrawal_never_removes_an_input_that_the_reader_obtained() {
     thread::scope(|scope| {
         let claim = scope.spawn(|| {
             start.wait();
-            inbox.take_at(PullMode::Last).unwrap()
+            inbox.take().unwrap()
         });
         start.wait();
         let withdrawn = inbox.withdraw(id);
@@ -94,10 +95,11 @@ fn concurrent_withdrawal_never_removes_an_input_that_the_reader_obtained() {
 }
 
 #[test]
-fn receipts_bind_exact_positions_text_and_invocation_before_recovery() {
+fn receipts_validate_ordered_steering_text_and_invocation_on_final_output() {
     let (_root, db, id) = admitted();
     let inbox = SteeringInbox::new(id.clone());
-    inbox.submit("Correction".into()).unwrap();
+    inbox.submit("First".into()).unwrap();
+    inbox.submit("Second".into()).unwrap();
     let log = DeliveryLog::new(inbox.clone());
     assert!(
         db.deliveries
@@ -113,11 +115,12 @@ fn receipts_bind_exact_positions_text_and_invocation_before_recovery() {
                     .with_active(&id, Some(&log), || Ok(()))
                     .is_err()
             );
-            let result = log.claim(PullMode::Last, 1)?.delivered();
+            let result = log.claim()?.delivered();
             assert!(result["messages"][0].is_secret());
-            assert_eq!(result["messages"][0]["content"], json!("Correction"));
+            assert_eq!(result["messages"][0]["content"], json!("First"));
+            assert_eq!(result["messages"][1]["content"], json!("Second"));
             assert!(
-                log.claim(PullMode::Last, 1)?.delivered()["messages"]
+                log.claim()?.delivered()["messages"]
                     .as_array()
                     .unwrap()
                     .is_empty()
@@ -127,15 +130,18 @@ fn receipts_bind_exact_positions_text_and_invocation_before_recovery() {
         .unwrap();
     writer.batch_execute("ROLLBACK").unwrap();
     let answer = json!({"role":"assistant","content":"Reply"});
-    let user = json!({"role":"user","content":"Correction"});
+    let first = json!({"role":"user","content":"First"});
+    let second = json!({"role":"user","content":"Second"});
     let make = |messages| ConversationResult::append(serde_json::from_value(messages).unwrap());
-    let good = make(json!([answer, user, answer]));
+    // The flow chooses where delivered user messages appear in its final display output.
+    let good = make(json!([answer, answer, first, answer, second, answer]));
     for invalid in [
         json!([answer, answer]),
-        json!([answer,{"role":"user","content":"Changed"},answer]),
-        json!([answer, answer, user, answer]),
-        json!([answer, user, user, answer]),
-        json!([answer,{"role":"user","content":"Correction","metadata":{"invented":true}},answer]),
+        json!([answer, first, answer]),
+        json!([answer, second, first, answer]),
+        json!([answer, {"role":"user","content":"Changed"}, second, answer]),
+        json!([answer, first, second, first, answer]),
+        json!([answer, {"role":"user","content":"First","metadata":{"invented":true}}, second, answer]),
     ] {
         assert!(db.complete_turn(id.clone(), make(invalid)).is_err());
     }
@@ -162,7 +168,7 @@ fn receipts_bind_exact_positions_text_and_invocation_before_recovery() {
     assert!(matches!(result.state, CompletionState::Finished(_)));
     assert!(!result.diagnostics.is_empty());
     let saved = db.complete_turn(id.clone(), good.clone()).unwrap();
-    assert_eq!(saved.result.display_messages().len(), 3);
+    assert_eq!(saved.result.display_messages().len(), 6);
     assert!(db.deliveries.calls.lock().unwrap().is_empty());
     let replay = db
         .reconcile_result(&id, Some(Ok(good.clone())), TurnExit::Failed, "late exit")
@@ -173,57 +179,32 @@ fn receipts_bind_exact_positions_text_and_invocation_before_recovery() {
 }
 
 #[test]
-fn invalid_checkpoint_restores_the_batch_and_abandonment_drops_its_receipts() {
-    let (_root, db, id) = admitted();
-    let inbox = SteeringInbox::new(id.clone());
-    inbox.submit("one".into()).unwrap();
-    inbox.submit("two".into()).unwrap();
-    let log = DeliveryLog::new(inbox.clone());
-    let error = db
-        .deliveries
-        .with_active(&id, Some(&log), || {
-            log.claim(PullMode::Open, i64::MAX).map(drop)
-        })
-        .unwrap_err();
-    assert!(matches!(error, ChatError::Arithmetic { .. }));
-    assert_eq!(inbox.take_unsent(), ["one", "two"]);
-    db.deliveries.validate(&id.call_id, &[]).unwrap();
-    db.fail_turn(id, "cancelled", "discard").unwrap();
-    assert!(db.deliveries.calls.lock().unwrap().is_empty());
-}
-
-#[test]
-fn partial_writes_and_out_of_order_pulls_cannot_authorize_undelivered_users() {
+fn partial_writes_and_overlapping_pulls_cannot_authorize_undelivered_users() {
     let inbox = SteeringInbox::new(Invocation::new("session"));
     let log = DeliveryLog::new(inbox.clone());
     inbox.submit("sent".into()).unwrap();
-    log.claim(PullMode::Open, 2).unwrap().delivered();
-    inbox.submit("unsent".into()).unwrap();
-    assert!(log.claim(PullMode::Open, 2).is_err());
-    assert_eq!(inbox.take_unsent(), ["unsent"]);
+    log.claim().unwrap().delivered();
+    assert_eq!(*log.messages.lock().unwrap(), ["sent".to_owned()]);
     let next = SteeringInbox::new(Invocation::new("another session"));
     next.submit("not written".into()).unwrap();
     let second = DeliveryLog::new(next.clone());
-    let pending = second.claim(PullMode::Open, 4).unwrap();
+    let pending = second.claim().unwrap();
     let late = next.submit("later".into()).unwrap();
-    assert!(second.claim(PullMode::Open, 5).is_err());
+    assert!(second.claim().is_err());
     drop(pending);
     assert_eq!(next.withdraw(late).as_deref(), Some("later"));
     assert_eq!(next.take_unsent(), ["not written"]);
-    assert_eq!(*log.messages.lock().unwrap(), [(2, "sent".to_owned())]);
     assert!(second.messages.lock().unwrap().is_empty());
 }
 
 #[test]
-fn invalid_callback_arguments_never_claim_user_input() {
+fn unexpected_callback_arguments_never_claim_user_input() {
     let inbox = SteeringInbox::new(Invocation::new("target"));
     let id = inbox.submit("keep".into()).unwrap();
     let handler = DeliveryLog::new(inbox.clone()).callback();
     for args in [
-        json!({}),
-        json!({"reply.position":true,"reply.outcome":"completed"}),
-        json!({"reply.position":1,"other":"completed"}),
-        json!({"reply.position":1,"reply.outcome":0}),
+        json!({"reply.position":1,"reply.outcome":"completed"}),
+        json!({"unexpected":true}),
     ] {
         assert!(
             handler
@@ -235,6 +216,18 @@ fn invalid_callback_arguments_never_claim_user_input() {
         );
     }
     assert_eq!(inbox.withdraw(id).as_deref(), Some("keep"));
+    assert!(
+        handler
+            .call(
+                &mf_runtime::WorkflowArguments::default(),
+                &Default::default()
+            )
+            .unwrap()
+            .delivered()["messages"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -248,7 +241,7 @@ fn finalizing_a_call_closes_its_live_inbox_before_another_delivery() {
         .with_active(&id, Some(&log), || {
             db.fail_call(&id.call_id, "cancelled", "stop now")?;
             assert!(inbox.submit("too late".into()).is_err());
-            log.claim(PullMode::Open, 1).map(drop)
+            log.claim().map(drop)
         })
         .unwrap_err();
     assert!(matches!(error, ChatError::SteeringClosed));

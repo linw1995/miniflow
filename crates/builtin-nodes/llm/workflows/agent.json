@@ -236,6 +236,46 @@
               }
             },
             {
+              "id": "can_steer_check",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "outcome": "string"
+                },
+                "code": {
+                  "active": "outcome == 'tool_calls' || outcome == 'completed'"
+                }
+              },
+              "inputs": {
+                "outcome": {
+                  "from": {
+                    "node": "turn",
+                    "port": "outcome"
+                  }
+                }
+              }
+            },
+            {
+              "id": "can_steer",
+              "kind": "builtin.if_else",
+              "config": {
+                "branches": [
+                  {
+                    "id": "active",
+                    "condition": {
+                      "source": {
+                        "output": "can_steer_check.active",
+                        "path": ""
+                      },
+                      "operator": "eq",
+                      "value": true
+                    }
+                  }
+                ]
+              }
+            },
+            {
               "id": "route",
               "kind": "builtin.if_else",
               "config": {
@@ -268,8 +308,7 @@
                   }
                 },
                 "code": {
-                  "generated": "generated + additions",
-                  "position": "size(generated) + size(additions)"
+                  "generated": "generated + additions"
                 }
               },
               "inputs": {
@@ -328,7 +367,6 @@
                   }
                 },
                 "code": {
-                  "position": "size(generated) + size(results)",
                   "generated": "generated + results.map(result, dyn({'role':'tool','tool_call_id':result.tool_call_id,'content':result.content}))"
                 }
               },
@@ -348,7 +386,7 @@
               }
             },
             {
-              "id": "finished_generated",
+              "id": "completed_generated",
               "kind": "builtin.parameters",
               "config": {
                 "parameters": {
@@ -357,20 +395,10 @@
                       "list": "object"
                     },
                     "secret": false
-                  },
-                  "position": {
-                    "type": "int",
-                    "secret": false
                   }
                 }
               },
               "inputs": {
-                "position": {
-                  "from": {
-                    "node": "append_assistant",
-                    "port": "position"
-                  }
-                },
                 "generated": {
                   "from": {
                     "node": "append_assistant",
@@ -380,28 +408,40 @@
               }
             },
             {
-              "id": "on_reply",
+              "id": "reply_generated",
+              "kind": "builtin.parameters",
+              "config": {
+                "parameters": {
+                  "generated": {
+                    "type": {
+                      "list": "object"
+                    },
+                    "secret": false
+                  }
+                }
+              },
+              "inputs": {
+                "generated": {
+                  "exclusive": [
+                    {
+                      "node": "append_tool_results",
+                      "port": "generated"
+                    },
+                    {
+                      "node": "completed_generated",
+                      "port": "generated"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "id": "steering",
               "kind": "workflow.call",
               "config": {
-                "flow": "callback:on_reply",
+                "flow": "callback:steering",
                 "body": {
                   "nodes": [
-                    {
-                      "id": "reply",
-                      "kind": "builtin.parameters",
-                      "config": {
-                        "parameters": {
-                          "position": {
-                            "type": "int",
-                            "secret": false
-                          },
-                          "outcome": {
-                            "type": "string",
-                            "secret": false
-                          }
-                        }
-                      }
-                    },
                     {
                       "id": "empty",
                       "kind": "builtin.constant",
@@ -440,57 +480,31 @@
                     }
                   ]
                 }
-              },
-              "inputs": {
-                "reply.position": {
-                  "exclusive": [
-                    {
-                      "node": "append_tool_results",
-                      "port": "position"
-                    },
-                    {
-                      "node": "finished_generated",
-                      "port": "position"
-                    }
-                  ]
-                },
-                "reply.outcome": {
-                  "from": {
-                    "node": "turn",
-                    "port": "outcome"
-                  }
-                }
               }
             },
             {
-              "id": "generated",
+              "id": "steered_generated",
               "kind": "workflow.call",
               "config": {
                 "flow": "agent-request"
               },
               "inputs": {
                 "params.prefix": {
-                  "exclusive": [
-                    {
-                      "node": "append_tool_results",
-                      "port": "generated"
-                    },
-                    {
-                      "node": "finished_generated",
-                      "port": "generated"
-                    }
-                  ]
+                  "from": {
+                    "node": "reply_generated",
+                    "port": "generated"
+                  }
                 },
                 "params.generated": {
                   "from": {
-                    "node": "on_reply",
+                    "node": "steering",
                     "port": "messages"
                   }
                 }
               }
             },
             {
-              "id": "advance",
+              "id": "steered_outcome",
               "kind": "builtin.code",
               "config": {
                 "language": "cel",
@@ -501,13 +515,13 @@
                   "outcome": "string"
                 },
                 "code": {
-                  "outcome": "outcome == 'tool_calls' || (outcome == 'completed' && size(additions) > 0) ? 'continue' : outcome"
+                  "outcome": "outcome == 'tool_calls' || size(additions) > 0 ? 'continue' : outcome"
                 }
               },
               "inputs": {
                 "additions": {
                   "from": {
-                    "node": "on_reply",
+                    "node": "steering",
                     "port": "messages"
                   }
                 },
@@ -518,12 +532,98 @@
                   }
                 }
               }
+            },
+            {
+              "id": "failed_reply",
+              "kind": "builtin.parameters",
+              "config": {
+                "parameters": {
+                  "generated": {
+                    "type": {
+                      "list": "object"
+                    },
+                    "secret": false
+                  },
+                  "outcome": {
+                    "type": "string",
+                    "secret": false
+                  }
+                }
+              },
+              "inputs": {
+                "generated": {
+                  "from": {
+                    "node": "append_assistant",
+                    "port": "generated"
+                  }
+                },
+                "outcome": {
+                  "from": {
+                    "node": "turn",
+                    "port": "outcome"
+                  }
+                }
+              }
+            },
+            {
+              "id": "step_result",
+              "kind": "builtin.parameters",
+              "config": {
+                "parameters": {
+                  "generated": {
+                    "type": {
+                      "list": "object"
+                    },
+                    "secret": false
+                  },
+                  "outcome": {
+                    "type": "string",
+                    "secret": false
+                  }
+                }
+              },
+              "inputs": {
+                "generated": {
+                  "exclusive": [
+                    {
+                      "node": "steered_generated",
+                      "port": "messages"
+                    },
+                    {
+                      "node": "failed_reply",
+                      "port": "generated"
+                    }
+                  ]
+                },
+                "outcome": {
+                  "exclusive": [
+                    {
+                      "node": "steered_outcome",
+                      "port": "outcome"
+                    },
+                    {
+                      "node": "failed_reply",
+                      "port": "outcome"
+                    }
+                  ]
+                }
+              }
             }
           ],
           "edges": [
             {
-              "from_node": "turn",
+              "from_node": "can_steer_check",
+              "to_node": "can_steer"
+            },
+            {
+              "from_node": "can_steer",
+              "from_output": "active",
               "to_node": "route"
+            },
+            {
+              "from_node": "can_steer",
+              "from_output": "else",
+              "to_node": "failed_reply"
             },
             {
               "from_node": "route",
@@ -533,11 +633,16 @@
             {
               "from_node": "route",
               "from_output": "else",
-              "to_node": "finished_generated"
+              "to_node": "completed_generated"
             },
             {
               "from_node": "append_assistant",
               "to_node": "dispatch"
+            },
+            {
+              "from_node": "reply_generated",
+              "from_output": "generated",
+              "to_node": "steering"
             }
           ],
           "clusters": [
@@ -546,6 +651,8 @@
               "annotation": "Append the assistant message and decide whether to dispatch tools.",
               "collapsed": true,
               "nodes": [
+                "can_steer_check",
+                "can_steer",
                 "route",
                 "append_assistant"
               ]
@@ -557,18 +664,21 @@
               "nodes": [
                 "collect_usages",
                 "append_tool_results",
-                "finished_generated",
-                "on_reply",
-                "generated",
-                "advance"
+                "completed_generated",
+                "reply_generated",
+                "steering",
+                "steered_generated",
+                "steered_outcome",
+                "failed_reply",
+                "step_result"
               ]
             }
           ],
           "outputs": [
             {
               "name": "generated",
-              "node": "generated",
-              "port": "messages"
+              "node": "step_result",
+              "port": "generated"
             },
             {
               "name": "usages",
@@ -582,7 +692,7 @@
             },
             {
               "name": "outcome",
-              "node": "advance",
+              "node": "step_result",
               "port": "outcome"
             },
             {

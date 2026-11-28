@@ -334,7 +334,7 @@ impl ChatContract {
             supports_steering: manifest
                 .descriptor
                 .callbacks
-                .contains_key(crate::steering::ON_REPLY),
+                .contains_key(crate::steering::CALLBACK_NAME),
             inputs,
             alternatives,
         })

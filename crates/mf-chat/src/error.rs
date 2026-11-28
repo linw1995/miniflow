@@ -45,8 +45,8 @@ pub enum ChatError {
     },
     #[snafu(display("this turn is not accepting steering input"))]
     SteeringClosed,
-    #[snafu(display("invalid reply callback value: {source}"))]
-    ReplyValue { source: mf_runtime::TypeMismatch },
+    #[snafu(display("invalid steering callback value: {source}"))]
+    SteeringValue { source: mf_runtime::TypeMismatch },
     #[snafu(transparent)]
     Callback {
         source: mf_runtime::callback::CallbackError,

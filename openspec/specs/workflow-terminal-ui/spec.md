@@ -878,9 +878,9 @@ SHALL run off the terminal rendering thread, with independent cancellation.
 - **THEN** the terminal targets that invocation and clears the draft only on admission
 - **AND** a closed inbox rejects late input; cancellation returns undelivered input for editing, not execution
 
-#### Scenario: Queue regardless of reply callback support
+#### Scenario: Queue regardless of steering callback support
 
-- **WHEN** the user sends text normally during a running chatflow with or without an `on_reply` callback
+- **WHEN** the user sends text normally during a running chatflow with or without a `steering` callback
 - **THEN** the terminal queues it in FIFO order without starting a child or writing a user message
 - **AND** it starts a new turn in the same session only after the preceding turn commits successfully
 - **AND** cancellation, failure, or retained output restores remaining prompts for editing, not replay

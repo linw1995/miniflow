@@ -164,7 +164,62 @@ fn cancelling_before_delivery_restores_steering_as_a_draft_not_as_a_follow_up() 
 }
 
 #[test]
-fn a_chatflow_without_a_reply_callback_queues_separate_turns_without_prefetching() {
+fn failed_agent_reply_skips_steering_callback_and_preserves_unsent_input() {
+    use mf_chat::{ChatHost, HostConfig, WorkflowProfile};
+
+    let mut reply = Reply::json(json!({"error":{"message":"provider unavailable"}}));
+    reply.status = 500;
+    let (failed, release) = gated(reply, String::new());
+    let server = Server::start(vec![failed]);
+    let profile = WorkflowProfile::from_path(
+        "calc",
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/chat-calculator-flow.json"),
+        mf_runtime::WorkflowArguments::try_from(json!({
+            "params.model": "fixture-model",
+            "params.api_key": "synthetic-key",
+            "params.base_url": server.base_url
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let host = ChatHost::open(root.path().join("chat.sqlite"), HostConfig::new(profile)).unwrap();
+    let session = host
+        .database()
+        .create_session("calc", None, Some("Manual".into()))
+        .unwrap();
+    let job = host.submit(&session.id, "Compute 2 + 2").unwrap();
+    server.wait_for_requests(1);
+    job.steer("Do not lose this steering").unwrap();
+    let invocation = job.invocation().clone();
+    let inbox = job.steering().unwrap().clone();
+    release.store(true, Ordering::Release);
+    let error = job.join().unwrap_err();
+    assert!(matches!(
+        error,
+        mf_chat::ChatError::Execution {
+            source,
+            ..
+        } if matches!(source.as_ref(), mf_chat::ChatError::WorkflowFailure { .. })
+    ));
+    assert_eq!(
+        host.database().turn(&invocation.turn_id).unwrap().state,
+        "failed"
+    );
+    assert_eq!(
+        host.database()
+            .messages(&session.id, 10, None)
+            .unwrap()
+            .messages
+            .len(),
+        1
+    );
+    assert_eq!(inbox.take_unsent(), ["Do not lose this steering"]);
+    assert_eq!(server.requests().len(), 1);
+}
+
+#[test]
+fn a_chatflow_without_a_steering_callback_queues_separate_turns_without_prefetching() {
     let (first, release) = gated(Reply::text("First reply"), String::new());
     let server = Server::start(vec![
         first,

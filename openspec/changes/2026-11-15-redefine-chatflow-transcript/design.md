@@ -382,9 +382,10 @@ An otherwise unique valid result followed only by process/delivery failure retai
 save-only recovery. Already committed success still wins over later conflicting reconciliation.
 
 The generic built-in Agent consumes a complete request and returns generated assistant/tool
-additions, including its final assistant. At the reply boundary its `callback:on_reply` Call
-returns an empty list unless the host binds it. The executable transport is the runner's generic
-local callback RPC; the embedded path uses the native host implementation directly.
+additions, including its final assistant. When checking for steering after a completed reply or
+tool batch, its zero-argument `callback:steering` Call returns an empty list unless the host binds
+it; failed replies skip the callback. The executable transport is the runner's generic local
+callback RPC; the embedded path uses the native host implementation directly.
 The session's next-turn FIFO is independent of this invocation's steering inbox. Only a successful
 commit can release a queued prompt into a new turn. No callback, tool reply or save-only operation
 can read the next-turn FIFO or reinterpret a rejected steering input as a new submission.

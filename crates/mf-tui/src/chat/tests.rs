@@ -186,7 +186,7 @@ fn callbacks_do_not_become_configurable_chat_arguments() {
     );
     assert!(
         RunOptions {
-            arguments: vec!["--callback:on_reply".into()],
+            arguments: vec!["--callback:steering".into()],
             ..Default::default()
         }
         .parsed_workflow_arguments(&contract.parameters)

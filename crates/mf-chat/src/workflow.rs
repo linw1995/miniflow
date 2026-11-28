@@ -1342,7 +1342,7 @@ pub fn run_observed_conversation(
     let steering = steering.map(crate::steering::DeliveryLog::new);
     let callbacks: mf_runtime::callback::HostCallbacks = steering
         .iter()
-        .map(|log| (crate::steering::ON_REPLY.into(), log.callback()))
+        .map(|log| (crate::steering::CALLBACK_NAME.into(), log.callback()))
         .collect();
     let registered = backend.registered_workflow();
     let embedded = registered
