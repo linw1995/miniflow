@@ -726,8 +726,11 @@ expand the selected node's cluster; collapsed clusters render as one aggregate n
 connections, and hide internal connections. On a body owner, `c` cycles its display view and `l` expands it directly.
 An owner whose body contains statically bound Router routes has an intermediate summary (`[~]`): it hides the
 enclosing orchestration and displays the outermost bound route subgraphs under the owner, labeled by route name.
-Across `--tui`, chat Inspect, and the chat Flow execution panel, bodies start in this default summary view (`[~]`),
-falling back to folded (`[+]`) when there are no statically bound routes under the body. For example, the DeepSeek
+A `builtin.router` with static routes has only two views. Half-folded (`[~]`), it shows the nodes and connections
+of each route inline; nested bodies keep their own fold state. Fully folded (`[+]`), it hides all routes.
+On the Router, `c` toggles between these views and `l` opens `[~]`; there is no separate `[-]` view.
+Across `--tui`, chat Inspect, and the chat Flow execution panel, bodies start in the summary view (`[~]`),
+falling back to folded (`[+]`) when there are no statically bound routes. For example, the DeepSeek
 `agent` call starts at `[~]`, showing `search` and `fetch` without the Agent Loop and dispatch chain, and the context
 example's `conversation` call starts at `[~]`, showing `calculator`. Dynamic Flow values do not create summary bodies;
 their active invocations continue to appear in PiPs and Details.
