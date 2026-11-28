@@ -47,6 +47,11 @@
             "type": "string",
             "env": "OPENAI_API_KEY"
           },
+          "compact": {
+            "type": "flow",
+            "required": false,
+            "secret": false
+          },
           "tool_properties": {
             "type": {
               "map": "object"
@@ -69,12 +74,49 @@
       }
     },
     {
+      "id": "policy_route",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "absent",
+            "condition": {
+              "source": {
+                "output": "params.compact",
+                "path": ""
+              },
+              "operator": "not_exists"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "use_policy",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "$ref": "params.compact"
+        }
+      }
+    },
+    {
+      "id": "no_policy",
+      "kind": "builtin.constant",
+      "config": {
+        "value": null
+      }
+    },
+    {
       "id": "repeat",
       "kind": "loop.run",
       "config": {
         "inputs": {
           "prefix": {
             "list": "object"
+          },
+          "compact": {
+            "nullable": "flow"
           },
           "api_key": "string",
           "base_url": "string",
@@ -90,6 +132,11 @@
           }
         },
         "variables": [
+          {
+            "name": "checkpoint",
+            "type": "object",
+            "initial": {}
+          },
           {
             "name": "generated",
             "type": {
@@ -147,6 +194,9 @@
                 "flow": "agent-request"
               },
               "inputs": {
+                "params.checkpoint": {
+                  "$ref": "%loop.checkpoint"
+                },
                 "params.prefix": {
                   "$ref": "%loop.prefix"
                 },
@@ -193,6 +243,7 @@
                   }
                 },
                 "code": {
+                  "model_call_id": "size(right) > 0 ? string(right[0].call_id) : ''",
                   "value": "left + right"
                 }
               },
@@ -219,7 +270,7 @@
               },
               "inputs": {
                 "outcome": {
-                  "$ref": "turn.outcome"
+                  "$ref": "record_pass.outcome"
                 }
               }
             },
@@ -294,6 +345,9 @@
                 "flow": "tool-uses"
               },
               "inputs": {
+                "params.model_call_id": {
+                  "$ref": "collect_usages.model_call_id"
+                },
                 "params.calls": {
                   "$ref": "turn.tool_calls"
                 },
@@ -319,6 +373,7 @@
                   }
                 },
                 "code": {
+                  "through": "size(generated) + size(results)",
                   "generated": "generated + results.map(result, dyn({'role':'tool','tool_call_id':result.tool_call_id,'content':result.content}))"
                 }
               },
@@ -332,7 +387,199 @@
               }
             },
             {
-              "id": "completed_generated",
+              "id": "check_budget",
+              "kind": "builtin.if_else",
+              "config": {
+                "branches": [
+                  {
+                    "id": "finished",
+                    "condition": {
+                      "source": {
+                        "output": "turn.outcome",
+                        "path": ""
+                      },
+                      "operator": "ne",
+                      "value": "tool_calls"
+                    }
+                  },
+                  {
+                    "id": "unmanaged",
+                    "condition": {
+                      "source": {
+                        "output": "%loop.compact",
+                        "path": ""
+                      },
+                      "operator": "eq",
+                      "value": null
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "finished_facts",
+              "kind": "builtin.constant",
+              "config": {
+                "value": {
+                  "error": "",
+                  "usages": []
+                }
+              }
+            },
+            {
+              "id": "no_compaction",
+              "kind": "builtin.constant",
+              "config": {
+                "value": {
+                  "error": "",
+                  "usages": []
+                }
+              }
+            },
+            {
+              "id": "compact",
+              "kind": "workflow.call",
+              "config": {
+                "inputs": [
+                  {
+                    "name": "params.generated",
+                    "value_type": {
+                      "list": "object"
+                    },
+                    "required": true
+                  },
+                  {
+                    "name": "params.checkpoint",
+                    "value_type": "object",
+                    "required": true
+                  },
+                  {
+                    "name": "params.usages",
+                    "value_type": {
+                      "list": "object"
+                    },
+                    "required": true
+                  }
+                ],
+                "outputs": [
+                  {
+                    "name": "result",
+                    "value_type": {
+                      "map": "any"
+                    },
+                    "required": true
+                  }
+                ]
+              },
+              "inputs": {
+                "flow": {
+                  "$ref": "%loop.compact"
+                },
+                "params.generated": {
+                  "$ref": "append_tool_results.generated"
+                },
+                "params.checkpoint": {
+                  "$ref": "%loop.checkpoint"
+                },
+                "params.usages": {
+                  "$ref": "turn.usages"
+                }
+              }
+            },
+            {
+              "id": "checkpoint",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "previous": "object",
+                  "through": "int",
+                  "report": "object"
+                },
+                "code": {
+                  "value": "report.replacement == null ? dyn(previous) : dyn(report.replacement + {'through':through})",
+                  "error": "string(report.error)",
+                  "facts": "{'error':report.error, 'usages':report.usages}"
+                }
+              },
+              "inputs": {
+                "previous": {
+                  "$ref": "%loop.checkpoint"
+                },
+                "through": {
+                  "$ref": "append_tool_results.through"
+                },
+                "report": {
+                  "$ref": "compact.result"
+                }
+              }
+            },
+            {
+              "id": "record_pass",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "outcome": "string",
+                  "usages": {
+                    "list": "object"
+                  },
+                  "facts": "object"
+                },
+                "code": {
+                  "outcome": "facts.error != '' ? 'compaction_failed' : outcome",
+                  "usages": "usages + facts.usages"
+                }
+              },
+              "inputs": {
+                "outcome": {
+                  "$ref": "turn.outcome"
+                },
+                "usages": {
+                  "$ref": "collect_usages.value"
+                },
+                "facts": {
+                  "exclusive": [
+                    {
+                      "$ref": "checkpoint.facts"
+                    },
+                    {
+                      "$ref": "finished_facts.value"
+                    },
+                    {
+                      "$ref": "no_compaction.value"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "id": "provider_error",
+              "kind": "builtin.identity",
+              "inputs": {
+                "input": {
+                  "$ref": "turn.error"
+                }
+              }
+            },
+            {
+              "id": "pass_error",
+              "kind": "builtin.identity",
+              "inputs": {
+                "input": {
+                  "exclusive": [
+                    {
+                      "$ref": "checkpoint.error"
+                    },
+                    {
+                      "$ref": "provider_error.value"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "id": "non_tool_reply",
               "kind": "builtin.parameters",
               "config": {
                 "parameters": {
@@ -370,7 +617,7 @@
                       "$ref": "append_tool_results.generated"
                     },
                     {
-                      "$ref": "completed_generated.generated"
+                      "$ref": "non_tool_reply.generated"
                     }
                   ]
                 }
@@ -478,10 +725,10 @@
               },
               "inputs": {
                 "generated": {
-                  "$ref": "append_assistant.generated"
+                  "$ref": "reply_generated.generated"
                 },
                 "outcome": {
-                  "$ref": "turn.outcome"
+                  "$ref": "record_pass.outcome"
                 }
               }
             },
@@ -528,13 +775,41 @@
           ],
           "edges": [
             {
+              "from_node": "check_budget",
+              "from_output": "finished",
+              "to_node": "provider_error"
+            },
+            {
+              "from_node": "turn",
+              "to_node": "check_budget"
+            },
+            {
+              "from_node": "check_budget",
+              "from_output": "else",
+              "to_node": "compact"
+            },
+            {
+              "from_node": "check_budget",
+              "from_output": "finished",
+              "to_node": "finished_facts"
+            },
+            {
+              "from_node": "check_budget",
+              "from_output": "unmanaged",
+              "to_node": "no_compaction"
+            },
+            {
+              "from_node": "turn",
+              "to_node": "route"
+            },
+            {
               "from_node": "can_steer_check",
               "to_node": "can_steer"
             },
             {
               "from_node": "can_steer",
               "from_output": "active",
-              "to_node": "route"
+              "to_node": "steering"
             },
             {
               "from_node": "can_steer",
@@ -549,7 +824,7 @@
             {
               "from_node": "route",
               "from_output": "else",
-              "to_node": "completed_generated"
+              "to_node": "non_tool_reply"
             },
             {
               "from_node": "append_assistant",
@@ -574,13 +849,28 @@
               ]
             },
             {
+              "label": "Check context budget",
+              "annotation": "Check the caller's policy after a complete tool batch, before the next request.",
+              "collapsed": true,
+              "nodes": [
+                "check_budget",
+                "finished_facts",
+                "no_compaction",
+                "compact",
+                "checkpoint"
+              ]
+            },
+            {
               "label": "Record turn",
-              "annotation": "Retain usage and the generated messages from either branch.",
+              "annotation": "Retain the generated transcript, usages and outcome from the completed pass.",
               "collapsed": true,
               "nodes": [
                 "collect_usages",
                 "append_tool_results",
-                "completed_generated",
+                "record_pass",
+                "provider_error",
+                "pass_error",
+                "non_tool_reply",
                 "reply_generated",
                 "steering",
                 "steered_generated",
@@ -597,9 +887,15 @@
               "port": "generated"
             },
             {
+              "name": "checkpoint",
+              "node": "checkpoint",
+              "port": "value",
+              "optional": true
+            },
+            {
               "name": "usages",
-              "node": "collect_usages",
-              "port": "value"
+              "node": "record_pass",
+              "port": "usages"
             },
             {
               "name": "text",
@@ -613,13 +909,17 @@
             },
             {
               "name": "error",
-              "node": "turn",
-              "port": "error",
+              "node": "pass_error",
+              "port": "value",
               "optional": true
             }
           ]
         },
         "stream_outputs": {
+          "tool_output": {
+            "node": "dispatch",
+            "port": "tool_output"
+          },
           "tool_call_delta": {
             "node": "turn",
             "port": "tool_call_delta"
@@ -631,6 +931,16 @@
         }
       },
       "inputs": {
+        "compact": {
+          "exclusive": [
+            {
+              "$ref": "use_policy.value"
+            },
+            {
+              "$ref": "no_policy.value"
+            }
+          ]
+        },
         "prefix": {
           "$ref": "params.messages"
         },
@@ -690,18 +1000,48 @@
       }
     }
   ],
+  "edges": [
+    {
+      "from_node": "policy_route",
+      "from_output": "else",
+      "to_node": "use_policy"
+    },
+    {
+      "from_node": "params",
+      "to_node": "policy_route"
+    },
+    {
+      "from_node": "policy_route",
+      "from_output": "absent",
+      "to_node": "no_policy"
+    }
+  ],
   "clusters": [
     {
       "label": "Prepare agent",
-      "annotation": "Read the request and build the tool catalog once.",
+      "annotation": "Prepare the request, tool catalog and optional context policy once.",
       "collapsed": true,
       "nodes": [
         "params",
-        "catalog"
+        "catalog",
+        "policy_route",
+        "use_policy",
+        "no_policy"
       ]
     }
   ],
   "outputs": [
+    {
+      "name": "checkpoint",
+      "node": "repeat",
+      "port": "checkpoint"
+    },
+    {
+      "name": "tool_output",
+      "node": "repeat",
+      "port": "tool_output",
+      "optional": true
+    },
     {
       "name": "tool_call_delta",
       "node": "repeat",

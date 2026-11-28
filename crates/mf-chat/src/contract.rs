@@ -200,6 +200,7 @@ pub struct ChatContract {
     pub supports_steering: bool,
     pub answer_stream: bool,
     pub tool_call_delta_stream: bool,
+    pub tool_output_stream: bool,
     pub streaming: bool,
     inputs: BTreeMap<String, String>,
     pub alternatives: ResultAlternatives,
@@ -207,13 +208,14 @@ pub struct ChatContract {
 
 impl ChatContract {
     pub fn has_previews(&self) -> bool {
-        self.answer_stream || self.tool_call_delta_stream
+        self.answer_stream || self.tool_call_delta_stream || self.tool_output_stream
     }
 
     pub fn preview_streams(&self) -> impl Iterator<Item = &'static str> {
         [
             self.answer_stream.then_some("answer"),
             self.tool_call_delta_stream.then_some("tool_call_delta"),
+            self.tool_output_stream.then_some("tool_output"),
         ]
         .into_iter()
         .flatten()
@@ -319,8 +321,9 @@ impl ChatContract {
         let tool_call_delta_stream = outputs
             .iter()
             .any(|output| output.name == "tool_call_delta");
+        let tool_output_stream = outputs.iter().any(|output| output.name == "tool_output");
         ensure!(
-            (!answer_stream && !tool_call_delta_stream) || streaming,
+            (!answer_stream && !tool_call_delta_stream && !tool_output_stream) || streaming,
             InvalidSnafu {
                 field: "conversation preview",
                 reason: "requires native streaming execution"
@@ -330,6 +333,7 @@ impl ChatContract {
             parameters: configuration,
             answer_stream,
             tool_call_delta_stream,
+            tool_output_stream,
             streaming,
             supports_steering: manifest
                 .descriptor
@@ -551,6 +555,7 @@ pub fn decode_answer_delta(
 pub struct ConversationOutputDecoder {
     answer: bool,
     tool_call_delta: bool,
+    tool_output: bool,
     terminal: TerminalResultDecoder,
 }
 
@@ -559,6 +564,7 @@ impl ConversationOutputDecoder {
         Self {
             answer: contract.answer_stream,
             tool_call_delta: contract.tool_call_delta_stream,
+            tool_output: contract.tool_output_stream,
             terminal: TerminalResultDecoder::new(contract.alternatives),
         }
     }
@@ -569,11 +575,27 @@ impl ConversationOutputDecoder {
     ) -> Result<Option<crate::PreviewDelta>, ChatError> {
         let answer = values.remove("answer");
         let tool_call_delta = values.remove("tool_call_delta");
+        let tool_output = values.remove("tool_output");
         // Count terminal alternatives even when a mixed record carries an invalid preview.
         self.terminal.accept(values)?;
-        let delta = match (answer, tool_call_delta) {
-            (None, None) => return Ok(None),
-            (Some(value), None) => {
+        let delta = match (answer, tool_call_delta, tool_output) {
+            (None, None, None) => return Ok(None),
+            (None, None, Some(value)) => {
+                ensure!(
+                    self.tool_output,
+                    InvalidSnafu {
+                        field: "tool_output stream",
+                        reason: "was not declared by the workflow"
+                    }
+                );
+                crate::PreviewDelta::ToolOutput {
+                    delta: <crate::ToolOutputUpdate as mf_runtime::InputField>::decode_field(
+                        "tool_output",
+                        Some(value),
+                    )?,
+                }
+            }
+            (Some(value), None, None) => {
                 ensure!(
                     self.answer,
                     InvalidSnafu {
@@ -583,7 +605,7 @@ impl ConversationOutputDecoder {
                 );
                 crate::PreviewDelta::from(decode_answer_delta(&value)?)
             }
-            (None, Some(value)) => {
+            (None, Some(value), None) => {
                 ensure!(
                     self.tool_call_delta,
                     InvalidSnafu {
@@ -597,7 +619,7 @@ impl ConversationOutputDecoder {
                 )?;
                 crate::PreviewDelta::from(delta)
             }
-            (Some(_), Some(_)) => {
+            _ => {
                 return InvalidSnafu {
                     field: "conversation preview",
                     reason: "requires one preview event per record",
@@ -629,6 +651,7 @@ mod output_tests {
             parameters: Default::default(),
             answer_stream: answer,
             tool_call_delta_stream: false,
+            tool_output_stream: false,
             streaming: true,
             supports_steering: false,
             inputs: Default::default(),
@@ -686,6 +709,35 @@ mod output_tests {
         assert!(declared.accept(values(conflict)).is_err());
         assert!(declared.result().is_none());
         assert!(declared.finish().is_err());
+    }
+
+    #[test]
+    fn tool_output_requires_an_advertised_bounded_snapshot_and_actual_call_identities() {
+        let update = json!({"context":{"model_call_id":"m","tool_call_id":"t","name":"bash"}, "value":"latest"});
+        let record = |u| values(json!({"tool_output":u}));
+        let mut decoder = decoder(false);
+        assert!(decoder.accept(record(update.clone())).is_err());
+        decoder.tool_output = true;
+        assert!(
+            matches!(decoder.accept(record(update.clone())).unwrap(), Some(crate::PreviewDelta::ToolOutput { delta }) if delta.value == "latest")
+        );
+        for field in ["model_call_id", "tool_call_id", "name"] {
+            let mut invalid = update.clone();
+            invalid["context"][field] = " ".into();
+            assert!(matches!(
+                decoder.accept(record(invalid)),
+                Err(ChatError::Invalid { .. })
+            ));
+        }
+        for invalid in [String::new(), "a".repeat(16 * 1024 + 1)] {
+            let mut value = update.clone();
+            value["value"] = invalid.into();
+            assert!(decoder.accept(record(value)).is_err());
+        }
+        assert!(matches!(
+            decoder.accept(record(json!({"value":"no identity"}))),
+            Err(ChatError::Decode { .. })
+        ));
     }
 
     #[test]
@@ -777,6 +829,7 @@ mod output_tests {
             parameters: serde_json::from_value(json!({ "inputs": inputs, "stdin": {} })).unwrap(),
             answer_stream: false,
             tool_call_delta_stream: false,
+            tool_output_stream: false,
             streaming: false,
             supports_steering: false,
             inputs: BTreeMap::new(),

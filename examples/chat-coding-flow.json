@@ -1,0 +1,281 @@
+{
+  "version": "2026-11-28",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../crates/builtin-nodes/core"
+    },
+    "code": {
+      "package": "mfn-code",
+      "path": "../crates/builtin-nodes/code"
+    },
+    "llm": {
+      "package": "mfn-llm",
+      "path": "../crates/builtin-nodes/llm"
+    }
+  },
+  "execution": {
+    "limits": {
+      "workers": 1
+    }
+  },
+  "flows": {
+    "instructions": {
+      "path": "agent-coding/instructions.json"
+    },
+    "request": {
+      "path": "agent-coding/request.json"
+    },
+    "workspace_tools": {
+      "path": "agent-coding/tools.json"
+    },
+    "agent": {
+      "builtin": "mfn-llm.agent"
+    },
+    "finish": {
+      "path": "agent-coding/finish.json"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "messages": {
+            "type": {
+              "list": "object"
+            }
+          },
+          "context": {
+            "type": "object",
+            "default": {}
+          },
+          "workspace_root": {
+            "type": "string"
+          },
+          "load_instructions": {
+            "type": "bool",
+            "default": true
+          },
+          "user_instruction_dir": {
+            "type": "string",
+            "default": ""
+          },
+          "instruction_boundary": {
+            "type": "string",
+            "default": ""
+          },
+          "model": {
+            "type": "string",
+            "default": "your-model",
+            "secret": false
+          },
+          "base_url": {
+            "type": "string",
+            "default": "https://api.openai.com/v1",
+            "secret": false
+          },
+          "api_key": {
+            "type": "string",
+            "env": "OPENAI_API_KEY"
+          }
+        }
+      }
+    },
+    {
+      "id": "instructions",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "instructions"
+      },
+      "inputs": {
+        "params.workspace_root": {
+          "$ref": "params.workspace_root"
+        },
+        "params.enabled": {
+          "$ref": "params.load_instructions"
+        },
+        "params.user_dir": {
+          "$ref": "params.user_instruction_dir"
+        },
+        "params.boundary": {
+          "$ref": "params.instruction_boundary"
+        }
+      }
+    },
+    {
+      "id": "request",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "request"
+      },
+      "inputs": {
+        "params.instructions": {
+          "$ref": "instructions.messages"
+        },
+        "params.workspace_root": {
+          "$ref": "params.workspace_root"
+        },
+        "params.messages": {
+          "$ref": "params.messages"
+        }
+      }
+    },
+    {
+      "id": "workspace_tools",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "workspace_tools"
+      },
+      "inputs": {
+        "params.workspace_root": {
+          "$ref": "params.workspace_root"
+        }
+      }
+    },
+    {
+      "id": "compact_policy",
+      "kind": "builtin.constant",
+      "config": {
+        "type": "flow",
+        "value": {
+          "path": "agent-coding/compact.json"
+        },
+        "inputs": {
+          "history": {
+            "$ref": "params.messages"
+          },
+          "context": {
+            "$ref": "params.context"
+          },
+          "workspace_root": {
+            "$ref": "params.workspace_root"
+          },
+          "instructions": {
+            "$ref": "instructions.messages"
+          },
+          "model": {
+            "$ref": "params.model"
+          },
+          "base_url": {
+            "$ref": "params.base_url"
+          },
+          "api_key": {
+            "$ref": "params.api_key"
+          }
+        }
+      }
+    },
+    {
+      "id": "agent",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "agent"
+      },
+      "inputs": {
+        "params.compact": {
+          "$ref": "compact_policy.value"
+        },
+        "params.tools": {
+          "$ref": "workspace_tools.tools"
+        },
+        "params.tool_properties": {
+          "$ref": "workspace_tools.tool_properties"
+        },
+        "params.messages": {
+          "$ref": "request.messages"
+        },
+        "params.model": {
+          "$ref": "params.model"
+        },
+        "params.base_url": {
+          "$ref": "params.base_url"
+        },
+        "params.api_key": {
+          "$ref": "params.api_key"
+        }
+      }
+    },
+    {
+      "id": "finish",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "finish"
+      },
+      "inputs": {
+        "params.history": {
+          "$ref": "params.messages"
+        },
+        "params.context": {
+          "$ref": "params.context"
+        },
+        "params.workspace_root": {
+          "$ref": "params.workspace_root"
+        },
+        "params.model": {
+          "$ref": "params.model"
+        },
+        "params.base_url": {
+          "$ref": "params.base_url"
+        },
+        "params.api_key": {
+          "$ref": "params.api_key"
+        },
+        "params.generated": {
+          "$ref": "agent.messages"
+        },
+        "params.checkpoint": {
+          "$ref": "agent.checkpoint"
+        },
+        "params.status": {
+          "$ref": "agent.status"
+        },
+        "params.usages": {
+          "$ref": "agent.usages"
+        },
+        "params.error": {
+          "$ref": "agent.error"
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "instructions",
+      "to_node": "compact_policy"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "tool_output",
+      "node": "agent",
+      "port": "tool_output",
+      "optional": true
+    },
+    {
+      "name": "tool_call_delta",
+      "node": "agent",
+      "port": "tool_call_delta",
+      "optional": true
+    },
+    {
+      "name": "answer",
+      "node": "agent",
+      "port": "answer",
+      "optional": true
+    },
+    {
+      "name": "append",
+      "node": "finish",
+      "port": "append",
+      "optional": true
+    },
+    {
+      "name": "replace_context",
+      "node": "finish",
+      "port": "replace_context",
+      "optional": true
+    }
+  ]
+}

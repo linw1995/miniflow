@@ -1,0 +1,300 @@
+{
+  "version": "2026-11-28",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../../crates/builtin-nodes/core"
+    },
+    "code": {
+      "package": "mfn-code",
+      "path": "../../crates/builtin-nodes/code"
+    },
+    "chat": {
+      "package": "mf-chat",
+      "path": "../../crates/mf-chat"
+    }
+  },
+  "flows": {
+    "candidate": {
+      "path": "candidate.json"
+    },
+    "compact": {
+      "builtin": "mf-chat.chat-compact"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "history": {
+            "type": {
+              "list": "object"
+            }
+          },
+          "generated": {
+            "type": {
+              "list": "object"
+            }
+          },
+          "checkpoint": {
+            "type": "object"
+          },
+          "workspace_root": {
+            "type": "string"
+          },
+          "context": {
+            "type": "object"
+          },
+          "status": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "usages": {
+            "type": {
+              "list": "object"
+            }
+          },
+          "model": {
+            "type": "string",
+            "secret": false
+          },
+          "base_url": {
+            "type": "string",
+            "secret": false
+          },
+          "api_key": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "id": "candidate",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "candidate"
+      },
+      "inputs": {
+        "params.history": {
+          "$ref": "params.history"
+        },
+        "params.generated": {
+          "$ref": "params.generated"
+        },
+        "params.workspace_root": {
+          "$ref": "params.workspace_root"
+        },
+        "params.checkpoint": {
+          "$ref": "params.checkpoint"
+        }
+      }
+    },
+    {
+      "id": "policy",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "context": "object",
+          "status": "string"
+        },
+        "code": {
+          "context": "status == 'succeeded' ? dyn(context) : dyn({'compaction':{'enabled':false}})"
+        }
+      },
+      "inputs": {
+        "context": {
+          "$ref": "params.context"
+        },
+        "status": {
+          "$ref": "params.status"
+        }
+      }
+    },
+    {
+      "id": "compact",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "compact"
+      },
+      "inputs": {
+        "params.messages": {
+          "$ref": "candidate.messages"
+        },
+        "params.usages": {
+          "$ref": "params.usages"
+        },
+        "params.context": {
+          "$ref": "policy.context"
+        },
+        "params.model": {
+          "$ref": "params.model"
+        },
+        "params.base_url": {
+          "$ref": "params.base_url"
+        },
+        "params.api_key": {
+          "$ref": "params.api_key"
+        }
+      }
+    },
+    {
+      "id": "selection",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "status": "string",
+          "checkpoint": "object",
+          "compacted": "bool",
+          "usages": {
+            "list": "object"
+          },
+          "extra": {
+            "list": "object"
+          }
+        },
+        "code": {
+          "replace": "status == 'succeeded' && (compacted || has(checkpoint.through))",
+          "usages": "usages + extra"
+        }
+      },
+      "inputs": {
+        "status": {
+          "$ref": "params.status"
+        },
+        "checkpoint": {
+          "$ref": "params.checkpoint"
+        },
+        "compacted": {
+          "$ref": "compact.compacted"
+        },
+        "usages": {
+          "$ref": "params.usages"
+        },
+        "extra": {
+          "$ref": "compact.usages"
+        }
+      }
+    },
+    {
+      "id": "route",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "replace",
+            "condition": {
+              "source": {
+                "output": "selection.replace",
+                "path": ""
+              },
+              "operator": "eq",
+              "value": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "append",
+      "kind": "builtin.object",
+      "config": {
+        "fields": {
+          "status": "string",
+          "messages": {
+            "list": "object"
+          },
+          "usages": {
+            "list": "object"
+          },
+          "error": "string"
+        }
+      },
+      "inputs": {
+        "status": {
+          "$ref": "params.status"
+        },
+        "messages": {
+          "$ref": "candidate.display"
+        },
+        "usages": {
+          "$ref": "selection.usages"
+        },
+        "error": {
+          "$ref": "params.error"
+        }
+      }
+    },
+    {
+      "id": "replace",
+      "kind": "builtin.object",
+      "config": {
+        "fields": {
+          "status": "string",
+          "display_messages": {
+            "list": "object"
+          },
+          "context_messages": {
+            "list": "object"
+          },
+          "usages": {
+            "list": "object"
+          },
+          "error": "string"
+        }
+      },
+      "inputs": {
+        "status": {
+          "$ref": "params.status"
+        },
+        "display_messages": {
+          "$ref": "candidate.display"
+        },
+        "context_messages": {
+          "$ref": "compact.messages"
+        },
+        "usages": {
+          "$ref": "selection.usages"
+        },
+        "error": {
+          "$ref": "params.error"
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "selection",
+      "to_node": "route"
+    },
+    {
+      "from_node": "route",
+      "from_output": "replace",
+      "to_node": "replace"
+    },
+    {
+      "from_node": "route",
+      "from_output": "else",
+      "to_node": "append"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "append",
+      "node": "append",
+      "port": "value",
+      "optional": true
+    },
+    {
+      "name": "replace_context",
+      "node": "replace",
+      "port": "value",
+      "optional": true
+    }
+  ]
+}

@@ -27,8 +27,8 @@ pub struct LivePreview {
 pub struct Capture {
     pub frame: LivePreview,
     writer: Option<DraftWriter>,
-    // The application Flow delivers receipts in emission order. Keep only a handle
-    // per in-flight record, not another copy of its payload.
+    // The application Flow delivers receipts in emission order. Text/argument handles
+    // refer to durable prefixes; replaceable output frames carry a bounded snapshot.
     pending: VecDeque<PreviewSegment>,
 }
 
@@ -69,23 +69,39 @@ impl Capture {
             return Ok(());
         }
         event.validate()?;
-        let (model, index) = match &event.delta {
-            mf_chat::PreviewDelta::Text { delta } => (&delta.model_call_id, None),
-            mf_chat::PreviewDelta::ToolCall { delta } => (&delta.model_call_id, Some(delta.index)),
+        let matches_part = |s: &PreviewSegment| match &event.delta {
+            mf_chat::PreviewDelta::Text { delta } => {
+                s.model_call_id == delta.model_call_id && s.tool.is_none() && s.output.is_none()
+            }
+            mf_chat::PreviewDelta::ToolCall { delta } => {
+                s.model_call_id == delta.model_call_id
+                    && s.tool.as_ref().is_some_and(|t| t.index == delta.index)
+            }
+            mf_chat::PreviewDelta::ToolOutput { delta } => {
+                s.output.as_ref() == Some(&delta.context)
+            }
         };
         let Some(segment) = self.pending.pop_front() else {
             return Ok(());
         };
         self.frame.revision = self.revision.saturating_add(1);
-        if &segment.model_call_id != model || segment.tool.as_ref().map(|tool| tool.index) != index
-        {
+        let matches_snapshot = match &event.delta {
+            mf_chat::PreviewDelta::ToolOutput { delta } if segment.output.is_some() => {
+                segment.text.load()? == delta.value
+            }
+            _ => true,
+        };
+        if !matches_part(&segment) || !matches_snapshot {
             self.pending.clear();
             self.frame.warning = Some(Arc::new(ReceiptMismatchSnafu.build()));
             return Ok(());
         }
-        let previous = self.frame.segments.iter_mut().rev().find(|old| {
-            &old.model_call_id == model && old.tool.as_ref().map(|tool| tool.index) == index
-        });
+        let previous = self
+            .frame
+            .segments
+            .iter_mut()
+            .rev()
+            .find(|old| matches_part(old));
         if let Some(previous) = previous {
             *previous = Arc::new(segment);
         } else {
@@ -157,6 +173,38 @@ mod tests {
                 name: None,
             },
         )
+    }
+
+    #[test]
+    fn same_call_output_receipts_cannot_publish_a_different_staged_snapshot() {
+        let (_root, db, inv) = preview_turn();
+        let mut preview = capture(&db, &inv);
+        let event = |value: &str| {
+            event(
+                &inv,
+                PreviewDelta::ToolOutput {
+                    delta: mf_chat::ToolOutputUpdate {
+                        context: mf_chat::ToolOutputContext {
+                            model_call_id: "m".into(),
+                            tool_call_id: "t".into(),
+                            name: "bash".into(),
+                        },
+                        value: value.into(),
+                    },
+                },
+            )
+        };
+        let first = event("before");
+        let last = event("after");
+        preview.stage(&[first.delta.clone(), last.delta.clone()]);
+        preview.deliver(first.clone()).unwrap();
+        assert_eq!(preview.segments[0].text.load().unwrap(), "before");
+        preview.deliver(first).unwrap();
+        assert!(matches!(
+            preview.warning.as_deref(),
+            Some(PreviewError::ReceiptMismatch)
+        ));
+        assert_eq!(preview.segments[0].text.load().unwrap(), "before");
     }
 
     #[test]

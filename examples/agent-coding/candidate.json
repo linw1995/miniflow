@@ -1,0 +1,105 @@
+{
+  "version": "2026-11-28",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../../crates/builtin-nodes/core"
+    },
+    "code": {
+      "package": "mfn-code",
+      "path": "../../crates/builtin-nodes/code"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "history": {
+            "type": {
+              "list": "object"
+            }
+          },
+          "generated": {
+            "type": {
+              "list": "object"
+            }
+          },
+          "workspace_root": {
+            "type": "string"
+          },
+          "checkpoint": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "id": "stamp_workspace",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "messages": {
+            "list": "object"
+          },
+          "root": "string"
+        },
+        "code": {
+          "messages": "size(messages) == 0 ? messages : [messages[0] + {'metadata': (has(messages[0].metadata) ? messages[0].metadata : {}) + {'coding_workspace': root}}] + messages.slice(1, size(messages))"
+        }
+      },
+      "inputs": {
+        "messages": {
+          "$ref": "params.generated"
+        },
+        "root": {
+          "$ref": "params.workspace_root"
+        }
+      }
+    },
+    {
+      "id": "candidate",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "history": {
+            "list": "object"
+          },
+          "generated": {
+            "list": "object"
+          },
+          "checkpoint": "object"
+        },
+        "code": {
+          "messages": "has(checkpoint.through) ? checkpoint.context + generated.slice(int(checkpoint.through), size(generated)) : history + generated"
+        }
+      },
+      "inputs": {
+        "history": {
+          "$ref": "params.history"
+        },
+        "generated": {
+          "$ref": "stamp_workspace.messages"
+        },
+        "checkpoint": {
+          "$ref": "params.checkpoint"
+        }
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "messages",
+      "node": "candidate",
+      "port": "messages"
+    },
+    {
+      "name": "display",
+      "node": "stamp_workspace",
+      "port": "messages"
+    }
+  ]
+}

@@ -17,6 +17,11 @@
       "kind": "builtin.parameters",
       "config": {
         "parameters": {
+          "model_call_id": {
+            "type": "string",
+            "default": "",
+            "secret": false
+          },
           "calls": {
             "type": {
               "list": "object"
@@ -88,7 +93,14 @@
       "config": {
         "mode": "parallel",
         "on_error": "terminate",
+        "stream_outputs": {
+          "tool_output": {
+            "node": "execute",
+            "port": "update"
+          }
+        },
         "inputs": {
+          "model_call_id": "string",
           "tools": {
             "map": "object"
           },
@@ -105,10 +117,12 @@
               "config": {
                 "language": "cel",
                 "inputs": {
+                  "model_call_id": "string",
                   "call": "object",
                   "tools": "object"
                 },
                 "code": {
+                  "stream_context": "{'model_call_id': model_call_id, 'tool_call_id': call.id, 'name': call.name}",
                   "name": "call.name",
                   "ok": "call.name in tools && type(call.arguments) == map && size(call.arguments) == size(call.arguments.transformMap(k, v, k in tools[call.name].interface.allowed, v)) && tools[call.name].interface.required.all(r, r in call.arguments)",
                   "arguments": "call.name in tools && type(call.arguments) == map ? call.arguments.transformMap(k, v, k in tools[call.name].interface.allowed, v) : {}",
@@ -117,6 +131,9 @@
                 }
               },
               "inputs": {
+                "model_call_id": {
+                  "$ref": "%iteration.model_call_id"
+                },
                 "call": {
                   "$ref": "%iteration.item"
                 },
@@ -148,9 +165,13 @@
               "id": "execute",
               "kind": "builtin.router",
               "config": {
-                "routes": []
+                "routes": [],
+                "forward_stream": "progress"
               },
               "inputs": {
+                "stream_context": {
+                  "$ref": "classify.stream_context"
+                },
                 "flows": {
                   "$ref": "%iteration.flows"
                 },
@@ -249,6 +270,9 @@
         }
       },
       "inputs": {
+        "model_call_id": {
+          "$ref": "params.model_call_id"
+        },
         "items": {
           "$ref": "validated_calls.value"
         },
@@ -285,6 +309,12 @@
     }
   ],
   "outputs": [
+    {
+      "name": "tool_output",
+      "node": "dispatch",
+      "port": "tool_output",
+      "optional": true
+    },
     {
       "name": "results",
       "node": "dispatch",

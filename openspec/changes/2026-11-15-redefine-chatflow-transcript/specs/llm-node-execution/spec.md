@@ -84,6 +84,20 @@ status, without inventing an assistant or echoing the input prefix.
 - **THEN** the Agent returns failed status with those rounds and every collected usage
 - **AND** it does not add an empty placeholder for the failed model response
 
+#### Scenario: Check a completed tool batch before continuing
+
+- **WHEN** the caller supplies a compaction Flow and its policy replaces a prefix after a completed tool batch
+- **THEN** the next conversation request uses the checkpoint and only subsequent additions, with no replay of the batch
+- **AND** steering waiting at that boundary follows the checkpoint in the next request and appears once in the generated transcript
+- **AND** the generated transcript remains complete and auxiliary calls retain separate usage attribution
+
+#### Scenario: Compaction fails before the next request
+
+- **WHEN** the configured policy reports a failed summary after tools have completed
+- **THEN** the Agent returns the completed tool transcript, captured usages, and an error without another conversation request
+- **AND** steering waiting at that boundary remains unclaimed for the host to return to the user
+- **AND** cancellation still aborts the workflow rather than publishing a partial summary
+
 #### Scenario: Continue a long tool exchange
 
 - **WHEN** the model requests tools for nine consecutive rounds and then returns a final answer

@@ -34,7 +34,10 @@ pub use host::{ChatHost, ChatJob, HostConfig, PromptSubmission, QueuedTurn};
 pub use input_queue::{ClaimedTurn, NextTurnQueue, PendingMessageId};
 pub use model_selection::{ModelSelection, ModelSelectionCancellation, ModelSelectionUpdate};
 pub use models::{Message, ModelCall, Session, Turn};
-pub use preview::{PreviewConsumer, PreviewDelta, PreviewEvent, PreviewReceiver};
+pub use preview::{
+    PreviewConsumer, PreviewDelta, PreviewEvent, PreviewReceiver, ToolOutputContext,
+    ToolOutputUpdate,
+};
 pub use session::{MessagePage, MessageRecord, SessionPage};
 pub use steering::SteeringInbox;
 pub use storage::ChatDatabase;

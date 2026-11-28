@@ -1,0 +1,266 @@
+{
+  "version": "2026-11-28",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../../crates/builtin-nodes/core"
+    },
+    "code": {
+      "package": "mfn-code",
+      "path": "../../crates/builtin-nodes/code"
+    },
+    "chat": {
+      "package": "mf-chat",
+      "path": "../../crates/mf-chat"
+    }
+  },
+  "flows": {
+    "candidate": {
+      "path": "candidate.json"
+    },
+    "compact": {
+      "builtin": "mf-chat.chat-compact"
+    },
+    "request": {
+      "path": "request.json"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "generated": {
+            "type": {
+              "list": "object"
+            }
+          },
+          "checkpoint": {
+            "type": "object"
+          },
+          "usages": {
+            "type": {
+              "list": "object"
+            }
+          },
+          "history": {
+            "type": {
+              "list": "object"
+            }
+          },
+          "context": {
+            "type": "object"
+          },
+          "workspace_root": {
+            "type": "string"
+          },
+          "instructions": {
+            "type": {
+              "list": "object"
+            }
+          },
+          "model": {
+            "type": "string",
+            "secret": false
+          },
+          "base_url": {
+            "type": "string",
+            "secret": false
+          },
+          "api_key": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "id": "candidate",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "candidate"
+      },
+      "inputs": {
+        "params.history": {
+          "$ref": "params.history"
+        },
+        "params.generated": {
+          "$ref": "params.generated"
+        },
+        "params.workspace_root": {
+          "$ref": "params.workspace_root"
+        },
+        "params.checkpoint": {
+          "$ref": "params.checkpoint"
+        }
+      }
+    },
+    {
+      "id": "policy",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "context": "object"
+        },
+        "code": {
+          "context": "has(context.compaction) && has(context.compaction.keep_recent_tokens) && context.compaction.keep_recent_tokens == 0 ? dyn(context + {'compaction':context.compaction + {'keep_recent_tokens':1}}) : dyn(context)"
+        }
+      },
+      "inputs": {
+        "context": {
+          "$ref": "params.context"
+        }
+      }
+    },
+    {
+      "id": "compact",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "compact"
+      },
+      "inputs": {
+        "params.messages": {
+          "$ref": "candidate.messages"
+        },
+        "params.usages": {
+          "$ref": "params.usages"
+        },
+        "params.context": {
+          "$ref": "policy.context"
+        },
+        "params.model": {
+          "$ref": "params.model"
+        },
+        "params.base_url": {
+          "$ref": "params.base_url"
+        },
+        "params.api_key": {
+          "$ref": "params.api_key"
+        }
+      }
+    },
+    {
+      "id": "route",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "changed",
+            "condition": {
+              "source": {
+                "output": "compact.compacted",
+                "path": ""
+              },
+              "operator": "eq",
+              "value": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "request",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "request"
+      },
+      "inputs": {
+        "params.messages": {
+          "$ref": "compact.messages"
+        },
+        "params.workspace_root": {
+          "$ref": "params.workspace_root"
+        },
+        "params.instructions": {
+          "$ref": "params.instructions"
+        }
+      }
+    },
+    {
+      "id": "checkpoint",
+      "kind": "builtin.object",
+      "config": {
+        "fields": {
+          "request": {
+            "list": "object"
+          },
+          "context": {
+            "list": "object"
+          }
+        }
+      },
+      "inputs": {
+        "request": {
+          "$ref": "request.messages"
+        },
+        "context": {
+          "$ref": "compact.messages"
+        }
+      }
+    },
+    {
+      "id": "unchanged",
+      "kind": "builtin.constant",
+      "config": {
+        "value": null
+      }
+    },
+    {
+      "id": "result",
+      "kind": "builtin.object",
+      "config": {
+        "fields": {
+          "replacement": {
+            "nullable": "object"
+          },
+          "error": "string",
+          "usages": {
+            "list": "object"
+          }
+        }
+      },
+      "inputs": {
+        "replacement": {
+          "exclusive": [
+            {
+              "$ref": "checkpoint.value"
+            },
+            {
+              "$ref": "unchanged.value"
+            }
+          ]
+        },
+        "error": {
+          "$ref": "compact.error"
+        },
+        "usages": {
+          "$ref": "compact.usages"
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "compact",
+      "to_node": "route"
+    },
+    {
+      "from_node": "route",
+      "from_output": "changed",
+      "to_node": "request"
+    },
+    {
+      "from_node": "route",
+      "from_output": "else",
+      "to_node": "unchanged"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "result",
+      "node": "result",
+      "port": "value"
+    }
+  ]
+}

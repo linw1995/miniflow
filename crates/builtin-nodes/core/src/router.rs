@@ -16,6 +16,8 @@ struct Config {
     routes: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_enables")]
     enables: Option<Vec<String>>,
+    #[serde(default)]
+    forward_stream: Option<String>,
 }
 fn deserialize_enables<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -29,6 +31,8 @@ pub enum RouterBuildError {
     Route { route: String },
     #[snafu(display("Router enables contains a duplicate or unknown route `{route}`"))]
     Enable { route: String },
+    #[snafu(display("Router forward_stream must name a nonblank child stream"))]
+    BlankStream,
 }
 impl From<RouterBuildError> for NodeBuildError {
     fn from(source: RouterBuildError) -> Self {
@@ -47,6 +51,13 @@ fn validate_routes(routes: &[String]) -> Result<(), RouterBuildError> {
 }
 fn validate(config: &Config) -> Result<(), RouterBuildError> {
     validate_routes(&config.routes)?;
+    ensure!(
+        config
+            .forward_stream
+            .as_ref()
+            .is_none_or(|s| !s.trim().is_empty()),
+        BlankStreamSnafu
+    );
     let known: BTreeSet<_> = config.routes.iter().collect();
     if let Some(enables) = &config.enables {
         let mut enabled = BTreeSet::new();
@@ -81,13 +92,24 @@ struct Router {
     children: BTreeMap<String, crate::call::CallNode>,
 }
 impl NodePortContract for Router {
+    fn stream_outputs(&self) -> Vec<PortSpec> {
+        self.config
+            .forward_stream
+            .iter()
+            .map(|_| PortSpec::new("update", ValueType::Object, false))
+            .collect()
+    }
     fn ports(&self) -> NodePorts {
+        let mut inputs = vec![
+            PortSpec::new("route", ValueType::String, true),
+            PortSpec::new("arguments", ValueType::Object, true),
+            PortSpec::new("flows", ValueType::Map(Box::new(ValueType::Flow)), false),
+        ];
+        if self.config.forward_stream.is_some() {
+            inputs.push(PortSpec::new("stream_context", ValueType::Object, false));
+        }
         NodePorts {
-            inputs: vec![
-                PortSpec::new("route", ValueType::String, true),
-                PortSpec::new("arguments", ValueType::Object, true),
-                PortSpec::new("flows", ValueType::Map(Box::new(ValueType::Flow)), false),
-            ],
+            inputs,
             outputs: vec![PortSpec::new("result", ValueType::Object, true)],
         }
     }
@@ -97,6 +119,56 @@ impl TaskNode for Router {
         &self,
         inputs: Inputs,
         context: &mut ExecutionContext,
+    ) -> Result<NodeResult, NodeExecutionError> {
+        self.run(inputs, context, &mut mf_runtime::DiscardSink)
+    }
+}
+impl mf_runtime::TaskStreamNode for Router {
+    fn execute(
+        &self,
+        inputs: Inputs,
+        context: &mut ExecutionContext,
+        emitter: &mut mf_runtime::Emitter<'_>,
+    ) -> Result<NodeResult, NodeExecutionError> {
+        self.run(inputs, context, emitter)
+    }
+}
+
+struct Forward<'a> {
+    port: Option<&'a str>,
+    context: ValueRef,
+    private_route: bool,
+    sink: &'a mut dyn mf_runtime::EmissionSink,
+}
+
+impl mf_runtime::EmissionSink for Forward<'_> {
+    fn is_connected(&self) -> bool {
+        self.port.is_some() && self.sink.is_connected()
+    }
+    fn send(&mut self, mut result: NodeResult) -> Result<(), mf_runtime::StreamError> {
+        if let Some(value) = self.port.and_then(|port| result.outputs.remove(port)) {
+            let update = ValueRef::object([
+                ("context".into(), self.context.clone()),
+                ("value".into(), value),
+            ]);
+            let update = if self.private_route {
+                update.into_secret()
+            } else {
+                update
+            };
+            self.sink
+                .send(Outputs::from([("update".into(), update)]).into())?;
+        }
+        Ok(())
+    }
+}
+
+impl Router {
+    fn run(
+        &self,
+        mut inputs: Inputs,
+        context: &mut ExecutionContext,
+        sink: &mut dyn mf_runtime::EmissionSink,
     ) -> Result<NodeResult, NodeExecutionError> {
         if let Some(error) = context.cancellation().failure() {
             return Err(error.into());
@@ -136,10 +208,15 @@ impl TaskNode for Router {
             )])
             .into());
         }
-        let mut result = match configured {
-            Some(flow) => call.execute_packed_with_flow(inputs, context, &flow)?,
-            None => call.execute_packed(inputs, context)?,
+        let mut forward = Forward {
+            port: self.config.forward_stream.as_deref(),
+            context: inputs
+                .remove("stream_context")
+                .unwrap_or_else(|| ValueRef::object([])),
+            private_route: route.contains_secret() || enables.contains_secret(),
+            sink,
         };
+        let mut result = call.execute_packed(inputs, context, configured.as_ref(), &mut forward)?;
         for value in result.outputs.values_mut() {
             *value = value.clone().inherit_secrets([&route, enables]);
         }
@@ -191,19 +268,23 @@ fn prepared_factory(
             Ok((route, call))
         })
         .collect::<Result<_, NodeBuildError>>()?;
-    PreparedNode::new(
-        Router { config, children },
-        NodeMetadata {
-            input_bindings: BTreeMap::from([(
-                "arguments".into(),
-                mf_runtime::InputBinding {
-                    secret: true,
-                    ..Default::default()
-                },
-            )]),
-            ..Default::default()
-        },
-    )
+    let metadata = NodeMetadata {
+        input_bindings: BTreeMap::from([(
+            "arguments".into(),
+            mf_runtime::InputBinding {
+                secret: true,
+                ..Default::default()
+            },
+        )]),
+        ..Default::default()
+    };
+    let streaming = config.forward_stream.is_some();
+    let node = Router { config, children };
+    if streaming {
+        PreparedNode::task_stream(node, metadata)
+    } else {
+        PreparedNode::new(node, metadata)
+    }
 }
 inventory::submit! {
     NodeRegistration { kind: KIND, factory: NodeFactory::WithFlowBindings {
@@ -254,6 +335,40 @@ mod tests {
                 context,
             )
             .unwrap()
+    }
+
+    #[test]
+    fn forwarding_selects_one_named_child_port_and_preserves_private_route_selection() {
+        use mf_runtime::EmissionSink;
+        #[derive(Default)]
+        struct Updates(Vec<NodeResult>);
+        impl EmissionSink for Updates {
+            fn send(&mut self, result: NodeResult) -> Result<(), mf_runtime::StreamError> {
+                self.0.push(result);
+                Ok(())
+            }
+        }
+        assert!(factory(json!({"routes":[], "forward_stream":" "})).is_err());
+        for private_route in [false, true] {
+            let mut updates = Updates::default();
+            let mut forward = Forward {
+                port: Some("progress"),
+                context: ValueRef::from(json!({"id":"call"})),
+                private_route,
+                sink: &mut updates,
+            };
+            assert!(forward.is_connected());
+            for (name, value) in [("other", "ignored"), ("progress", "observed")] {
+                forward
+                    .send(Outputs::from([(name.into(), value.into())]).into())
+                    .unwrap();
+            }
+            assert_eq!(updates.0.len(), 1);
+            let update = &updates.0[0].outputs["update"];
+            assert_eq!(update["context"]["id"].as_str(), Some("call"));
+            assert_eq!(update["value"].as_str(), Some("observed"));
+            assert_eq!(update["value"].is_secret(), private_route);
+        }
     }
 
     #[test]

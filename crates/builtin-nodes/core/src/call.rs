@@ -148,29 +148,13 @@ impl CallNode {
         })
     }
 
-    /// Uses the same Call boundary with flat arguments and a terminal result envelope.
+    /// The caller selects which child emissions to forward independently of the terminal envelope.
     pub fn execute_packed(
         &self,
         inputs: Inputs,
         context: &mut ExecutionContext,
-    ) -> Result<NodeResult, NodeExecutionError> {
-        self.execute_packed_configured(inputs, context, None)
-    }
-
-    pub fn execute_packed_with_flow(
-        &self,
-        inputs: Inputs,
-        context: &mut ExecutionContext,
-        flow: &mf_runtime::FlowValue,
-    ) -> Result<NodeResult, NodeExecutionError> {
-        self.execute_packed_configured(inputs, context, Some(flow))
-    }
-
-    fn execute_packed_configured(
-        &self,
-        inputs: Inputs,
-        context: &mut ExecutionContext,
         flow: Option<&mf_runtime::FlowValue>,
+        sink: &mut dyn mf_runtime::EmissionSink,
     ) -> Result<NodeResult, NodeExecutionError> {
         if let Some(error) = context.cancellation().failure() {
             return Err(error.into());
@@ -189,7 +173,7 @@ impl CallNode {
             }
             arguments.qualify_inputs(&self.body.inputs)?;
             self.body.inputs.mark_secrets(&mut arguments);
-            self.invoke(arguments, context, &mut mf_runtime::DiscardSink)
+            self.invoke(arguments, context, sink)
         })();
         if let Some(error) = context.cancellation().failure() {
             return Err(error.into());
@@ -333,6 +317,8 @@ mod tests {
             node.execute_packed(
                 Inputs::from([("arguments".into(), mf_runtime::ValueRef::from(json!({})))]),
                 context,
+                None,
+                &mut mf_runtime::DiscardSink,
             )
         })
     }

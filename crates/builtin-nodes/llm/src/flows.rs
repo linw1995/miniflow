@@ -67,12 +67,18 @@ mod tests {
             .unwrap();
         assert!(repeat.config.get("max_iterations").is_none());
         let loop_inputs = repeat.config["inputs"].as_object().unwrap();
-        assert_eq!(loop_inputs.len(), 7);
+        assert_eq!(loop_inputs.len(), 8);
+        assert_eq!(loop_inputs["compact"], json!({"nullable":"flow"}));
         assert_eq!(loop_inputs["prefix"], json!({"list":"object"}));
         assert_eq!(loop_inputs["tools"], json!({"map":"flow"}));
         assert_eq!(loop_inputs["tool_properties"], json!({"map":"object"}));
         let variables = repeat.config["variables"].as_array().unwrap();
-        assert_eq!(variables.len(), 5);
+        assert_eq!(variables.len(), 6);
+        assert!(
+            variables
+                .iter()
+                .any(|v| v["name"] == "checkpoint" && v["initial"] == json!({}))
+        );
         assert!(
             variables
                 .iter()
@@ -111,7 +117,22 @@ mod tests {
         ] {
             assert!(!serialized.contains(synthetic), "{synthetic}");
         }
-        assert_eq!(definition.outputs.len(), 7);
+        assert_eq!(definition.outputs.len(), 9);
+        assert!(
+            definition
+                .outputs
+                .iter()
+                .any(|o| o.name == "checkpoint" && o.port == "checkpoint")
+        );
+        assert!(
+            definition
+                .outputs
+                .iter()
+                .any(|output| output.name == "tool_output"
+                    && output.node.as_str() == "repeat"
+                    && output.port == "tool_output"
+                    && output.optional)
+        );
         assert!(
             definition
                 .nodes

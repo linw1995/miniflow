@@ -25,11 +25,13 @@ struct Parameter {
     env: Option<String>,
     #[serde(default, deserialize_with = "present_default")]
     default: Option<Value>,
-    #[serde(default = "default_secret")]
+    #[serde(default = "default_true")]
+    required: bool,
+    #[serde(default = "default_true")]
     secret: bool,
 }
 
-fn default_secret() -> bool {
+fn default_true() -> bool {
     true
 }
 
@@ -61,19 +63,14 @@ impl From<ParametersBuildError> for NodeBuildError {
 }
 
 struct ParametersNode {
-    parameters: BTreeMap<String, ValueType>,
+    ports: Vec<PortSpec>,
 }
 
 impl NodePortContract for ParametersNode {
     fn ports(&self) -> NodePorts {
-        let ports: Vec<_> = self
-            .parameters
-            .iter()
-            .map(|(name, value_type)| PortSpec::owned(name, value_type.clone(), true))
-            .collect();
         NodePorts {
-            inputs: ports.clone(),
-            outputs: ports,
+            inputs: self.ports.clone(),
+            outputs: self.ports.clone(),
         }
     }
 }
@@ -84,7 +81,17 @@ impl TaskNode for ParametersNode {
         inputs: Inputs,
         _context: &mut ExecutionContext,
     ) -> Result<NodeResult, NodeExecutionError> {
-        Ok(inputs.into())
+        let skipped = self
+            .ports
+            .iter()
+            .filter(|port| !port.required && !inputs.contains_key(port.name.as_ref()))
+            .map(|port| port.name.to_string())
+            .collect();
+        Ok(NodeResult {
+            outputs: inputs,
+            skipped,
+            ..Default::default()
+        })
     }
 }
 
@@ -92,7 +99,7 @@ fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
     let config: Config = deserialize_config(config)?;
     ensure!(!config.parameters.is_empty(), EmptyParametersSnafu);
     let mut bindings = BTreeMap::new();
-    let mut parameters = BTreeMap::new();
+    let mut ports = Vec::new();
     for (name, parameter) in config.parameters {
         ensure!(!name.is_empty(), EmptyNameSnafu);
         parameter
@@ -108,10 +115,14 @@ fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
             .validate(&name, &parameter.value_type)
             .map_err(ParametersBuildError::from)?;
         bindings.insert(name.clone(), binding);
-        parameters.insert(name, parameter.value_type);
+        ports.push(PortSpec::owned(
+            name,
+            parameter.value_type,
+            parameter.required,
+        ));
     }
     PreparedNode::new(
-        ParametersNode { parameters },
+        ParametersNode { ports },
         NodeMetadata {
             input_bindings: bindings,
             ..Default::default()

@@ -1,22 +1,6 @@
 use super::*;
 use serde_json::json;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
-
-fn gated(mut reply: Reply, prefix: String) -> (Reply, Arc<AtomicBool>) {
-    let tail = reply
-        .body
-        .strip_prefix(&prefix)
-        .unwrap()
-        .as_bytes()
-        .to_owned();
-    let release = Arc::new(AtomicBool::new(false));
-    reply.fragments = Some(vec![prefix.into_bytes(), tail]);
-    reply.release_after_prefix = Some(release.clone());
-    (reply, release)
-}
+use std::sync::atomic::Ordering;
 
 #[test]
 fn steering_during_a_running_tool_is_fifo_and_save_only_never_replays_it() {

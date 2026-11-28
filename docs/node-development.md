@@ -55,6 +55,10 @@ single-request JSON APIs, execution-time configuration templates, and the shared
 contract. Preparation performs no credential reads or network I/O. See
 [DeepSeek web search and fetch](workflows.md#deepseek-web-search-and-fetch).
 
+The optional [`mfn-coding`](../crates/builtin-nodes/coding/) package registers its workspace file and
+shell Tasks under `builtin.coding.*` on Linux and macOS. See [coding tools](coding-tools.md)
+for their contracts and trust boundary.
+
 Providers can opt execution-only fields into `mf_runtime::ConfigTemplate`. Parse each selected field during
 preparation, validate its `literal()` value when present, and add `references(field_name)` to the prepared
 `NodeMetadata.context_references`. Resolve it against the invocation's `ExecutionContext` and validate the result

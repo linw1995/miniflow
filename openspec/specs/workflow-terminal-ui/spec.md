@@ -1068,6 +1068,12 @@ unrelated internal model output MUST NOT become answer text.
 - **WHEN** answer previews arrive while the backend continues title generation
 - **THEN** the terminal keeps them provisional and indicates remaining work
 
+#### Scenario: Observe live command output without producing tool results
+
+- **WHEN** a tool publishes successive output snapshots before returning a result
+- **THEN** the expanded tool group shows the latest snapshot for that model call and tool call, separately from its arguments
+- **AND** progress neither creates a tool result nor advances the model conversation
+
 #### Scenario: Receive no increments
 
 - **WHEN** the backend completes without answer deltas

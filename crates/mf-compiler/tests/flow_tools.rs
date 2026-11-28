@@ -174,8 +174,9 @@ fn catalog_and_parallel_dispatch_use_actual_children_and_one_shared_chain() {
             .keys()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        ["calls", "tool_properties", "tools"]
+        ["calls", "model_call_id", "tool_properties", "tools"]
     );
+    assert_eq!(params.config["parameters"]["model_call_id"]["default"], "");
     let dispatch = &dispatch_call.children[&"dispatch".into()]["body"];
     assert_eq!(dispatch.children[&"execute".into()].len(), 2);
     let description = mf_compiler::describe_compiled(&plan).unwrap();

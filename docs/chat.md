@@ -440,6 +440,11 @@ Search and Fetch nodes also make the nested execution PiPs easier to observe tha
 short local operations. See [configured Flow tools](workflows.md#configured-flow-tools) for setup,
 provider charges, and latency limitations.
 
+The [coding Agent](../examples/chat-coding-flow.json) exposes `read`, `edit`, `write`, and `bash`.
+Use `bash` to discover files, create directories, and run checks. Each shell command starts in the
+caller-bound workspace, but is not confined to it. The runner uses one worker so batched file changes and tests run in call order.
+See the [runnable demo and trust boundary](coding-tools.md#run-the-coding-agent).
+
 The Agent accumulates assistant call batches, ordered parallel tool results, and the terminal
 assistant without echoing the admitted request. As long as the model requests tools, the Agent
 continues without a fixed round limit. Cancellation and the workflow step budget still apply.
@@ -497,7 +502,10 @@ three compaction modes—mirroring session title generation:
    passing `params.context` straight through to inherit resolved policy defaults (including any
    API-discovered `context_window`) from `context.compaction`, querying `llm.model_info` directly,
    or overriding thresholds and models, and export `append` / `replace_context`. Declaring
-   `replace_context` causes the host to yield automatically so compaction never runs twice.
+   `replace_context` causes the host to yield automatically so compaction never runs twice. The
+   [coding Agent](coding-tools.md#context-between-tool-rounds) uses this policy both between tool
+   batches and at turn completion, preserving the display transcript even when the next provider
+   request already uses a checkpoint.
 3. **Custom compaction:** A chatflow declaring `replace_context` with custom summarization (such as
    [examples/chat-context-flow.json](../examples/chat-context-flow.json)), or a custom
    `ConversationBackend` that returns `MessageUpdate::ReplaceContext`, reports a usage with
@@ -638,14 +646,20 @@ Tool-aware chatflows may select the shared Agent's optional `tool_call_delta` st
 contains a raw `arguments` fragment, its `model_call_id`, and the provider tool `index`, with optional
 `id` and `name` hints. An identity-only event has an empty `arguments` string. A fragment need not be
 valid JSON on its own.
-`PreviewEvent.delta` distinguishes `PreviewDelta::Text` from `PreviewDelta::ToolCall`. Neither enters
-history or model context. The calculator, context-replacement, and DeepSeek examples explicitly
+`PreviewEvent.delta` distinguishes `PreviewDelta::Text`, `PreviewDelta::ToolCall`, and
+`PreviewDelta::ToolOutput`. None enters history or model context. The calculator, context-replacement, and DeepSeek examples explicitly
 select `tool_call_delta`. A chatflow can select it without exposing `answer`.
+
+The coding example also selects `tool_output`: `{context: {model_call_id, tool_call_id, name}, value}`.
+`value` is a nonempty display snapshot (at most 16 KiB of UTF-8), **not** incremental text to append.
+The latest snapshot replaces the previous one for that call in the UI and the SQLite draft. It can
+be reopened after interruption, but it is never presented as a completed tool result. Only the
+terminal tool message goes back to the model.
 
 Terminal preview capture runs independently of drawing and inspection. Before publishing a frame,
 the terminal commits the available text and raw argument fragments to `preview_segments` and
 `preview_chunks` in `--chat-db`. These are ordinary tables keyed by turn, model call, and tool index,
-not a second message history. Each batch appends only new bytes. A frame addresses exact prefixes
+not a second message history. For text and arguments, each batch appends only new bytes. A frame addresses exact prefixes
 without copying the turn's bodies. There is no entry, byte, or argument-tail limit. If a draft write
 fails, the terminal reports it and stops extending that preview; the runner can still finish and save
 its result.

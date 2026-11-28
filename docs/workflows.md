@@ -543,8 +543,9 @@ A Flow owns its own callable properties. `builtin.constant` with `type: "flow"` 
 native capability (`value`) and its interface as plain JSON (`properties`), derived from the prepared
 body: `callable`, `startup`, `parameters`, `allowed`, `required`, `plain`, `outputs`, `streams` and
 `stdin`. Nothing is inferred from the source JSON, re-declared in a tool record, or exposed as a
-separate projection node. `callable` is true only for a body with exactly one startup node, no stdin and
-no incremental outputs; such a body also publishes `allowed` (unconfigured, non-secret input names
+separate projection node. `callable` requires exactly one startup node and no stdin. A Flow may have
+incremental outputs alongside its terminal interface, but a stream-only result is not callable.
+A callable body publishes `allowed` (unconfigured, non-secret input names
 mapped to JSON Schema) and `required` (effective required names, already excluding configured inputs
 and inputs with an environment or default). `plain` reports the sole required string `content` output that encodes as plain text.
 
@@ -560,7 +561,8 @@ native `Map(Flow)`. The matching properties map is JSON and can be assembled wit
 CEL. A fixed catalog Iteration visits the properties map, using each business key as the tool name, and
 projects a model definition with a CEL `builtin.code` node. Three assertions validate the whole
 catalog before any model request, including when no tools are called: each tool has exactly one startup
-node with a terminal interface and no stdin, only declared inputs are documented, and no public input
+node with a terminal interface and no stdin, its only permitted stream is a string named `progress`,
+only declared inputs are documented, and no public input
 is runtime-only. Dispatch consumes original calls and the same properties map.
 
 `mfn-llm.tool-uses` is an ordinary composed Flow. Per call it classifies the request with CEL, then a
@@ -625,14 +627,14 @@ dispatch remains terminal-only; native dynamic Calls and existing observed-item 
 unchanged.
 
 The Agent accepts complete `params.messages` as a read-only Loop prefix and calls `mfn-llm.tool-catalog`
-once before the first request. The Loop carries only the generated suffix and continues while the
+once before the first request. The Loop keeps the complete generated suffix and continues while the
 model requests tools or a [steering message](chat.md#queuing-and-steering) arrives at a complete
 reply boundary, without a fixed round limit. `callback:steering` is a finite, zero-argument
 host-bindable Call, not a transport endpoint or model tool. After a completed reply or a completed
 tool batch, the Agent calls it with no arguments to pull any pending `messages: List(Object)`. It
 skips the call on failed outcomes and never sends or lets the callback rewrite its transcript.
 A completed text answer continues only on nonempty input; a failed outcome never continues. Without
-a caller source the local default returns an empty list, leaving the suffix unchanged. The
+a host binding the local default returns an empty list, leaving the suffix unchanged. The
 [request Flow](../crates/builtin-nodes/llm/workflows/agent-request.json) forwards the prefix unchanged
 when the suffix is empty, avoiding CEL conversion of the request history on the first model request.
 After a completed tool round, it joins the prefix and the generated messages with CEL, while the
@@ -644,6 +646,21 @@ Completion also returns `status`, final `text`, `usages`, and `error`, while `an
 text, including tool-call preambles. Captured provider failures retain completed rounds and their
 usages with failed status; an unresolved batch is permitted only at the end of a failed prefix.
 Cancellation and the [workflow step budget](#structured-loop) still apply.
+
+A caller can supply `params.compact`, an optional native Flow (not a model tool). The Agent invokes
+it only after collecting an entire tool batch, before pulling steering for the next provider request.
+A failed policy leaves pending steering unclaimed. Its required
+inputs are `params.generated` (all additions so far), `params.checkpoint` (initially `{}`), and
+`params.usages` (the just-completed model call). Its terminal `result` is a `Map(Any)` with
+`replacement`, `usages` (new auxiliary calls only), and `error`. A replacement supplies `request`
+(the complete next model request); additional fields belong to the caller. Return `null` for no
+replacement. The Agent stamps a new checkpoint with `through`, the number of generated messages
+it covers. Later requests append only the suffix after `through`, including any steering pulled at
+that boundary. A nonempty error stops the loop as failed without
+repeating a tool or starting another model call. The Agent exports the last `checkpoint` separately
+from its unabridged `messages` and does not publish session context itself. Omitting the policy
+retains the ordinary prefix-plus-generated behavior and makes no auxiliary calls.
+
 The same Agent handles empty, single-tool, and multi-tool collections. For no tools, supply empty
 `tools` and `tool_properties` objects with `builtin.object` and `fields: {}`; there is no separate
 empty-Agent definition.
@@ -776,8 +793,11 @@ business results. Recovery is fail-closed: explicit ordinary node execution fail
 Call wrappers, are recoverable. Providers may also return a typed
 `NodeExecutionError::BusinessFailed` retaining their own domain-error source. Unknown plugin errors
 are not assumed to be business failures.
-Invocation drains incremental emissions terminally without exposing Router stream ports. Ordinary
-`workflow.call` syntax and topology are unchanged.
+By default, the Router exposes no stream ports. Set `config.forward_stream` to a child stream name
+to forward each matching emission on the optional `update` port as `{context, value}`; other child
+emissions are ignored. `stream_context` is an optional object input (default `{}`), not a child
+argument. A route without the stream still returns its normal terminal envelope. The Agent uses this
+to tag `progress` with the model call, tool call and tool name. Ordinary `workflow.call` is unchanged.
 
 ## Node clusters
 
@@ -1066,8 +1086,10 @@ Unknown configuration fields and defaults that do not match their declared type 
 ```
 
 For each parameter, resolution uses an explicitly supplied argument first, then its named
-environment variable, then its default. If none is available, execution fails before any
-node runs. Explicit null and empty strings count as supplied values. A present but invalid
+environment variable, then its default. If none is available, a required parameter (the default)
+fails before any node runs. Set `required: false` to skip the same-name output when the input is
+absent, including for a native Flow with no environment or JSON default. Explicit null (for a
+nullable type) and empty strings count as supplied values. A present but invalid
 argument or environment value fails without falling back. Strings retain their text;
 other environment values use the same JSON conversion as named CLI arguments, including
 `null` for nullable strings. Environment names must be nonempty and contain neither `=`
@@ -1799,7 +1821,7 @@ retaining completed immediate assignments. A failed pass never publishes partial
 external side effects are not rolled back. Values retain their native identity and secret labels.
 TaskStream deltas remain separate under `stream_outputs` and cannot be selected as terminal updates.
 
-The built-in Agent uses this form for `generated`, `usages`, `text`, `outcome`, and `error`; no assignment
+The built-in Agent uses this form for `generated`, `checkpoint`, `usages`, `text`, `outcome`, and `error`; no assignment
 nodes are needed in its body. Streaming `answer` remains independent of those terminal updates.
 
 ### Forwarding child streams

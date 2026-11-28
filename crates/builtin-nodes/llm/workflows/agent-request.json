@@ -20,6 +20,10 @@
             },
             "secret": false
           },
+          "checkpoint": {
+            "type": "object",
+            "default": {}
+          },
           "generated": {
             "type": {
               "list": "object"
@@ -67,15 +71,19 @@
           },
           "generated": {
             "list": "object"
-          }
+          },
+          "checkpoint": "object"
         },
         "code": {
-          "messages": "prefix + generated"
+          "messages": "has(checkpoint.through) ? checkpoint.request + generated.slice(int(checkpoint.through), size(generated)) : prefix + generated"
         }
       },
       "inputs": {
         "prefix": {
           "$ref": "params.prefix"
+        },
+        "checkpoint": {
+          "$ref": "params.checkpoint"
         },
         "generated": {
           "$ref": "params.generated"

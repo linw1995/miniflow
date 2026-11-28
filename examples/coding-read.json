@@ -1,0 +1,73 @@
+{
+  "version": "2026-11-28",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../crates/builtin-nodes/core"
+    },
+    "coding": {
+      "package": "mfn-coding",
+      "path": "../crates/builtin-nodes/coding"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "workspace_root": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string",
+            "secret": false
+          },
+          "start_line": {
+            "type": "uint",
+            "secret": false,
+            "default": 1
+          },
+          "limit": {
+            "type": "uint",
+            "secret": false,
+            "default": 2000
+          }
+        }
+      }
+    },
+    {
+      "id": "read",
+      "kind": "builtin.coding.read",
+      "config": {
+        "workspace_root": {
+          "$ref": "params.workspace_root"
+        }
+      },
+      "inputs": {
+        "path": {
+          "$ref": "params.path"
+        },
+        "start_line": {
+          "$ref": "params.start_line"
+        },
+        "limit": {
+          "$ref": "params.limit"
+        }
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "content",
+      "node": "read",
+      "port": "content"
+    },
+    {
+      "name": "next_line",
+      "node": "read",
+      "port": "next_line",
+      "optional": true
+    }
+  ]
+}

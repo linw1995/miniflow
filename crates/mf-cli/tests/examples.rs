@@ -1,5 +1,8 @@
 #![cfg(feature = "development-support")]
 
+#[path = "support/examples.rs"]
+mod example_support;
+use example_support::{CODING_AGENT, streamed_tool_calls};
 use mfn_deepseek::test_support as deepseek_support;
 use mfn_llm::test_support as llm_support;
 use serde_json::{Value, json};
@@ -66,17 +69,6 @@ fn streamed_calculator_calls() -> llm_support::Reply {
     streamed_tool_calls(calculator_calls())
 }
 
-fn streamed_tool_calls(mut calls: Value) -> llm_support::Reply {
-    let mut streamed = llm_support::Reply::stream_text("");
-    for (index, call) in calls.as_array_mut().unwrap().iter_mut().enumerate() {
-        call["index"] = json!(index);
-    }
-    let chunk = json!({"id":"tool-response","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{"tool_calls":calls},"finish_reason":null}]});
-    let finish = json!({"id":"tool-response","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}});
-    streamed.body = format!("data: {chunk}\n\ndata: {finish}\n\ndata: [DONE]\n\n");
-    streamed
-}
-
 fn append_result(messages: Value, usages: Value) -> Value {
     json!({"append":{"status":"succeeded","messages":messages,"usages":usages,"error":""}})
 }
@@ -140,7 +132,7 @@ fn deepseek_messages() -> Value {
     ])
 }
 
-fn examples() -> [(&'static str, Option<&'static str>, Value); 25] {
+fn examples() -> [(&'static str, Option<&'static str>, Value); 27] {
     [
         (
             "deepseek-fetch.json",
@@ -156,11 +148,24 @@ fn examples() -> [(&'static str, Option<&'static str>, Value); 25] {
         ("cel-scalar.json", None, json!({"doubled": 42})),
         ("clustered-workflow.json", None, json!({"doubled": 42})),
         (
+            "coding-read.json",
+            None,
+            json!({"content":"second\n", "next_line":3}),
+        ),
+        (
             "chat-calculator-flow.json",
             None,
             append_result(
                 calculator_messages(),
                 json!([agent_usage(0), agent_usage(1)]),
+            ),
+        ),
+        (
+            CODING_AGENT,
+            None,
+            append_result(
+                json!([{"role":"assistant", "content":"reply", "metadata":{"coding_workspace":"$WORKSPACE"}}]),
+                json!([agent_usage(0)]),
             ),
         ),
         (
@@ -288,7 +293,7 @@ fn assert_agent_layouts(executable: &Path, routes: &[&str]) {
     let scopes: &[(&[&str], usize, &[&str])] = &[
         (&["agent"], 3, &["repeat", "result"]),
         (&["agent", "catalog", "project"], 2, &["definition"]),
-        (&["agent", "repeat"], 5, &["request", "turn", "dispatch"]),
+        (&["agent", "repeat"], 6, &["request", "turn", "dispatch"]),
         (&["agent", "repeat", "request"], 1, &[]),
         (&["agent", "repeat", "dispatch"], 2, &["dispatch"]),
         (
@@ -370,49 +375,18 @@ fn assert_agent_layouts(executable: &Path, routes: &[&str]) {
 #[cfg(unix)]
 #[test]
 fn documented_examples_compile_and_produce_expected_outputs() {
-    use std::{os::unix::fs::symlink, process::Command};
+    use std::process::Command;
 
     let temporary = tempfile::Builder::new()
         .prefix("mf examples ")
         .tempdir()
         .unwrap();
-    let definitions = temporary.path().join("examples");
     let runtime = temporary.path().join("runtime");
-    fs::create_dir(&definitions).unwrap();
     fs::create_dir(&runtime).unwrap();
-    // Preserve the examples' relative paths while keeping lock files out of the checkout.
-    symlink(workspace().join("crates"), temporary.path().join("crates")).unwrap();
-    let auxiliary = definitions.join("agent-calculator");
-    fs::create_dir(&auxiliary).unwrap();
-    for entry in fs::read_dir(workspace().join("examples/agent-calculator")).unwrap() {
-        let source = entry.unwrap().path();
-        fs::copy(&source, auxiliary.join(source.file_name().unwrap())).unwrap();
-    }
-    let deepseek_auxiliary = definitions.join("agent-deepseek");
-    fs::create_dir(&deepseek_auxiliary).unwrap();
-    for entry in fs::read_dir(workspace().join("examples/agent-deepseek")).unwrap() {
-        let source = entry.unwrap().path();
-        fs::copy(
-            &source,
-            deepseek_auxiliary.join(source.file_name().unwrap()),
-        )
-        .unwrap();
-    }
 
     for (name, input, expected) in examples() {
-        let definition = definitions.join(name);
-        if name == "chat-context-flow.json" {
-            fs::copy(
-                workspace().join("examples/chat-calculator-flow.json"),
-                definitions.join("chat-calculator-flow.json"),
-            )
-            .unwrap();
-            fs::create_dir_all(&auxiliary).unwrap();
-            for entry in fs::read_dir(workspace().join("examples/agent-calculator")).unwrap() {
-                let source = entry.unwrap().path();
-                fs::copy(&source, auxiliary.join(source.file_name().unwrap())).unwrap();
-            }
-        }
+        let sources = tempfile::tempdir_in(temporary.path()).unwrap();
+        let definition = example_support::stage_example(sources.path(), name);
         let server = (name.starts_with("llm-") || name.starts_with("chat-")).then(|| {
             llm_support::Server::start(if name == "chat-calculator-flow.json" {
                 vec![
@@ -438,6 +412,8 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                     llm_support::Reply::stream_text("reply"),
                     llm_support::Reply::text("reply"),
                 ]
+            } else if name == CODING_AGENT {
+                vec![llm_support::Reply::stream_text("reply")]
             } else if name == "chat-loop-flow.json" {
                 vec![llm_support::Reply::stream_text("reply"); 2]
             } else {
@@ -462,9 +438,7 @@ fn documented_examples_compile_and_produce_expected_outputs() {
         if let Some(server) = &server
             && !name.starts_with("chat-")
         {
-            let mut value: Value =
-                serde_json::from_slice(&fs::read(workspace().join("examples").join(name)).unwrap())
-                    .unwrap();
+            let mut value: Value = serde_json::from_slice(&fs::read(&definition).unwrap()).unwrap();
             let config = if name == "llm-loop.json" {
                 &mut value["nodes"][0]["config"]["body"]["nodes"][0]["config"]
             } else if name == "llm-parameters.json" {
@@ -475,8 +449,6 @@ fn documented_examples_compile_and_produce_expected_outputs() {
             config["base_url"] = server.base_url.clone().into();
             config["model"] = "example-model".into();
             fs::write(&definition, value.to_string()).unwrap();
-        } else {
-            fs::copy(workspace().join("examples").join(name), &definition).unwrap();
         }
         let stem = Path::new(name).file_stem().unwrap();
         let executable = runtime.join(stem);
@@ -511,26 +483,21 @@ fn documented_examples_compile_and_produce_expected_outputs() {
             "{name}: compilation emitted warnings:\n{stderr}",
         );
 
+        // Agent turns and tool dispatch must work without their original Flow sources.
+        drop(sources);
         if matches!(
             name,
-            "chat-calculator-flow.json" | "chat-context-flow.json" | "chat-deepseek-flow.json"
+            "chat-calculator-flow.json"
+                | "chat-context-flow.json"
+                | "chat-deepseek-flow.json"
+                | CODING_AGENT
         ) {
-            // The complete Agent, its tool and provider Flows must be frozen into
-            // the runner, not reopened during either model turn or tool dispatch.
-            fs::remove_file(&definition).unwrap();
-            fs::remove_dir_all(if name == "chat-deepseek-flow.json" {
-                &deepseek_auxiliary
-            } else {
-                &auxiliary
-            })
-            .unwrap();
             fs::remove_dir_all(&build).unwrap();
             if name == "chat-context-flow.json" {
                 use mf_telemetry::event::ScopePathEntry;
                 use mf_tui::graph::{BodyDisplay, ConnectionView, GraphLayout};
                 use std::collections::BTreeMap;
 
-                fs::remove_file(definitions.join("chat-calculator-flow.json")).unwrap();
                 let description = mf_tui::manifest::read_manifest(&executable)
                     .unwrap()
                     .description()
@@ -582,12 +549,26 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                 mf_tui::run::ObservationView::new(&description).unwrap();
             } else if name == "chat-deepseek-flow.json" {
                 assert_agent_layouts(&executable, &["search", "fetch"]);
+            } else if name == CODING_AGENT {
+                assert_agent_layouts(&executable, &["bash", "edit", "read", "write"]);
             } else {
                 assert_agent_layouts(&executable, &["calculator"]);
             }
         }
         let mut command = Command::new(&executable);
         command.current_dir(&runtime).env("PATH", "");
+        if name == "coding-read.json" {
+            let root = temporary.path().join("coding-workspace");
+            fs::create_dir(&root).unwrap();
+            fs::write(root.join("input.txt"), "first\nsecond\nthird\n").unwrap();
+            let inputs = json!({
+                "params.workspace_root": root,
+                "params.path": "input.txt",
+                "params.start_line": 2,
+                "params.limit": 1,
+            });
+            command.args(["--inputs", &inputs.to_string()]);
+        }
         if let Some(server) = &server {
             let inputs = if name == "llm-loop.json" {
                 json!({"repeat.prompt":"Hello", "repeat.history":[], "repeat.text":""})
@@ -617,7 +598,13 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                     "params.deepseek_api_key":"synthetic-deepseek-key"
                 })
             } else if name.starts_with("chat-") {
-                json!({"params.messages":[{"role":"user","content":"Hello"}], "params.model":"example-model", "params.base_url":server.base_url})
+                let mut inputs = json!({"params.messages":[{"role":"user","content":"Hello"}], "params.model":"example-model", "params.base_url":server.base_url});
+                if name == CODING_AGENT {
+                    let root = temporary.path().join("chat-workspace");
+                    fs::create_dir(&root).unwrap();
+                    inputs["params.workspace_root"] = json!(root);
+                }
+                inputs
             } else if name == "llm-tools.json" {
                 json!({"model.messages":[{"role":"user","content":"Hello"}]})
             } else if name == "llm-parameters.json" {
@@ -671,6 +658,7 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                 | "chat-calculator-flow.json"
                 | "chat-context-flow.json"
                 | "chat-deepseek-flow.json"
+                | CODING_AGENT
         ) {
             let records: Vec<Value> = serde_json::Deserializer::from_slice(&output.stdout)
                 .into_iter()
@@ -753,6 +741,11 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                 usage["started_at"] = 0.into();
                 assert!(usage.get("timing").is_none_or(Value::is_null));
             }
+        }
+        if name == CODING_AGENT {
+            let root = &mut actual["append"]["messages"][0]["metadata"]["coding_workspace"];
+            assert_eq!(*root, json!(temporary.path().join("chat-workspace")));
+            *root = "$WORKSPACE".into();
         }
         assert_eq!(actual, expected, "{name}: unexpected workflow output");
         if name == "chat-calculator-flow.json" {

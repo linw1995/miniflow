@@ -153,6 +153,7 @@ fn parallel_tool_argument_previews_precede_the_answer_without_changing_the_trans
                 .contains("synthetic-private-key")
         );
         match event.delta {
+            PreviewDelta::ToolOutput { .. } => panic!("this tool has no output stream"),
             PreviewDelta::Text { delta } => {
                 if delta.text == "Final answer" {
                     assert_eq!(fragments.len(), 2);

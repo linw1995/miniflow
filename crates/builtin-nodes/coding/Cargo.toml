@@ -1,0 +1,17 @@
+[package]
+name = "mfn-coding"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Workspace file and shell tools for miniflow"
+
+[dependencies]
+inventory.workspace = true
+mf-runtime.workspace = true
+rustix = { workspace = true, features = ["fs", "process"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+snafu.workspace = true
+tempfile.workspace = true
+uuid = { workspace = true, features = ["v4"] }
