@@ -936,6 +936,107 @@ fn cluster_colors_match_borders_and_labels_across_views_and_folds() {
 }
 
 #[test]
+fn cluster_frames_stay_legible_when_connections_cross_them() {
+    let definition = mf_compiler::WorkflowDefinition::from_json(include_str!(
+        "../../../examples/chat-title-flow.json"
+    ))
+    .unwrap();
+    let plan = mf_compiler::plan_definition(&definition).unwrap();
+    let graph = mf_compiler::describe_compiled(&plan).unwrap();
+    let layout = GraphLayout::with_view(&graph, ConnectionView::Ports).unwrap();
+    assert_eq!(layout.unresolved_count(), 0);
+    for cluster in layout
+        .clusters()
+        .iter()
+        .filter(|cluster| !cluster.collapsed)
+    {
+        let rect = cluster.rect;
+        let right = rect.x + rect.width - 1;
+        let bottom = rect.y + rect.height - 1;
+        for (index, route) in layout.routes().iter().enumerate() {
+            for segment in route.segments() {
+                let low = segment.low();
+                let high = segment.high();
+                match segment.axis() {
+                    mf_tui::graph::routing::Axis::Horizontal => assert!(
+                        !((low.y == rect.y || low.y == bottom)
+                            && low.x <= right
+                            && high.x >= rect.x),
+                        "edge {index} runs along {} frame rows",
+                        cluster.label
+                    ),
+                    mf_tui::graph::routing::Axis::Vertical => assert!(
+                        !((low.x == rect.x || low.x == right)
+                            && low.y <= bottom
+                            && high.y >= rect.y),
+                        "edge {index} runs along {} frame columns",
+                        cluster.label
+                    ),
+                }
+            }
+        }
+    }
+
+    let (width, height) = layout.size();
+    let mut buffer = Buffer::empty(Rect::new(0, 0, width as u16, height as u16));
+    GraphView::new(&layout).render(buffer.area, &mut buffer);
+    let mut junctions = 0;
+    for cluster in layout
+        .clusters()
+        .iter()
+        .filter(|cluster| !cluster.collapsed)
+    {
+        let rect = cluster.rect;
+        let right = rect.x + rect.width - 1;
+        let bottom = rect.y + rect.height - 1;
+        let label_width = ratatui::text::Span::raw(format!(" {} ", cluster.label)).width() as u32;
+        let label = rect.x + 2..rect.x + 2 + label_width;
+        for x in rect.x + 1..right {
+            let top = buffer
+                .cell(Position::new(x as u16, rect.y as u16))
+                .unwrap()
+                .symbol();
+            let bottom = buffer
+                .cell(Position::new(x as u16, bottom as u16))
+                .unwrap()
+                .symbol();
+            if !label.contains(&x) {
+                assert!(
+                    matches!(top, "─" | "┼"),
+                    "{} top border at {x}: {top:?}",
+                    cluster.label
+                );
+            }
+            assert!(
+                matches!(bottom, "─" | "┼"),
+                "{} bottom border at {x}: {bottom:?}",
+                cluster.label
+            );
+            junctions += usize::from(top == "┼") + usize::from(bottom == "┼");
+        }
+        for y in rect.y + 1..bottom {
+            let left = buffer
+                .cell(Position::new(rect.x as u16, y as u16))
+                .unwrap()
+                .symbol();
+            let right = buffer
+                .cell(Position::new(right as u16, y as u16))
+                .unwrap()
+                .symbol();
+            for (side, symbol) in [("left", left), ("right", right)] {
+                assert!(
+                    matches!(symbol, "│" | "┼" | "─" | "▶"),
+                    "{} {side} border at {y}: {symbol:?}",
+                    cluster.label
+                );
+            }
+            junctions += usize::from(left == "┼") + usize::from(right == "┼");
+        }
+    }
+    assert!(junctions > 0, "fixture should exercise frame crossings");
+}
+
+#[test]
 fn cluster_annotations_wrap_in_the_graph_and_stay_clear_of_connections() {
     let mut graph = description();
     graph.version = WorkflowDescriptionVersion::V2026_10_23;

@@ -722,8 +722,10 @@ nodes. The [clustered example](../examples/clustered-workflow.json) compiles to 
 `label` is the short single-line title shown in the graph. `annotation` is the longer explanation shown inside the
 cluster and in Details. Cluster geometry reserves the title's full terminal-cell width in both expanded and collapsed
 views. Annotations wrap above the leftmost expanded member or below the collapsed node's summary, with space reserved so
-connections cannot overwrite the text. Both views preserve line breaks and indentation. Details wraps annotations to
-the pane width and scrolls by the visible page height.
+connections cannot overwrite the text. Expanded cluster boundaries also reserve their frame cells: connections leave and
+enter through member ports and cross a frame only perpendicularly, with pass-through crossings drawn as `┼` junctions.
+Both views preserve line breaks and indentation. Details wraps annotations to the pane width and scrolls by the visible
+page height.
 Both are required and bounded. Members belong to the containing scope, must be unique, and a node can belong to at most
 one cluster. Clusters are flat and cannot contain `%loop` or `%iteration` synthetic sources. A cluster may contain a
 Loop or Iteration node as an opaque member.
