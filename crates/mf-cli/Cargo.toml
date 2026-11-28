@@ -27,6 +27,8 @@ clap = { workspace = true, features = ["derive"] }
 snafu.workspace = true
 
 [dev-dependencies]
+# Exercise the runtime host API against an installed runner.
+mf-runtime = { workspace = true, features = ["callback-host"] }
 # Chat persistence assertions and model fixtures.
 diesel = { workspace = true, features = ["sqlite"] }
 mfn-deepseek = { workspace = true, features = ["test-support"] }

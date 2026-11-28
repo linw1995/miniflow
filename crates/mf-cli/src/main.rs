@@ -351,7 +351,9 @@ fn run_direct(
     let path = resolve_program(&executable).with_context(|_| ExecuteSnafu { path: executable })?;
     mf_tui::manifest::read_manifest(&path).with_context(|_| InspectSnafu { path: path.clone() })?;
     let mut command = std::process::Command::new(&path);
-    command.stdin(std::process::Stdio::null());
+    command
+        .stdin(std::process::Stdio::null())
+        .env_remove(mf_runtime::callback_rpc::LAUNCH_ENV);
     for _ in 0..verbose {
         command.arg("--verbose");
     }

@@ -84,6 +84,7 @@ fn direct_run_preserves_arguments_business_output_and_exit_status_without_forwar
         &runner,
         Some(&manifest.to_bytes().unwrap()),
         r#"
+[ -z "${MF_RUNNER_RPC_V1+x}" ] || exit 71
 if read -r unexpected; then exit 72; fi
 if [ "$1" = --read.path=signal ]; then kill -TERM $$; fi
 python3 -c 'import json,sys;print(json.dumps({"args":sys.argv[1:]}))' "$@"
@@ -116,6 +117,7 @@ exit 37
             .arg("run")
             .arg(&runner)
             .args(flags)
+            .env("MF_RUNNER_RPC_V1", "must not reach the child")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

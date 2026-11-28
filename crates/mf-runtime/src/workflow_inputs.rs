@@ -309,6 +309,11 @@ pub(super) fn pointer(parent: &str, key: &str) -> String {
 }
 
 impl WorkflowArguments {
+    pub(super) fn check_encoded_size(&self) -> Result<(), WorkflowInputError> {
+        let bytes = serde_json::to_vec(self).context(JsonSnafu)?;
+        Self::check_size(bytes.len())
+    }
+
     pub(super) fn check_size(size: usize) -> Result<(), WorkflowInputError> {
         ensure!(
             size <= MAX_WORKFLOW_INPUT_BYTES,

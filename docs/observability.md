@@ -127,7 +127,7 @@ Graph-relative event validation checks workflow/node identity, position, sequenc
 
 ## Embedded manifest format
 
-Manifest payload version `2026-11-25` separates original definition resources from a public inspection projection.
+Manifest payload version `2026-11-27` separates original definition resources from a public inspection projection.
 `definition` retains the root declaration; `entry` and `sources` identify the captured UTF-8 definition resources.
 The `descriptor` contains the validated observation `description` and prepared `input_schema`, including workflow identity,
 actual execution mode, child observation scopes, provider-declared types, bindings, and conditional stdin ownership.
@@ -138,7 +138,7 @@ Compiler IR, graph relationships, scheduling layouts, and typed optimization evi
 The definition contains full static configuration, including private literals, parameter defaults, and dependencies.
 Configuration expressions remain unresolved; invocation values and environment-derived values are not materialized.
 Execution descriptions store the mode; `event_schema_version()` derives the event protocol without a duplicate field.
-Since miniflow has not released, older manifest layouts are unsupported and require recompilation. Invalid orders,
+Declared callbacks and explicitly granted runner I/O may share a local RPC socket; OTLP remains independent. Without an output grant business results stay on stdout. Older manifest versions require recompilation. Invalid orders,
 inconsistent input contracts, missing required facts, and unexpected properties fail validation.
 The combined UTF-8 JSON payload remains limited to 16 MiB.
 New Linux and macOS runners embed these bytes in `.mf_manifest` (ELF) or `__DATA,__mf_manifest` (Mach-O), respectively.

@@ -157,9 +157,25 @@ fn wait_ready(_: &File, _: bool, _: &StreamCancellation) -> io::Result<()> {
     ))
 }
 
-/// Owns the business output descriptor of a generated runner. Process stdin is never a workflow input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticLevel {
+    Warning,
+    Error,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerDiagnostic {
+    pub level: DiagnosticLevel,
+    pub message: String,
+}
+
+/// Reserves the runner's standard streams even when an invocation routes business output elsewhere.
 pub struct RunnerStdio {
     output: File,
+    #[cfg(unix)]
+    rpc: Option<crate::callback_rpc::Client>,
 }
 
 impl RunnerStdio {
@@ -179,7 +195,7 @@ impl RunnerStdio {
             {
                 return Err(io::Error::last_os_error());
             }
-            Ok(Self { output })
+            Ok(Self { output, rpc: None })
         };
         reserve().context(StdioSnafu)
     }
@@ -193,11 +209,70 @@ impl RunnerStdio {
         .context(StdioSnafu)
     }
 
+    #[cfg(unix)]
+    pub fn attach_host(
+        &mut self,
+        sites: &crate::callback::CallbackSites,
+        cancellation: &StreamCancellation,
+    ) -> Result<
+        (
+            crate::callback::HostCallbacks,
+            Option<crate::WorkflowArguments>,
+        ),
+        crate::callback::CallbackError,
+    > {
+        self.rpc = crate::callback_rpc::from_env(sites, cancellation)?;
+        let Some(client) = &mut self.rpc else {
+            return Ok(Default::default());
+        };
+        Ok((client.callbacks(), client.take_inputs()?))
+    }
+
+    pub fn diagnostic(
+        &self,
+        level: DiagnosticLevel,
+        message: std::fmt::Arguments<'_>,
+    ) -> Result<(), crate::callback::CallbackError> {
+        #[cfg(unix)]
+        if let Some(client) = &self.rpc
+            && client.io().diagnostics
+        {
+            return client.diagnostic(RunnerDiagnostic {
+                level,
+                message: message.to_string(),
+            });
+        }
+        let _ = level;
+        eprintln!("{message}");
+        Ok(())
+    }
+
+    pub fn warn(&self, message: std::fmt::Arguments<'_>) {
+        // Observation warnings do not replace a workflow failure. A failed RPC write poisons the invocation.
+        let _ = self.diagnostic(DiagnosticLevel::Warning, message);
+    }
+
+    pub fn finish(self) -> Result<(), crate::callback::CallbackError> {
+        #[cfg(unix)]
+        if let Some(client) = self.rpc {
+            client.finish()?;
+        }
+        Ok(())
+    }
+
     pub fn write_output(
         &self,
         values: crate::NodeValues,
         cancellation: &StreamCancellation,
     ) -> Result<(), StreamError> {
+        #[cfg(unix)]
+        if let Some(client) = &self.rpc
+            && client.io().output
+        {
+            return client
+                .output(values, cancellation)
+                .context(crate::stream_instance::OutputRpcSnafu);
+        }
         let mut bytes = serde_json::to_vec(&values).context(OutputEncodeSnafu)?;
         bytes.push(b'\n');
         let mut remaining = bytes.as_slice();
@@ -221,7 +296,7 @@ impl RunnerStdio {
         file.flush().context(OutputWriteSnafu)
     }
 
-    pub fn run(self, instance: StreamInstance) -> Result<StreamSummary, StreamError> {
+    pub fn run(&self, instance: StreamInstance) -> Result<StreamSummary, StreamError> {
         let cancellation = instance.cancellation();
         while let Ok(Some(delivery)) = instance.receive() {
             match self.write_output(delivery.output().outputs.clone(), &cancellation) {
@@ -231,8 +306,9 @@ impl RunnerStdio {
                     }
                 }
                 Err(error) => {
-                    delivery.fail(error);
-                    break;
+                    delivery.fail(error.clone());
+                    let _ = instance.join();
+                    return Err(error);
                 }
             }
         }
@@ -247,6 +323,7 @@ mod tests {
     #[test]
     fn output_supports_dev_null_but_preserves_cancellation_and_write_failures() {
         let output = RunnerStdio {
+            rpc: None,
             output: File::options().write(true).open("/dev/null").unwrap(),
         };
         let cancel = StreamCancellation::default();
@@ -264,6 +341,7 @@ mod tests {
 
         let file = tempfile::NamedTempFile::new().unwrap();
         let read_only = RunnerStdio {
+            rpc: None,
             output: File::open(file.path()).unwrap(),
         };
         assert!(matches!(

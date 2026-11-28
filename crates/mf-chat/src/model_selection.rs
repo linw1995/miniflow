@@ -922,7 +922,7 @@ mod tests {
         }))
         .unwrap();
         let manifest = mf_runtime::WorkflowManifest {
-            version: mf_runtime::WorkflowManifestVersion::V2026_11_25,
+            version: mf_runtime::WorkflowManifestVersion::V2026_11_27,
             definition,
             entry: "chat.json".into(),
             sources: BTreeMap::new(),
@@ -930,6 +930,7 @@ mod tests {
                 description,
                 input_schema,
                 node_targets: Vec::new(),
+                callbacks: Default::default(),
             },
         };
         ChatContract::from_manifest(&manifest).unwrap()

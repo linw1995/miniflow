@@ -139,6 +139,9 @@ pub fn scope(
                     quote!(mf_runtime::PreparedSubgraph::from_plan(#exports(#child_flow)?, vec![#(#identities),*], #interface()))
                 };
                 let origin_path = &child_path;
+                let bind_callback = child.relations.callback_name().map(|name| quote! {
+                    let #body_name = registry.bind_callback_body(&[#(#origin_path.into()),*], #name, #body_name);
+                });
                 bodies.push(quote! {
                     let #body_name = (|| -> Result<mf_runtime::PreparedSubgraph, mf_runtime::generated::BindError> {
                         #(#steps)*
@@ -146,6 +149,7 @@ pub fn scope(
                             .with_relations(#relations)
                             .with_origin(mf_compiled_flow_origin(vec![#(#origin_path.into()),*])?))
                     })().context(mf_runtime::generated::ChildSnafu { definition_id: mf_runtime::DefinitionId::from(#physical_id) })?;
+                    #bind_callback
                 });
                 entries.push(quote!((#binding.into(), #body_name)));
             }

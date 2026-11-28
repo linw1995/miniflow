@@ -69,6 +69,11 @@ pub enum StreamError {
         #[snafu(source(from(std::io::Error, Arc::new)))]
         source: Arc<std::io::Error>,
     },
+    #[snafu(display("stream output RPC failed: {source}"), visibility(pub))]
+    OutputRpc {
+        #[snafu(source(from(crate::callback::CallbackError, Arc::new)))]
+        source: Arc<crate::callback::CallbackError>,
+    },
     #[snafu(display("stream output failed: {source}"), visibility(pub))]
     OutputEncode {
         #[snafu(source(from(serde_json::Error, Arc::new)))]
@@ -114,7 +119,10 @@ impl StreamError {
             Self::InputFailure { .. } | Self::InputRecord { .. } | Self::InputValidation { .. } => {
                 "input"
             }
-            Self::Output { .. } | Self::OutputWrite { .. } | Self::OutputEncode { .. } => "output",
+            Self::Output { .. }
+            | Self::OutputWrite { .. }
+            | Self::OutputRpc { .. }
+            | Self::OutputEncode { .. } => "output",
             Self::Resource { .. } => "resource",
             Self::Producer { source, .. } | Self::Event { source, .. } => {
                 execution_error_phase(source.as_ref())
@@ -697,6 +705,7 @@ fn workflow_error_node(error: &crate::WorkflowRunError) -> String {
         | crate::WorkflowRunError::NodeExecution { definition_id, .. } => definition_id.to_string(),
         crate::WorkflowRunError::WorkflowInputs { .. }
         | crate::WorkflowRunError::NodeTarget { .. }
+        | crate::WorkflowRunError::HostCallback { .. }
         | crate::WorkflowRunError::WorkerPool { .. } => "<workflow>".to_owned(),
     }
 }
