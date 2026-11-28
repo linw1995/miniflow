@@ -69,6 +69,11 @@ pub enum StreamError {
         #[snafu(source(from(std::io::Error, Arc::new)))]
         source: Arc<std::io::Error>,
     },
+    #[snafu(display("stream output RPC failed: {source}"), visibility(pub))]
+    OutputRpc {
+        #[snafu(source(from(crate::callback::CallbackError, Arc::new)))]
+        source: Arc<crate::callback::CallbackError>,
+    },
     #[snafu(display("stream output failed: {source}"), visibility(pub))]
     OutputEncode {
         #[snafu(source(from(serde_json::Error, Arc::new)))]
@@ -114,7 +119,10 @@ impl StreamError {
             Self::InputFailure { .. } | Self::InputRecord { .. } | Self::InputValidation { .. } => {
                 "input"
             }
-            Self::Output { .. } | Self::OutputWrite { .. } | Self::OutputEncode { .. } => "output",
+            Self::Output { .. }
+            | Self::OutputWrite { .. }
+            | Self::OutputRpc { .. }
+            | Self::OutputEncode { .. } => "output",
             Self::Resource { .. } => "resource",
             Self::Producer { source, .. } | Self::Event { source, .. } => {
                 execution_error_phase(source.as_ref())
@@ -174,6 +182,7 @@ pub struct StreamOptions {
     pub observation: Option<StreamObservation>,
     pub snapshots: Option<crate::SnapshotRecorder>,
     pub arguments: crate::WorkflowArguments,
+    pub cancellation: crate::StreamCancellation,
     pub stdin: Option<crate::TextInput>,
 }
 impl Default for StreamOptions {
@@ -183,6 +192,7 @@ impl Default for StreamOptions {
             observation: None,
             snapshots: None,
             arguments: crate::WorkflowArguments::default(),
+            cancellation: Default::default(),
             stdin: None,
         }
     }
@@ -695,6 +705,7 @@ fn workflow_error_node(error: &crate::WorkflowRunError) -> String {
         | crate::WorkflowRunError::NodeExecution { definition_id, .. } => definition_id.to_string(),
         crate::WorkflowRunError::WorkflowInputs { .. }
         | crate::WorkflowRunError::NodeTarget { .. }
+        | crate::WorkflowRunError::HostCallback { .. }
         | crate::WorkflowRunError::WorkerPool { .. } => "<workflow>".to_owned(),
     }
 }
@@ -790,6 +801,7 @@ impl PreparedStream {
     ) -> Result<StreamInstance, StreamError> {
         let observation = options.observation.clone();
         let mut context = ExecutionContext::default();
+        context.set_cancellation(options.cancellation.clone());
         context.configure_worker_limit(runtime_options.max_parallel_domains);
         let result = self.start_inner(options, runtime_options, context, false);
         if let (Err(error), Some(observation)) = (&result, observation) {
@@ -915,7 +927,7 @@ impl PreparedStream {
                 })
             })
             .collect();
-        let plan = Arc::new(prepared);
+        let plan = prepared;
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
                 output: None,

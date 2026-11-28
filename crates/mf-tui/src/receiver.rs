@@ -235,6 +235,10 @@ impl ObservationReader {
         })
     }
 
+    pub fn run_id(&self) -> RunId {
+        self.context.run
+    }
+
     pub fn snapshot(&self) -> StateSnapshot {
         self.context
             .state

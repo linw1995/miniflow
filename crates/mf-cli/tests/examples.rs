@@ -375,10 +375,7 @@ fn assert_agent_layouts(executable: &Path, routes: &[&str]) {
 #[cfg(unix)]
 #[test]
 fn documented_examples_compile_and_produce_expected_outputs() {
-    use std::{
-        io::Write,
-        process::{Command, Stdio},
-    };
+    use std::process::Command;
 
     let temporary = tempfile::Builder::new()
         .prefix("mf examples ")
@@ -564,12 +561,7 @@ fn documented_examples_compile_and_produce_expected_outputs() {
             }
         }
         let mut command = Command::new(&executable);
-        command
-            .current_dir(&runtime)
-            .env("PATH", "")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        command.current_dir(&runtime).env("PATH", "");
         if name == "coding-read.json" {
             let root = temporary.path().join("coding-workspace");
             fs::create_dir(&root).unwrap();
@@ -650,16 +642,12 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                 .env("NO_PROXY", "127.0.0.1,localhost")
                 .env("no_proxy", "127.0.0.1,localhost");
         }
-        let mut child = command.spawn().unwrap();
-        if let Some(input) = input {
-            child
-                .stdin
-                .take()
-                .unwrap()
-                .write_all(input.as_bytes())
-                .unwrap();
+        if let Some(data) = input {
+            let path = runtime.join("lines.txt");
+            fs::write(&path, data).unwrap();
+            command.arg("--feed.path").arg(path);
         }
-        let output = child.wait_with_output().unwrap();
+        let output = command.output().unwrap();
         assert!(
             output.status.success(),
             "{name}: execution failed with {}:\n{}\n{}",

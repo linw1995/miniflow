@@ -8,6 +8,7 @@ description = "Runtime contracts and execution support for miniflow"
 
 [features]
 default = []
+callback-host = ["dep:nix", "dep:tempfile"]
 async = ["dep:futures", "dep:futures-timer"]
 tokio = ["async", "dep:tokio"]
 
@@ -33,6 +34,9 @@ futures-timer = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "time"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
+# Only launchers need a private directory and kernel-reported peer credentials.
+nix = { workspace = true, features = ["socket"], optional = true }
+tempfile = { workspace = true, optional = true }
 # Streaming standard I/O redirection and polling.
 libc.workspace = true
 

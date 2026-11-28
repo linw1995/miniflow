@@ -14,6 +14,10 @@ pub enum WorkflowRunError {
         source: NodeExecutionError,
     },
     #[snafu(transparent)]
+    HostCallback {
+        source: crate::callback::CallbackError,
+    },
+    #[snafu(transparent)]
     NodeTarget { source: crate::NodeTargetError },
     #[snafu(transparent)]
     WorkflowInputs { source: crate::WorkflowInputError },

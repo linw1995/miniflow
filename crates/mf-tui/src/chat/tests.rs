@@ -176,6 +176,25 @@ fn argument_transports_and_invalid_chat_options_fail_before_database_ownership()
 }
 
 #[test]
+fn callbacks_do_not_become_configurable_chat_arguments() {
+    let manifest = chat_manifest();
+    let contract = ChatContract::from_manifest(&manifest).unwrap();
+    assert!(!contract.supports_steering);
+    assert_eq!(
+        contract.input_targets().collect::<Vec<_>>(),
+        ["start.messages"]
+    );
+    assert!(
+        RunOptions {
+            arguments: vec!["--callback:steering".into()],
+            ..Default::default()
+        }
+        .parsed_workflow_arguments(&contract.parameters)
+        .is_err()
+    );
+}
+
+#[test]
 fn one_execution_lane_rejects_queued_submissions_and_cancels_without_switching() {
     let root = tempfile::tempdir().unwrap();
     let prepared = launch(root.path());
@@ -203,6 +222,11 @@ fn one_execution_lane_rejects_queued_submissions_and_cancels_without_switching()
         panic!("expected admission")
     };
     assert_eq!(session.title, "first prompt");
+    assert!(!controller.supports_steering());
+    assert!(matches!(
+        controller.steer(&invocation, "not a new turn".into()),
+        Err(ChatRunError::SteeringClosed)
+    ));
     assert_eq!(session.title_source, "provisional");
     assert!(matches!(next(&controller), ChatEvent::Observing(_)));
     assert!(matches!(
@@ -233,6 +257,107 @@ fn one_execution_lane_rejects_queued_submissions_and_cancels_without_switching()
     );
 }
 
+pub const HOSTED_RUNNER: &str = r#"#!/usr/bin/env python3
+import json, os, socket, sys, time
+from pathlib import Path
+assert sys.stdin.read() == '' and not sys.argv[1:]
+grant = json.loads(os.environ['MF_RUNNER_RPC_V1'])
+assert grant['io'] == {'inputs': True, 'output': True, 'diagnostics': True} and not grant['bindings']
+sock = socket.socket(socket.AF_UNIX)
+sock.connect(grant['socket'])
+wire = sock.makefile('rb')
+def send(frame): sock.sendall(json.dumps(frame).encode() + b'\n')
+send({'get_inputs': {}})
+messages = json.loads(wire.readline())['inputs']['values']['start.messages']
+def emit(record): send({'output': record})
+def finish():
+    send({'flush': {}})
+    assert json.loads(wire.readline()) == {'flushed': True}
+"#;
+
+#[test]
+fn queued_turns_run_without_a_view_and_withdrawal_is_scoped_to_the_session() {
+    let root = tempfile::tempdir().unwrap();
+    let gate = root.path().join("release");
+    let script = format!(
+        "{HOSTED_RUNNER}\nwhile not Path({gate:?}).exists(): time.sleep(0.02)\nemit({{'append':{{'status':'succeeded','messages':[{{'role':'assistant','content':'ok'}}],'usages':[]}}}})\nfinish()"
+    );
+    let controller =
+        ChatController::open(launch_runner(root.path(), &chat_manifest(), &script)).unwrap();
+    controller
+        .send(ChatCommand::Submit {
+            session_id: None,
+            prompt: "first".into(),
+        })
+        .unwrap();
+    let ChatEvent::Submitted { session, .. } = next(&controller) else {
+        panic!("missing admission")
+    };
+    assert!(matches!(
+        controller.queue_next("other", "wrong session".into()),
+        Err(ChatRunError::NextTurnClosed)
+    ));
+    let removed = controller
+        .queue_next(&session.id, "removed".into())
+        .unwrap();
+    let kept = controller.queue_next(&session.id, "second".into()).unwrap();
+    assert!(controller.withdraw_next("other", removed).is_none());
+    assert_eq!(
+        controller.withdraw_next(&session.id, removed).as_deref(),
+        Some("removed")
+    );
+    fs::write(gate, "").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while controller.busy() {
+        assert!(
+            Instant::now() < deadline,
+            "the worker waited for the view to schedule its next turn"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(controller.withdraw_next(&session.id, kept).is_none());
+    assert!(matches!(
+        controller.queue_next(&session.id, "too late".into()),
+        Err(ChatRunError::NextTurnClosed)
+    ));
+    let page = controller
+        ._database
+        .messages(&session.id, 20, None)
+        .unwrap();
+    assert_eq!(page.messages.len(), 4);
+    assert_eq!(page.messages[2].message.content(), "second");
+    assert_ne!(
+        page.messages[0].message.turn_id,
+        page.messages[2].message.turn_id
+    );
+    let mut order = Vec::new();
+    let mut claimed = None;
+    while order.len() < 5 {
+        match next(&controller) {
+            ChatEvent::NextTurnClaimed { id, invocation } => {
+                assert_eq!(id, kept);
+                claimed = Some(invocation);
+                order.push("claimed");
+            }
+            ChatEvent::Finished { .. } => order.push("finished"),
+            ChatEvent::Loaded { page, .. } => {
+                assert_eq!(page.messages.len(), 2);
+                order.push("history");
+            }
+            ChatEvent::Submitted { invocation, .. } => {
+                assert_eq!(claimed.as_ref(), Some(&invocation));
+                order.push("submitted");
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        order,
+        ["claimed", "finished", "history", "submitted", "finished"]
+    );
+    controller.close().unwrap();
+}
+
 #[test]
 fn captured_results_keep_the_lane_reserved_until_save_or_discard_without_resending() {
     for abandon in [false, true] {
@@ -246,11 +371,7 @@ fn captured_results_keep_the_lane_reserved_until_save_or_discard_without_resendi
         let result = json!({"append":{"status":"succeeded","messages":[{"role":"assistant","content":"retained answer","metadata":{"source":"fixture"}}],"usages":[{"call_id":"actual-call","model":"fixture"}]}});
         fs::write(
             prepared.runner.executable().with_extension("script"),
-            format!(
-                "#!/bin/sh\nprintf x >> '{}'\nsleep 0.3\nprintf '%s' '{}'\n",
-                count.display(),
-                result
-            ),
+            format!("{HOSTED_RUNNER}\nwith open({count:?}, 'ab') as f: f.write(b'x')\ntime.sleep(0.3)\nemit(json.loads({result:?}))\nfinish()", result=result.to_string()),
         )
         .unwrap();
         let controller = ChatController::open(prepared).unwrap();
@@ -388,7 +509,11 @@ fn history_pages_start_at_the_tail_and_do_not_overlap_across_failed_turns() {
     let ChatEvent::Loaded { page, .. } = next(&controller) else {
         panic!("expected tail")
     };
-    let display::Message::User(text) = &page.messages.last().unwrap().message else {
+    let display::Message::User {
+        content: text,
+        placement: display::UserPlacement::Prompt,
+    } = &page.messages.last().unwrap().message
+    else {
         panic!("expected a prompt");
     };
     assert_eq!(text.load().unwrap(), "prompt-59");
@@ -510,8 +635,10 @@ fn live_launch(directory: &Path, mode: &str) -> (ChatLaunch, std::path::PathBuf)
         {"append":{"status":"succeeded","messages":[{"role":"assistant","content":"canonical"}],"usages":[]}}
     ]);
     let script = format!(
-        r#"#!/usr/bin/env python3
-import json, os, sys, time
+        r#"{HOSTED_RUNNER}
+assert messages[-1]['content'] == 'hello'
+send({{'diagnostic': {{'level':'warning', 'message':'fixture warning'}}}})
+print('process diagnostic', file=sys.stderr, flush=True)
 records = json.loads({records:?})
 mode = {mode:?}
 if mode == 'flood':
@@ -527,20 +654,67 @@ if mode == 'both': records[-1].update(replacement)
 if mode == 'null': records.append({{'append': None}})
 if mode == 'malformed': records.append({{'append': {{'status': 'succeeded', 'messages': None, 'usages': []}}}})
 split = 0 if mode == 'empty' else 1
-for record in records[:split]:
-    print(json.dumps(record), flush=True)
+for record in records[:split]: emit(record)
 if mode in ('gated', 'gated_tool_call'):
     while not os.path.exists({gate:?}): time.sleep(0.01)
-if mode == 'prefix': sys.exit(2)
-for record in records[split:]: print(json.dumps(record), flush=True)
+if mode == 'prefix':
+    finish()
+    sys.exit(2)
+for record in records[split:]: emit(record)
 if mode == 'late':
-    print('late diagnostic', flush=True)
+    send({{'diagnostic': {{'level':'error', 'message':'late diagnostic'}}}})
+    sock.sendall(b'invalid\n')
+    assert not wire.readline()
     sys.exit(13)
+finish()
 "#,
         records = serde_json::to_string(&records).unwrap(),
         gate = gate.to_str().unwrap()
     );
     (launch_runner(directory, &manifest, &script), gate)
+}
+
+#[test]
+fn a_stdout_only_chat_runner_cannot_settle_or_offer_a_reply_to_save() {
+    let root = tempfile::tempdir().unwrap();
+    let script = "#!/bin/sh\nprintf '%s\\n' '{\"append\":{\"status\":\"succeeded\",\"messages\":[{\"role\":\"assistant\",\"content\":\"wrong transport\"}],\"usages\":[]}}'\n";
+    let controller =
+        ChatController::open(launch_runner(root.path(), &chat_manifest(), script)).unwrap();
+    controller
+        .send(ChatCommand::Submit {
+            session_id: None,
+            prompt: "hello".into(),
+        })
+        .unwrap();
+    loop {
+        if let ChatEvent::Finished {
+            resolution,
+            capture_error,
+            invocation,
+            ..
+        } = next(&controller)
+        {
+            assert!(
+                capture_error
+                    .unwrap()
+                    .contains("without completing hosted I/O")
+            );
+            assert!(
+                matches!(resolution.unwrap().state, CompletionState::Finished(turn) if turn.state == "failed")
+            );
+            assert!(
+                controller
+                    ._database
+                    .call(&invocation.call_id)
+                    .unwrap()
+                    .terminal_result
+                    .is_none()
+            );
+            assert!(!controller.busy());
+            break;
+        }
+    }
+    controller.close().unwrap();
 }
 
 #[test]
@@ -586,7 +760,15 @@ fn executable_live_previews_arrive_before_authoritative_settlement() {
         );
         fs::write(gate, "release").unwrap();
         loop {
-            if let ChatEvent::Finished { resolution, .. } = next(&controller) {
+            if let ChatEvent::Finished {
+                resolution, stderr, ..
+            } = next(&controller)
+            {
+                assert!(
+                    stderr.contains("warning: fixture warning")
+                        && stderr.contains("process diagnostic"),
+                    "{stderr}"
+                );
                 let CompletionState::Committed(completion) = resolution.unwrap().state else {
                     panic!("expected saved final")
                 };
@@ -599,7 +781,46 @@ fn executable_live_previews_arrive_before_authoritative_settlement() {
 }
 
 #[test]
-fn native_failures_keep_complete_replies_for_save_only_and_never_save_prefixes() {
+fn hosted_recovery_keeps_the_typed_reply_when_storage_is_temporarily_unavailable() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut launch, gate) = live_launch(root.path(), "gated");
+    let state = root.path().join("state");
+    let offline = root.path().join("offline");
+    launch.options.database_path = state.join("chat.sqlite");
+    let runner = launch.runner.executable().to_path_buf();
+    let controller = ChatController::open(launch).unwrap();
+    controller
+        .send(ChatCommand::Submit {
+            session_id: None,
+            prompt: "hello".into(),
+        })
+        .unwrap();
+    while !matches!(next(&controller), ChatEvent::Preview { .. }) {}
+    fs::rename(&state, &offline).unwrap();
+    fs::write(&state, "unavailable").unwrap();
+    fs::write(gate, "finish").unwrap();
+    loop {
+        if let ChatEvent::Finished { resolution, .. } = next(&controller) {
+            assert!(resolution.is_err());
+            break;
+        }
+    }
+    fs::remove_file(runner).unwrap();
+    fs::remove_file(&state).unwrap();
+    fs::rename(&offline, &state).unwrap();
+    controller.send(ChatCommand::Save).unwrap();
+    let ChatEvent::Finished { resolution, .. } = next(&controller) else {
+        panic!("expected recovery")
+    };
+    let CompletionState::Committed(completion) = resolution.unwrap().state else {
+        panic!("expected saved reply")
+    };
+    assert_eq!(completion.result.final_text(), Some("canonical"));
+    controller.close().unwrap();
+}
+
+#[test]
+fn failed_host_sessions_only_offer_complete_replies_for_save_only() {
     for mode in ["late", "prefix", "empty"] {
         let root = tempfile::tempdir().unwrap();
         let (launch, _) = live_launch(root.path(), mode);
@@ -670,7 +891,7 @@ fn native_failures_keep_complete_replies_for_save_only_and_never_save_prefixes()
 }
 
 #[test]
-fn invalid_terminal_records_invalidate_native_recovery_instead_of_saving_first() {
+fn invalid_terminal_records_invalidate_hosted_recovery_instead_of_saving_first() {
     for mode in [
         "duplicate",
         "undeclared",
@@ -685,7 +906,7 @@ fn invalid_terminal_records_invalidate_native_recovery_instead_of_saving_first()
         controller
             .send(ChatCommand::Submit {
                 session_id: None,
-                prompt: "Question".into(),
+                prompt: "hello".into(),
             })
             .unwrap();
         let mut invocation = None;

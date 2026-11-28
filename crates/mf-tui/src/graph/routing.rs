@@ -86,6 +86,34 @@ impl Segment {
             && high.y >= rect.y
     }
 
+    /// Frame borders are barriers against parallel travel, but connections may cross them
+    /// perpendicularly at a member port or on the way to another scope.
+    pub fn conflicts_with_frame(self, frame: GraphRect) -> bool {
+        if frame.width < 2 || frame.height < 2 {
+            return false;
+        }
+        let low = self.low();
+        let high = self.high();
+        let right = frame.x + frame.width - 1;
+        let bottom = frame.y + frame.height - 1;
+        match self.axis() {
+            Axis::Horizontal => {
+                low.y <= bottom
+                    && high.y >= frame.y
+                    && (low.y == frame.y || high.y == bottom)
+                    && low.x <= right
+                    && high.x >= frame.x
+            }
+            Axis::Vertical => {
+                low.x <= right
+                    && high.x >= frame.x
+                    && (low.x == frame.x || high.x == right)
+                    && low.y <= bottom
+                    && high.y >= frame.y
+            }
+        }
+    }
+
     pub fn intersection(self, other: Self) -> Option<Intersection> {
         let low = self.low();
         let high = self.high();
@@ -803,6 +831,7 @@ impl Router<'_> {
         }
         let edges = self.edges;
         let obstacles = &self.obstacles;
+        let frames = &self.frames;
         let index = &self.index;
         let markers = &self.markers;
         let budget = &mut self.budget;
@@ -826,6 +855,12 @@ impl Router<'_> {
             for &(owner, rect) in obstacles.candidates(segment) {
                 budget.check()?;
                 if owner != Some(edge) && segment.intersects_rect(rect) {
+                    return CongestionSnafu.fail();
+                }
+            }
+            for &(_, frame) in frames.candidates(segment) {
+                budget.check()?;
+                if segment.conflicts_with_frame(frame) {
                     return CongestionSnafu.fail();
                 }
             }
@@ -1014,6 +1049,7 @@ struct Router<'a> {
     edges: &'a [super::GraphEdge],
     limits: RoutingLimits,
     obstacles: ObstacleIndex,
+    frames: ObstacleIndex,
     index: SegmentIndex,
     markers: ObstacleIndex,
     crossings: Vec<Crossing>,
@@ -1025,11 +1061,16 @@ impl<'a> Router<'a> {
         nodes: &'a [super::GraphNode],
         edges: &'a [super::GraphEdge],
         routes: &[EdgeRoute],
+        frames: &[GraphRect],
         limits: RoutingLimits,
     ) -> Self {
         let mut obstacles = ObstacleIndex::default();
         for node in nodes {
             obstacles.insert(None, node.rect);
+        }
+        let mut frame_index = ObstacleIndex::default();
+        for frame in frames {
+            frame_index.insert(None, *frame);
         }
         for (edge, route) in routes.iter().enumerate() {
             if let Some(label) = &route.label {
@@ -1051,6 +1092,7 @@ impl<'a> Router<'a> {
             edges,
             limits,
             obstacles,
+            frames: frame_index,
             index: SegmentIndex::default(),
             markers: ObstacleIndex::default(),
             crossings: Vec::new(),
@@ -1092,6 +1134,12 @@ impl<'a> Router<'a> {
         {
             self.budget.check()?;
             if owner != Some(edge) && segment.intersects_rect(rect) {
+                return Ok(None);
+            }
+        }
+        for &(_, frame) in self.frames.candidates(segment) {
+            self.budget.check()?;
+            if segment.conflicts_with_frame(frame) {
                 return Ok(None);
             }
         }
@@ -1438,6 +1486,21 @@ pub fn route_all(
     components: &[usize],
     limits: RoutingLimits,
 ) -> (Vec<Crossing>, RoutingStats) {
+    route_all_with_frames(nodes, edges, routes, &[], components, limits)
+}
+
+/// Validates and repairs preferred routes with expanded cluster frames.
+///
+/// Frame borders reject parallel travel and turns; perpendicular crossings stay available
+/// so member ports can reach the rest of the graph.
+pub fn route_all_with_frames(
+    nodes: &[super::GraphNode],
+    edges: &[super::GraphEdge],
+    routes: &mut [EdgeRoute],
+    frames: &[GraphRect],
+    components: &[usize],
+    limits: RoutingLimits,
+) -> (Vec<Crossing>, RoutingStats) {
     let estimate = nodes
         .len()
         .saturating_mul(4)
@@ -1450,7 +1513,7 @@ pub fn route_all(
         return (Vec::new(), RoutingStats::default());
     }
     let preferred = routes.to_vec();
-    let mut router = Router::new(nodes, edges, routes, limits);
+    let mut router = Router::new(nodes, edges, routes, frames, limits);
     router.budget.stats.geometry_items = estimate;
     let mut order: Vec<_> = (0..edges.len()).collect();
     // Route producers before downstream nodes so opaque IDs do not consume upstream channels first.
@@ -1759,6 +1822,7 @@ mod tests {
             &nodes,
             &edges,
             std::slice::from_ref(&preferred),
+            &[],
             RoutingLimits::default(),
         );
         let vertical_departure =
@@ -1787,6 +1851,7 @@ mod tests {
             &nodes,
             &edges,
             std::slice::from_ref(&preferred),
+            &[],
             RoutingLimits::default(),
         );
         assert_eq!(
@@ -1839,6 +1904,7 @@ mod tests {
             &nodes,
             &edges,
             &[route.clone(), EdgeRoute::default(), EdgeRoute::default()],
+            &[],
             RoutingLimits::default(),
         );
         router.index.insert(1, &vertical);
@@ -1984,7 +2050,13 @@ mod tests {
                 UnresolvedReason::ConflictLimit,
             ),
         ] {
-            let mut router = Router::new(&nodes, &edges, std::slice::from_ref(&preferred), limits);
+            let mut router = Router::new(
+                &nodes,
+                &edges,
+                std::slice::from_ref(&preferred),
+                &[],
+                limits,
+            );
             assert_eq!(
                 router.search(0, &preferred, &[0, 1, 2], bounds),
                 Err(expected)
@@ -2046,6 +2118,55 @@ mod tests {
             width: 2,
             height: 2
         }));
+    }
+
+    #[test]
+    fn frame_borders_reject_parallel_travel_but_allow_perpendicular_crossings() {
+        let frame = GraphRect {
+            x: 10,
+            y: 10,
+            width: 20,
+            height: 10,
+        };
+        assert!(segment(10, 10, 29, 10).conflicts_with_frame(frame));
+        assert!(segment(10, 19, 29, 19).conflicts_with_frame(frame));
+        assert!(segment(10, 10, 10, 19).conflicts_with_frame(frame));
+        assert!(segment(29, 10, 29, 19).conflicts_with_frame(frame));
+        assert!(segment(10, 10, 10, 10).conflicts_with_frame(frame));
+        assert!(!segment(15, 5, 15, 15).conflicts_with_frame(frame));
+        assert!(!segment(15, 15, 15, 25).conflicts_with_frame(frame));
+        assert!(!segment(5, 15, 15, 15).conflicts_with_frame(frame));
+        assert!(!segment(15, 15, 25, 15).conflicts_with_frame(frame));
+        assert!(!segment(15, 15, 20, 15).conflicts_with_frame(frame));
+        assert!(!segment(10, 10, 20, 10).conflicts_with_frame(GraphRect {
+            x: 10,
+            y: 10,
+            width: 1,
+            height: 10,
+        }));
+    }
+
+    #[test]
+    fn frame_borders_block_validation_and_search_steps() {
+        let (nodes, edges, preferred) = search_fixture();
+        let frame = GraphRect {
+            x: 26,
+            y: 11,
+            width: 20,
+            height: 10,
+        };
+        let mut router = Router::new(
+            &nodes,
+            &edges,
+            std::slice::from_ref(&preferred),
+            &[frame],
+            RoutingLimits::default(),
+        );
+        assert_eq!(
+            router.validate(0, &preferred),
+            Err(UnresolvedReason::Congestion)
+        );
+        assert_eq!(router.step_cost(0, segment(26, 11, 41, 11)), Ok(None));
     }
 
     #[test]

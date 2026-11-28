@@ -1,3 +1,7 @@
+mod callable_stream;
+pub mod callback;
+#[cfg(unix)]
+pub mod callback_rpc;
 mod cancellation;
 mod compiled_graph;
 mod config_template;
@@ -39,6 +43,7 @@ mod worker;
 mod workflow_inputs;
 mod workflow_manifest;
 
+pub use callable_stream::StreamOperatorFactories;
 #[cfg(feature = "async")]
 pub use cancellation::Cancelled;
 pub use cancellation::StreamCancellation;
@@ -131,7 +136,7 @@ pub use stream_instance::{
     ProducerSnafu as StreamProducerSnafu, StreamClock, StreamDelivery, StreamError, StreamInstance,
     StreamMetrics, StreamOptions, StreamOutput, StreamSummary,
 };
-pub use stream_io::{StreamStdio, TextInput};
+pub use stream_io::{DiagnosticLevel, RunnerDiagnostic, RunnerStdio, TextInput};
 pub use stream_plan::{
     FlowDependency, GeneratedStreamDomainExecutor, MessageSchedule, PreparedStream,
     StreamEmissionBinding, StreamInputResolver, StreamMessageInitializer, StreamMessageProgram,
@@ -170,7 +175,7 @@ pub use workflow_inputs::{
 };
 
 pub use runner_arguments::{
-    RunnerArgumentError, RunnerArguments, RunnerInvocation, runner_help_command,
+    RunnerArgumentError, RunnerArguments, RunnerCommand, RunnerInvocation, runner_help_command,
 };
 #[cfg(unix)]
 pub use runner_signals::{RunnerSignalError, RunnerSignals};

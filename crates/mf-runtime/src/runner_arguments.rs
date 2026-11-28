@@ -45,18 +45,32 @@ impl RunnerInvocation {
         workflow: &WorkflowInputSchema,
         targets: &[NodeTarget],
     ) -> Result<Self, RunnerArgumentError> {
-        // Register the union before selection so --node can follow its input arguments.
+        RunnerCommand::parse(arguments, workflow, targets)?.resolve()
+    }
+}
+
+/// Parsed syntax and target metadata, before any workflow input file or environment lookup.
+pub struct RunnerCommand<'a> {
+    matches: ArgMatches,
+    schema: &'a WorkflowInputSchema,
+    target: Option<&'a NodeTarget>,
+}
+
+impl<'a> RunnerCommand<'a> {
+    pub fn parse(
+        arguments: impl IntoIterator<Item = OsString>,
+        workflow: &'a WorkflowInputSchema,
+        targets: &'a [NodeTarget],
+    ) -> Result<Self, RunnerArgumentError> {
         let schemas = std::iter::once(workflow).chain(
             targets
                 .iter()
                 .filter(|target| target.kind == NodeTargetKind::Task)
                 .map(|target| &target.inputs),
         );
-        let command = argument_command(schemas, true, Some(targets));
-        let matches = parse_arguments(arguments, command)?;
-        let node = matches.get_one::<String>("node").cloned();
-        let target = node
-            .as_deref()
+        let matches = parse_arguments(arguments, argument_command(schemas, true, Some(targets)))?;
+        let target = matches
+            .get_one::<String>("node")
             .map(|id| NodeTarget::find(targets, id))
             .transpose()?;
         let schema = target.map_or(workflow, |target| &target.inputs);
@@ -67,6 +81,30 @@ impl RunnerInvocation {
             }
             display_help(help)?;
         }
+        Ok(Self {
+            matches,
+            schema,
+            target,
+        })
+    }
+
+    pub fn isolated(&self) -> bool {
+        self.target.is_some()
+    }
+
+    pub fn resolve(self) -> Result<RunnerInvocation, RunnerArgumentError> {
+        self.resolve_with_inputs(None)
+    }
+
+    pub fn resolve_with_inputs(
+        self,
+        hosted: Option<WorkflowArguments>,
+    ) -> Result<RunnerInvocation, RunnerArgumentError> {
+        let Self {
+            matches,
+            schema,
+            target,
+        } = self;
         let context = matches.get_one::<OsString>("context");
         let context_file = matches.get_one::<OsString>("context-file");
         ensure!(
@@ -75,8 +113,28 @@ impl RunnerInvocation {
                 message: "context transport requires --node"
             }
         );
-        let options = decode_options(&matches, schema, true)?;
-        let inputs = options.inputs;
+        let options = if let Some(mut inputs) = hosted {
+            ensure!(
+                matches.ids().all(|id| matches!(
+                    id.as_str(),
+                    "help" | "verbose" | "node" | "context" | "context-file"
+                )),
+                InvalidSnafu {
+                    message: "RPC startup inputs cannot be combined with command-line inputs"
+                }
+            );
+            inputs.check_encoded_size()?;
+            schema.mark_secrets(&mut inputs);
+            RunnerArguments {
+                verbose: matches.get_count("verbose").min(3),
+                inputs,
+            }
+        } else {
+            decode_options(&matches, schema, true)?
+        };
+        let inputs =
+            crate::resolve_workflow_inputs(schema, &options.inputs, |name| std::env::var_os(name))?;
+        schema.validate_stdin(&inputs, false)?;
         let context = if let Some(json) = context {
             WorkflowArguments::from_json(
                 json.to_str()
@@ -86,7 +144,10 @@ impl RunnerInvocation {
                     .as_bytes(),
             )?
         } else if let Some(path) = context_file {
-            WorkflowArguments::from_json(&read_context_file(Path::new(path))?)?
+            WorkflowArguments::from_json(&read_argument_file(
+                Path::new(path),
+                "expected a regular context file",
+            )?)?
         } else {
             WorkflowArguments::default()
         };
@@ -97,9 +158,9 @@ impl RunnerInvocation {
                     .context(crate::WorkflowInputJsonSnafu)?;
             WorkflowArguments::check_size(encoded.len())?;
         }
-        Ok(Self {
+        Ok(RunnerInvocation {
             verbose: options.verbose,
-            node,
+            node: target.map(|t| t.id.clone()),
             inputs,
             context,
         })
@@ -111,7 +172,7 @@ pub fn runner_help_command(schema: &WorkflowInputSchema) -> Command {
     argument_command([schema], true, Some(&[]))
 }
 
-fn read_context_file(path: &Path) -> Result<Vec<u8>, RunnerArgumentError> {
+fn read_argument_file(path: &Path, expected: &'static str) -> Result<Vec<u8>, RunnerArgumentError> {
     let read = || -> io::Result<Vec<u8>> {
         let mut options = File::options();
         options.read(true);
@@ -122,7 +183,7 @@ fn read_context_file(path: &Path) -> Result<Vec<u8>, RunnerArgumentError> {
         }
         let file = options.open(path)?;
         if !file.metadata()?.is_file() {
-            return Err(io::Error::other("expected a regular context file"));
+            return Err(io::Error::other(expected));
         }
         let mut bytes = Vec::new();
         file.take(MAX_WORKFLOW_INPUT_BYTES as u64 + 1)
@@ -152,16 +213,7 @@ impl RunnerArguments {
 
 impl WorkflowArguments {
     pub fn from_file(path: &Path) -> Result<Self, RunnerArgumentError> {
-        let read = || -> io::Result<Vec<u8>> {
-            let mut bytes = Vec::new();
-            File::open(path)?
-                .take(MAX_WORKFLOW_INPUT_BYTES as u64 + 1)
-                .read_to_end(&mut bytes)?;
-            Ok(bytes)
-        };
-        let bytes = read().context(ReadSnafu {
-            path: path.to_owned(),
-        })?;
+        let bytes = read_argument_file(path, "expected a regular workflow input file")?;
         Ok(Self::from_json(&bytes)?)
     }
 
@@ -408,8 +460,7 @@ fn decode_options(
     };
     schema.mark_secrets(&mut values);
     schema.validate(&values)?;
-    let encoded = serde_json::to_vec(&values).context(crate::WorkflowInputJsonSnafu)?;
-    WorkflowArguments::check_size(encoded.len())?;
+    values.check_encoded_size()?;
     Ok(RunnerArguments {
         verbose: if allow_verbose {
             matches.get_count("verbose").min(3)

@@ -85,6 +85,25 @@ Each invocation SHALL bind its session and call identities before execution. Cha
 - **WHEN** active workflow execution reaches its configured total limit
 - **THEN** additional execution waits or receives an explicit capacity result without starting an unbounded worker
 
+### Requirement: Queue separate turns independently of steering
+
+The host SHALL offer an explicit session FIFO for next-turn prompts with or without an invocation's
+optional steering capability. It SHALL NOT expose that FIFO to the Flow or model. Claim and withdrawal
+SHALL be mutually exclusive per entry. Waiting for a receipt, polling output, and rendering SHALL NOT
+be required to dispatch a queued prompt in the embedded host.
+
+#### Scenario: Advance after the matching successful commit
+
+- **WHEN** an embedded or executable session with pending next-turn input commits a successful turn
+- **THEN** the host may claim only the oldest remaining prompt and admit a new turn against the committed context
+- **AND** neither a queued prompt nor its receipt reserves a turn identity, runs tools, or writes a user message before claim
+
+#### Scenario: Preserve unadmitted prompts on interruption
+
+- **WHEN** the preceding turn fails, is cancelled, retains an unsaved result, or the next prompt cannot be admitted
+- **THEN** the owning client can recover unadmitted text for editing without another runner or model request
+- **AND** save-only recovery and restart MUST NOT replay either queue
+
 ### Requirement: Finalize execution failures outside the success path
 
 The host SHALL finalize begun work after provider failure, deadline expiry, or cancellation through shared storage handlers even when success-path nodes do not execute. Cleanup SHALL run independently of the cancelled request without creating a workflow or execution context. Cleanup failures MUST preserve the original error and identify unresolved work.

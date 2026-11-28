@@ -118,12 +118,20 @@ stream ports. Nested calls and exported Loop streams compose through these same 
 without an additional export map on the call. A child may declare its stream interface using an
 earlier workflow version; the caller must support child streams.
 
-Connected calls forward increments synchronously with the normal backpressure, cancellation,
-guards, snapshots, and typed error chains. Without a stream consumer, the child runs terminal-only.
-Each source keeps its emission packets; multiple sources produce sparse packets and their selected
-workflow outputs require `optional: true` where appropriate. Child Event/Stream producers and internal
-stream dataflow edges remain unsupported in these finite bodies. The parent owns stream scheduling
-and limits; a child's explicit `execution` configuration does not create a nested stream runtime.
+Connected calls forward increments with backpressure, cancellation, snapshots, and typed error chains.
+A callable body can also **consume** stream ports using ordinary node-local `inputs` or output-gated `edges`.
+For example, connect a producer's `delta` to `builtin.batch.item`, then `builtin.batch.items` to
+`builtin.identity.input`. Selecting the identity's `value` exports one batch per emission, even though
+Identity is an ordinary Task. Selecting the producer's terminal `total` returns one value **after**
+the child finishes, including downstream processing and the nonempty tail. An error while draining
+prevents that terminal result; already delivered batches are provisional.
+
+Internal stream edges and Event/Stream operators use the same message-domain scheduler and resource
+limits as a root streaming graph. Each invocation has fresh stateful operators. Ports selected from one
+emitted frame travel together; ports from other domains are absent from that packet. Joining independent
+message domains (including a startup value and an emission) is still invalid. Without an external
+subscriber the graph still drives its internal consumers. A body that only forwards TaskStream ports
+keeps its synchronous fast path and need not produce unobserved increments.
 
 All referenced providers join the root dependency build and adjacent lock. Each child's provider paths
 resolve against its own file. Compatible declarations of the same package combine features and default
@@ -235,18 +243,15 @@ including unselected ones. Metadata inspection and child preparation never execu
 Generated runners construct prepared children from compiled plans without loading source files or
 interpreting executable JSON at runtime. Runtime selector data cannot add children or discover unpassed
 global registrations. Explicit host-executor bindings retain the existing frozen-definition checks and
-cannot be emitted into standalone runners. The current authored/compiler-prepared child path supports
-finite callable bodies, including compatible TaskStream forwarding, but does not prepare autonomous
-Event/Stream children. The runtime separately supports factory-backed Event handles through
-`PreparedSubgraph::from_stream_factory` and the shared `FlowInvocation` lifecycle. That runtime capability
-does not itself add authored Event-child preparation or generated fresh-state factories.
+cannot be emitted into standalone runners. Callable children with internal stream wiring use the
+same frozen stream plans in interpreted and generated execution. In contrast, a native
+`PreparedSubgraph::from_stream_factory` exposes all selections as emissions and has no terminal map.
 
 Fixed child configuration does not itself add runtime-selected call targets or prescribe routers.
 Flow-valued edges below add explicit callable transport without a standard argument/result envelope.
 Call, Loop, Iteration, and custom nodes share one declared-child preparation and map-based factory contract. Every body uses the same complete Flow definition format under
 ordinary configuration; no legacy Loop/Iteration body adapter is retained. Per-pass/per-item scope
-and lifecycle semantics remain distinct. This does not wrap loops in Calls or expand child
-Event/Stream scheduler support. See
+and lifecycle semantics remain distinct. See
 [node development](node-development.md#receive-and-execute-passed-subgraphs) for the public APIs.
 
 ### Pass callable Flow values over edges
@@ -395,6 +400,71 @@ expose `Map(Any)`, with checked edges validating narrower destination types.
 This is general native-value construction, not a tool registry or executable loader. The caller's
 `calculator` key is a business name; it does not create a second callable identity.
 
+### Host callback RPC
+
+A finite `workflow.call` named `callback:<name>` declares an optional host implementation. Its
+ordinary `body` defines the interface and runs unchanged when unbound. The compiled descriptor's
+`callbacks` maps each unambiguous name to its exact static child path. Discovery follows
+static calls and loop/iteration bodies, not tool values, routed copies, or callback implementations.
+Multiple sites with the same name have no implicit winner. Embedders install `HostCallback` values
+with `NodeRegistry::bind_callbacks`; no callback is a JSON startup argument.
+
+A runner with manifest `2026-11-27` works standalone. Without any grant, `./flow` and
+`mf run ./flow` use the local bodies and do not open a socket. Both disable stdin and
+publish only selected business JSON on stdout (one object or ordered JSON Lines). Pass startup
+parameters or use file sources; diagnostics use stderr. Telemetry uses its separate OTLP endpoint.
+
+On Linux and macOS, a host granting callbacks or I/O creates a Unix stream listener in a private directory
+and sets `MF_RUNNER_RPC_V1` for its immediate child to a JSON object such as
+`{"parent":1234,"socket":"/tmp/mf-rpc-example/rpc","bindings":["lookup"]}`. `parent` is the
+launcher's PID. All binding names must be unique and declared; isolated Tasks cannot receive callback bindings.
+The runner connects as the client before provider construction. The host checks the kernel-reported
+peer PID against its launched child and removes the listener after accepting that connection.
+Nested executables do not inherit the grant. Normal CLI launches clear any ambient grant.
+
+Callback-only launches retain the original LF-terminated UTF-8 request and response protocol.
+For example, the runner writes `{"id":1,"binding":"lookup","args":{"values":{"query.key":"build_id"}}}`
+and the host replies `{"id":1,"value":{"values":{"value":"b42"}}}`. Calls are serial, with one
+shared sequence starting at 1 per connection. Both envelopes preserve sensitivity using optional
+`private` paths inside `args` or `value` (lists of keys or decimal array indices); native handles
+cannot cross the socket. Each message is bounded to 2 MiB including LF. A broken granted connection,
+malformed message, wrong ID, or failed handler fails the invocation without fallback or replay.
+A host delivery receipt means the complete response was written, not that the workflow committed.
+
+### Optional hosted I/O
+
+A host may independently grant `io.inputs`, `io.output`, or `io.diagnostics` on that same connection,
+with or without callbacks. Omitted flags are false. Values and handler implementations never go in
+`MF_RUNNER_RPC_V1`. Rebuild a callback-only runner before granting I/O: older implementations reject
+unknown grant fields rather than switching transports. File sources, provider environment bindings,
+OTLP, and process exit status are unchanged.
+
+A bare executable or ordinary `mf run` / `mf run --tui` does not need a host session. Native
+hosts can opt into any combination of these capabilities through `mf-runtime`. Executable `--chat`
+always uses hosted I/O, whether or not the executable declares a steering callback.
+
+| Capability | Not granted | Granted |
+| --- | --- | --- |
+| Startup inputs | Named arguments, `--inputs`, or `--inputs-file` | The runner pulls `{"get_inputs":{}}` once, before provider construction; the host replies `{"inputs":{"values":{"params.model":"example"}}}`. No argument file is needed. |
+| Business outputs | One JSON object or live JSON Lines on stdout | One `{"output":{...}}` per selected record, including a finite result. No copy on stdout. |
+| Runner diagnostics | stderr | `{"diagnostic":{"level":"warning","message":"..."}}` or level `error`. Raw plugin output, panics, early or interrupted launches, and transport failures can still write stderr. |
+| Invocation callback | Authored local body | A declared finite Call requests its bound handler and waits for the matching response. |
+
+An input grant is exclusive with every CLI business-input transport, even an empty `--inputs={}`.
+The same schema, environment/default resolution, 1 MiB input budget and stdin rejection apply;
+startup and callback arguments support the same `private` paths. Business output values have the
+same JSON representation as stdout, not native privacy labels. For example, a chat consumer sees
+`{"output":{"answer":{"text":"Hi","model_call_id":"m1"}}}` and later an `output` carrying `append`.
+Neither is a callback, a model-context commit, or an OTLP record.
+
+Consumers run in wire order. A slow consumer backpressures the writer; events do not consume callback
+IDs or require per-record responses. Control frames are limited to 2 MiB and output frames to 32 MiB,
+including LF. With output or diagnostics granted, the runner ends the exchange with `{"flush":{}}`;
+the host replies `{"flushed":true}` only after all prior events have been accepted. This one drain
+receipt prevents child exit racing a delayed or failed sink. EOF alone is not a receipt. The host
+still checks process status and its application contract. Failed deliveries never retry or fall back
+to another transport. See [embedding](embedding.md) for the host API.
+
 ### Supply an already-built runner
 
 Unix hosts can load an existing Linux ELF64 or macOS Mach-O64 runner as the same
@@ -430,7 +500,7 @@ terminal map. This wire mode includes finite streaming workflows as well as auto
 Since records can come from different execution domains, the derived stream ports are optional per
 record (`required: false`); the loader's supplied ports still match the manifest's selection optionality.
 Use `policy.stream_output_ports()` to inspect that derived contract. Records are forwarded live through
-the same supervised transport as chat, without accumulating the stream into a terminal result.
+the shared process supervisor, without accumulating the stream into a terminal result.
 Arguments and results cross a JSON boundary, so nested callable arguments cannot cross
 into the subprocess. Output values are conservatively secret because runner JSON does
 not preserve native privacy labels. The subprocess uses its own internal execution
@@ -445,11 +515,11 @@ implementing other independently observed executors can use `FlowValue::external
 with a validated manifest and a sink-aware executor using the same boundary semantics.
 
 `--chat` and runner-backed Flow parameters share `mf_tui::runner::RunnerInvocation`
-for argument-file transport, launch, live observation, cancellation, output draining,
-and process-group cleanup. It supports both terminal JSON and backpressured JSON
-records. Chat supplies its conversation decoder and preview consumer, then reconciles
-the retained terminal reply and usage events, including after protocol or process
-failure. Its streaming composition uses `PreparedSubgraph` and `workflow.call`; runner-backed Flow
+for launch, live observation, cancellation, output draining, and process-group cleanup.
+Runner-backed Flow parameters use an argument file and read JSON from stdout. Executable chat
+requires [hosted I/O](#optional-hosted-io), including for finite replies. Its conversation decoder
+retains only a validated terminal reply for recovery, never preview fragments, and reconciles it with
+observed usage events. Its streaming composition uses `PreparedSubgraph` and `workflow.call`; runner-backed Flow
 values select terminal or record transport from the manifest and use the same executor.
 
 Both `--chat` and runner-backed Flow values hold the same prepared-runner abstraction.
@@ -550,8 +620,14 @@ dispatch remains terminal-only; native dynamic Calls and existing observed-item 
 unchanged.
 
 The Agent accepts complete `params.messages` as a read-only Loop prefix and calls `mfn-llm.tool-catalog`
-once before the first request. The Loop keeps the complete generated suffix for its caller and
-continues while the model requests tools, without a fixed round limit. The
+once before the first request. The Loop keeps the complete generated suffix and continues while the
+model requests tools or a [steering message](chat.md#queuing-and-steering) arrives at a complete
+reply boundary, without a fixed round limit. `callback:steering` is a finite, zero-argument
+host-bindable Call, not a transport endpoint or model tool. After a completed reply or a completed
+tool batch, the Agent calls it with no arguments to pull any pending `messages: List(Object)`. It
+skips the call on failed outcomes and never sends or lets the callback rewrite its transcript.
+A completed text answer continues only on nonempty input; a failed outcome never continues. Without
+a host binding the local default returns an empty list, leaving the suffix unchanged. The
 [request Flow](../crates/builtin-nodes/llm/workflows/agent-request.json) forwards the prefix unchanged
 when the suffix is empty, avoiding CEL conversion of the request history on the first model request.
 After a completed tool round, it joins the prefix and the generated messages with CEL, while the
@@ -565,13 +641,15 @@ usages with failed status; an unresolved batch is permitted only at the end of a
 Cancellation and the [workflow step budget](#structured-loop) still apply.
 
 A caller can supply `params.compact`, an optional native Flow (not a model tool). The Agent invokes
-it only after collecting an entire tool batch, before issuing the next provider request. Its required
+it only after collecting an entire tool batch, before pulling steering for the next provider request.
+A failed policy leaves pending steering unclaimed. Its required
 inputs are `params.generated` (all additions so far), `params.checkpoint` (initially `{}`), and
 `params.usages` (the just-completed model call). Its terminal `result` is a `Map(Any)` with
 `replacement`, `usages` (new auxiliary calls only), and `error`. A replacement supplies `request`
 (the complete next model request); additional fields belong to the caller. Return `null` for no
 replacement. The Agent stamps a new checkpoint with `through`, the number of generated messages
-it covers. Later requests append only the suffix after `through`. A nonempty error stops the loop as failed without
+it covers. Later requests append only the suffix after `through`, including any steering pulled at
+that boundary. A nonempty error stops the loop as failed without
 repeating a tool or starting another model call. The Agent exports the last `checkpoint` separately
 from its unabridged `messages` and does not publish session context itself. Omitting the policy
 retains the ordinary prefix-plus-generated behavior and makes no auxiliary calls.
@@ -735,8 +813,10 @@ nodes. The [clustered example](../examples/clustered-workflow.json) compiles to 
 `label` is the short single-line title shown in the graph. `annotation` is the longer explanation shown inside the
 cluster and in Details. Cluster geometry reserves the title's full terminal-cell width in both expanded and collapsed
 views. Annotations wrap above the leftmost expanded member or below the collapsed node's summary, with space reserved so
-connections cannot overwrite the text. Both views preserve line breaks and indentation. Details wraps annotations to
-the pane width and scrolls by the visible page height.
+connections cannot overwrite the text. Expanded cluster boundaries also reserve their frame cells: connections leave and
+enter through member ports and cross a frame only perpendicularly, with pass-through crossings drawn as `┼` junctions.
+Both views preserve line breaks and indentation. Details wraps annotations to the pane width and scrolls by the visible
+page height.
 Both are required and bounded. Members belong to the containing scope, must be unique, and a node can belong to at most
 one cluster. Clusters are flat and cannot contain `%loop` or `%iteration` synthetic sources. A cluster may contain a
 Loop or Iteration node as an opaque member.
@@ -1857,7 +1937,8 @@ Add the map alongside `mode`, `on_error`, and `body`, then select `iteration.ans
 output or connect it to a stream consumer. Export names must be nonblank and distinct from `results`.
 The body still requires an ordinary terminal `result`; incremental outputs cannot replace it.
 Each export preserves its source value type and packet ownership, including sparse packets from
-different children. Nested stream dataflow and free-running Event/Stream children remain unsupported.
+different children. Direct Loop/Iteration frame bodies remain synchronous; call a separate Flow
+when an item needs internal stream wiring.
 
 Sequential items forward increments synchronously. Parallel items remain concurrent and forward
 increments in arrival order; terminal `results` retain input order. Values are forwarded unchanged,
@@ -2147,7 +2228,8 @@ task-only graph finishes without external input. A producer reached through star
 Use `builtin.readline` to read UTF-8 text lines from a file or stdin. Its optional string input `path`
 selects a regular text file when supplied, including through a symbolic link to a regular file. FIFO paths,
 directories, devices, and sockets are unsupported and cause execution to fail. A FIFO path is rejected
-without waiting for a writer. Omission selects stdin, which can be a pipe or terminal.
+without waiting for a writer. Omission selects `TextInput` supplied by an embedding host;
+compiled runners require a path because they do not supply business stdin.
 Its string output `line` preserves blank lines and whitespace and strips LF/CRLF delimiters. JSON parsing
 belongs in downstream nodes. Other StreamNodes can
 obtain data from files or services using their startup parameters. Every source is an ordinary declared node;

@@ -14,6 +14,7 @@ use std::{
     io::{Read, Write},
     path::Path,
     process::{Command, Stdio},
+    sync::{Arc, atomic::AtomicBool},
     thread,
     time::{Duration, Instant},
 };
@@ -22,6 +23,8 @@ use std::{
 mod coding;
 #[path = "support/examples.rs"]
 mod example_support;
+#[path = "chat_tui/steering.rs"]
+mod steering;
 #[path = "support/terminal.rs"]
 mod terminal;
 use terminal::Screen;
@@ -174,18 +177,45 @@ fn compiled(root: &Path, server: &Server, example: &str) -> std::path::PathBuf {
 }
 
 fn calculator_call(id: &str, operation: &str, left: f64, right: f64) -> Reply {
+    tool_call(
+        id,
+        "calculator",
+        serde_json::json!({"operation":operation,"left":left,"right":right}),
+    )
+}
+
+fn tool_call(id: &str, name: &str, arguments: serde_json::Value) -> Reply {
     let mut reply = Reply::stream_text("");
-    let arguments =
-        serde_json::json!({"operation":operation,"left":left,"right":right}).to_string();
-    let identity = serde_json::json!({"id":"response","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":id,"type":"function","function":{"name":"calculator","arguments":""}}]},"finish_reason":null}]});
+    let arguments = arguments.to_string();
+    let identity = serde_json::json!({"id":"response","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":id,"type":"function","function":{"name":name,"arguments":""}}]},"finish_reason":null}]});
     let chunk = serde_json::json!({"id":"response","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":arguments}}]},"finish_reason":null}]});
     let finish = serde_json::json!({"id":"response","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}});
     reply.body = format!("data: {identity}\n\ndata: {chunk}\n\ndata: {finish}\n\ndata: [DONE]\n\n");
     reply
 }
 
+fn gated(mut reply: Reply, prefix: String) -> (Reply, Arc<AtomicBool>) {
+    let tail = reply
+        .body
+        .strip_prefix(&prefix)
+        .unwrap()
+        .as_bytes()
+        .to_owned();
+    let release = Arc::new(AtomicBool::new(false));
+    reply.fragments = Some(vec![prefix.into_bytes(), tail]);
+    reply.release_after_prefix = Some(release.clone());
+    (reply, release)
+}
+
 fn next_completion(
     controller: &mf_tui::chat::ChatController,
+) -> mf_chat::contract::ReconciledCompletion {
+    observe_completion(controller, |_| {})
+}
+
+fn observe_completion(
+    controller: &mf_tui::chat::ChatController,
+    mut observe: impl FnMut(&mf_tui::chat::ChatEvent),
 ) -> mf_chat::contract::ReconciledCompletion {
     use mf_tui::chat::ChatEvent;
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -194,7 +224,11 @@ fn next_completion(
             Instant::now() < deadline,
             "context conversation did not complete"
         );
-        match controller.try_event() {
+        let event = controller.try_event();
+        if let Some(event) = &event {
+            observe(event);
+        }
+        match event {
             Some(ChatEvent::Finished {
                 resolution,
                 status,
@@ -878,7 +912,8 @@ impl ChatTerminal {
         let flags = FdFlag::from_bits_truncate(fcntl(&pty.master, FcntlArg::F_GETFD).unwrap());
         fcntl(&pty.master, FcntlArg::F_SETFD(flags | FdFlag::FD_CLOEXEC)).unwrap();
         let child = Command::new(env!("CARGO_BIN_EXE_mf"))
-            .args(["run", "--chat", "--chat-db"])
+            .args(["run", "--chat"])
+            .arg("--chat-db")
             .arg(database)
             .arg(binary)
             .args(["--params.model", "fixture-model"])
@@ -902,6 +937,11 @@ impl ChatTerminal {
     }
 
     fn wait_for(&mut self, labels: &[&str]) -> String {
+        self.wait_for_without(labels, &[])
+    }
+
+    // One PTY read can contain the new queue rows but not yet the cleared editor below them.
+    fn wait_for_without(&mut self, labels: &[&str], absent: &[&str]) -> String {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             let mut bytes = [0; 16384];
@@ -909,12 +949,14 @@ impl ChatTerminal {
                 self.screen.feed(&bytes[..n]);
             }
             let text = self.screen.text();
-            if labels.iter().all(|label| text.contains(label)) {
+            if labels.iter().all(|label| text.contains(label))
+                && absent.iter().all(|label| !text.contains(label))
+            {
                 return text;
             }
             assert!(
                 Instant::now() < deadline && self.child.try_wait().unwrap().is_none(),
-                "waiting for {labels:?}: {text}"
+                "waiting for {labels:?} without {absent:?}: {text}"
             );
             thread::sleep(Duration::from_millis(10));
         }

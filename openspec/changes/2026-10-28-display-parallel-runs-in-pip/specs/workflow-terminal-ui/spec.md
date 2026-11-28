@@ -1,19 +1,18 @@
+## ADDED Requirements
+
 ### Requirement: Display parallel running nodes in local PiP graphs
 
-When at least two different display nodes are Running in the current graph scope, the ordinary TUI execution view SHALL
-present a picture-in-picture local graph for each running node that fits the available area. The chat Flow execution panel
-SHALL present the same PiPs and SHALL also present a PiP when exactly one node is Running inside a folded body. Each PiP
-SHALL use the current connection view's observations and a precomputed fully expanded layout with an independent viewport
-centered on its running node. The main graph selection, pan state, navigation, folding, geometry, and lifecycle state SHALL
-remain independent of PiP rendering.
-
-The visible PiP count and grid dimensions SHALL adapt to both the running-node count and available terminal width and height. The view SHALL display all running nodes when they fit and SHALL report the hidden count when space is insufficient. The chat Flow execution panel SHALL retain its compact root overview alongside the PiP grid.
+When two or more nodes run concurrently, the ordinary execution view and chat Flow execution panel
+SHALL show local PiP graphs for the running nodes that fit. PiPs SHALL use precomputed expanded
+layouts and the current connection view, without changing main-graph geometry, navigation, or
+lifecycle state. The chat panel SHALL also show a PiP for a single running node in a folded body
+alongside its root overview.
 
 #### Scenario: Observe two parallel branches
 
 - **WHEN** two different nodes are Running in the current scope
-- **THEN** the view shows a separate local PiP graph centered on and highlighting each node
-- **AND** the main graph retains its existing selection and viewport
+- **THEN** a separate local PiP graph for each node expands into its slot
+- **AND** each PiP centers on and highlights its node without changing the main graph selection or viewport
 
 #### Scenario: Adapt to nodes and terminal size
 
@@ -25,8 +24,14 @@ The visible PiP count and grid dimensions SHALL adapt to both the running-node c
 #### Scenario: Finish a parallel node
 
 - **WHEN** fewer than two display nodes remain Running
-- **THEN** the parallel PiP grid is no longer shown
-- **AND** completed nodes retain their ordinary main-graph lifecycle presentation
+- **THEN** the ordinary execution view briefly retains the last visible PiP graphs as recent activity before they retract
+- **AND** completed nodes immediately take on their ordinary main-graph lifecycle presentation
+
+#### Scenario: Replace a departing PiP
+
+- **WHEN** a previously visible node no longer qualifies for a PiP in either view
+- **THEN** its PiP briefly shows its last active graph as recent activity and then retracts
+- **AND** a retained PiP yields its slot if a running node needs the space
 
 #### Scenario: Inspect a collapsed cluster or body scope
 

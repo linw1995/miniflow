@@ -290,7 +290,7 @@ parameters. Workflows with active stdin requirements MUST fail preflight before 
 #### Scenario: Reject missing source input
 
 - **WHEN** a readline node omits its file path and therefore requires stdin
-- **THEN** TUI preflight rejects execution and reports that the source needs workflow parameters or direct execution
+- **THEN** TUI preflight rejects execution; supplying the file path as a workflow parameter resolves the requirement
 
 #### Scenario: Identify an older streaming runner
 
@@ -867,12 +867,53 @@ Handled turn failures SHALL allow exit status 0 when cleanup succeeds; display o
 ### Requirement: Run one chat turn at a time
 
 The terminal SHALL reserve one execution lane before accepting a submission. A running turn or retained reply
-SHALL block additional submissions, new chats, and session switching. Extra submissions MUST be rejected instead
-of queued. Storage and supervision SHALL run off the terminal rendering thread, with independent cancellation.
+SHALL block concurrent execution, new chats, and session switching. The normal send action SHALL start
+an idle session's turn or queue a new turn during execution. Steering SHALL be a separate explicit action
+for a capable invocation, never the meaning of normal send. Storage, scheduling and supervision
+SHALL run off the terminal rendering thread, with independent cancellation.
+
+#### Scenario: Steer instead of starting another child
+
+- **WHEN** the active chatflow accepts steering and the user explicitly steers with nonblank text
+- **THEN** the terminal targets that invocation and clears the draft only on admission
+- **AND** a closed inbox rejects late input; cancellation returns undelivered input for editing, not execution
+
+#### Scenario: Queue regardless of steering callback support
+
+- **WHEN** the user sends text normally during a running chatflow with or without a `steering` callback
+- **THEN** the terminal queues it in FIFO order without starting a child or writing a user message
+- **AND** it starts a new turn in the same session only after the preceding turn commits successfully
+- **AND** cancellation, failure, or retained output restores remaining prompts for editing, not replay
+
+#### Scenario: Choose both input destinations in the same turn
+
+- **WHEN** the user queues a later prompt and steers the current invocation before its next boundary
+- **THEN** only the steering text can appear in the current runner's request and display delta
+- **AND** the later prompt starts a different turn after successful settlement, without a view acknowledgment
+
+#### Scenario: Show pending text without predicting the Flow's decision
+
+- **WHEN** either FIFO contains unclaimed messages
+- **THEN** a strip fixed above the editor SHALL preview the first literal line of each visible entry, with `Steering:` rows before `Follow-up:` rows and FIFO order within each destination
+- **AND** scrolling the transcript SHALL NOT scroll the strip; width clipping and limited height MUST NOT change the text available for withdrawal or delivery
+- **AND** the strip SHALL show the applicable withdrawal shortcuts when space permits and disappear when both queues are empty, without fabricating a transcript message
+
+#### Scenario: Label how input entered the conversation
+
+- **WHEN** the terminal presents a validated display delta or reopens its history
+- **THEN** consecutive user additions after a tool batch SHALL be labeled steering and those after an assistant answer SHALL be labeled queued
+- **AND** a prompt durably admitted from the next-turn queue SHALL be labeled queued, while an ordinary admission SHALL remain unmarked
+- **AND** history pagination, save-only presentation and context replacement MUST NOT change those labels or add them to model inputs
+
+#### Scenario: Withdraw pending input
+
+- **WHEN** the user withdraws from either queue before its boundary pull or next-turn claim
+- **THEN** the editor recovers that text without modifying the other queue or cancelling the active turn
+- **AND** withdrawal after a claim cannot pretend to retract a message already in flight
 
 #### Scenario: Reject a second submission
 
-- **WHEN** another prompt arrives while admission, execution, or reply recovery is unresolved
+- **WHEN** another turn is requested directly while admission, execution, or reply recovery is unresolved
 - **THEN** the terminal reports busy without creating a session or starting another child
 
 #### Scenario: Keep the selected conversation stable

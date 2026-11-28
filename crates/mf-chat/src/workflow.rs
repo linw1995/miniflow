@@ -239,6 +239,23 @@ impl Wake for CancelWorkflow {
 
 /// Invokes one backend and forwards optional model-output previews into the conversation Flow.
 pub trait ConversationBackend: Send + Sync {
+    fn supports_steering(&self) -> bool {
+        false
+    }
+
+    fn invoke_with_callbacks(
+        &self,
+        invocation: &Invocation,
+        request: ConversationInputs,
+        context: &mut ExecutionContext,
+        preview: Option<&mut dyn FnMut(crate::PreviewDelta) -> Result<(), ChatError>>,
+        observer: Option<&Observer>,
+        callbacks: mf_runtime::callback::HostCallbacks,
+    ) -> Result<ConversationResult, ChatError> {
+        ensure!(callbacks.is_empty(), SteeringClosedSnafu);
+        self.invoke(invocation, request, context, preview, observer)
+    }
+
     /// Exposes a finite embedded Flow and resolved parameters for `workflow.call` composition.
     /// Other backends are invoked through the host executor for that call.
     fn embedded_workflow(&self) -> Option<(&CompiledWorkflow, &WorkflowArguments)> {
@@ -471,6 +488,9 @@ impl mf_runtime::EmissionSink for ConversationSink<'_> {
 }
 
 impl ConversationBackend for EmbeddedBackend {
+    fn supports_steering(&self) -> bool {
+        self.contract.supports_steering
+    }
     fn embedded_workflow(&self) -> Option<(&CompiledWorkflow, &WorkflowArguments)> {
         self.call.as_ref().map(|_| (&self.plan, &self.parameters))
     }
@@ -486,18 +506,41 @@ impl ConversationBackend for EmbeddedBackend {
 
     fn invoke(
         &self,
-        _: &Invocation,
+        invocation: &Invocation,
         request: ConversationInputs,
         context: &mut ExecutionContext,
         preview: Option<&mut dyn FnMut(crate::PreviewDelta) -> Result<(), ChatError>>,
         observer: Option<&Observer>,
     ) -> Result<ConversationResult, ChatError> {
+        self.invoke_with_callbacks(
+            invocation,
+            request,
+            context,
+            preview,
+            observer,
+            Default::default(),
+        )
+    }
+
+    fn invoke_with_callbacks(
+        &self,
+        _: &Invocation,
+        request: ConversationInputs,
+        context: &mut ExecutionContext,
+        preview: Option<&mut dyn FnMut(crate::PreviewDelta) -> Result<(), ChatError>>,
+        observer: Option<&Observer>,
+        callbacks: mf_runtime::callback::HostCallbacks,
+    ) -> Result<ConversationResult, ChatError> {
         if let Some(error) = context.cancellation().failure() {
             return Err(error.into());
         }
+        let mut registry = NodeRegistry::from_inventory()?;
+        let sites = mf_runtime::callback::callback_sites(&self.plan.graph);
         let Some(call) = &self.call else {
-            return self.invoke_stream(request, context, preview, observer);
+            registry.bind_callbacks(&sites, &[], &callbacks)?;
+            return self.invoke_stream(request, context, preview, observer, &registry);
         };
+        registry.bind_callbacks(&sites, &["workflow".into()], &callbacks)?;
         let arguments = self.contract.arguments(request, &self.parameters)?;
         let arguments = WorkflowArguments(
             arguments
@@ -506,7 +549,6 @@ impl ConversationBackend for EmbeddedBackend {
                 .map(|(name, value)| (mf_runtime::output_id("workflow", &name), value))
                 .collect(),
         );
-        let registry = NodeRegistry::from_inventory()?;
         let observation = observer
             .map(|observer| call.start_observation(observer, RunId::new()))
             .transpose()?;
@@ -565,13 +607,13 @@ impl EmbeddedBackend {
         context: &mut ExecutionContext,
         mut preview: Option<&mut dyn FnMut(crate::PreviewDelta) -> Result<(), ChatError>>,
         observer: Option<&Observer>,
+        registry: &NodeRegistry,
     ) -> Result<ConversationResult, ChatError> {
         let arguments = self.contract.arguments(request, &self.parameters)?;
-        let registry = NodeRegistry::from_inventory()?;
         let observation = observer
             .map(|observer| self.plan.start_stream_observation(observer, RunId::new()))
             .transpose()?;
-        let instance = mf_compiler::instantiate_stream(&self.plan, &registry)?.start_with_options(
+        let instance = mf_compiler::instantiate_stream(&self.plan, registry)?.start_with_options(
             mf_runtime::StreamOptions {
                 arguments,
                 observation,
@@ -771,6 +813,8 @@ struct InvocationCall {
     policy: InvocationPolicy,
     observer: Observer,
     capture: CompletionCapture,
+    steering: Option<Arc<crate::steering::DeliveryLog>>,
+    callbacks: mf_runtime::callback::HostCallbacks,
     previews: bool,
 }
 
@@ -805,53 +849,66 @@ impl InvocationCall {
             self.policy.compaction_parameters.as_ref(),
         )?;
         let mut consume = |delta| emit_preview(&started.invocation, delta, sink);
-        let response = match &self.target {
-            InvocationTarget::Embedded {
-                body,
-                contract,
-                parameters,
-            } => {
-                let arguments = contract.arguments(started.request.clone(), parameters)?;
-                context.set_workflow_arguments(arguments);
-                let mut sink = ConversationSink {
-                    decoder: crate::contract::ConversationOutputDecoder::new(contract),
-                    preview: Some(&mut consume),
-                };
-                let outputs = body.invoke_with_sink(context, &mut sink)?;
-                sink.decoder.accept(outputs)?;
-                sink.decoder.finish()
-            }
-            target => {
-                let (request, subscribe) = if let InvocationTarget::Runner {
-                    contract,
-                    input_schema,
-                    parameters,
-                } = target
-                {
-                    let mut arguments = contract.arguments(started.request.clone(), parameters)?;
-                    input_schema.mark_secrets(&mut arguments);
-                    let request = contract.conversation_inputs(&arguments)?;
-                    context.set_workflow_arguments(arguments);
-                    context.bind_workflow_inputs(input_schema)?;
-                    (request, contract.has_previews())
-                } else {
-                    (started.request.clone(), self.previews)
-                };
-                self.backend.invoke(
+        let response =
+            self.capture
+                .steering
+                .with_active(
                     &started.invocation,
-                    request,
-                    context,
-                    subscribe.then_some(&mut consume as &mut dyn FnMut(_) -> _),
-                    Some(&self.observer),
-                )
-            }
-        };
+                    self.steering.as_ref(),
+                    || match &self.target {
+                        InvocationTarget::Embedded {
+                            body,
+                            contract,
+                            parameters,
+                        } => {
+                            let arguments =
+                                contract.arguments(started.request.clone(), parameters)?;
+                            context.set_workflow_arguments(arguments);
+                            let mut sink = ConversationSink {
+                                decoder: crate::contract::ConversationOutputDecoder::new(contract),
+                                preview: Some(&mut consume),
+                            };
+                            let outputs = body.invoke_with_sink(context, &mut sink)?;
+                            sink.decoder.accept(outputs)?;
+                            sink.decoder.finish()
+                        }
+                        target => {
+                            let (request, subscribe) = if let InvocationTarget::Runner {
+                                contract,
+                                input_schema,
+                                parameters,
+                            } = target
+                            {
+                                let mut arguments =
+                                    contract.arguments(started.request.clone(), parameters)?;
+                                input_schema.mark_secrets(&mut arguments);
+                                let request = contract.conversation_inputs(&arguments)?;
+                                context.set_workflow_arguments(arguments);
+                                context.bind_workflow_inputs(input_schema)?;
+                                (request, contract.has_previews())
+                            } else {
+                                (started.request.clone(), self.previews)
+                            };
+                            self.backend.invoke_with_callbacks(
+                                &started.invocation,
+                                request,
+                                context,
+                                subscribe.then_some(&mut consume as &mut dyn FnMut(_) -> _),
+                                Some(&self.observer),
+                                self.callbacks.clone(),
+                            )
+                        }
+                    },
+                );
         if let Err(error) = &response
             && let Some((_, Some(reply))) = backend_failure(error)
         {
             self.capture.retain(&mut reply.clone());
         }
         let mut response = response?;
+        self.capture
+            .steering
+            .validate(&started.invocation.call_id, response.display_messages())?;
         if let Some(alternatives) = self.target.alternatives() {
             alternatives.validate(&response)?;
             response.validate_against(&started.request.messages)?;
@@ -926,6 +983,7 @@ impl FinishConversationInputs {
 
 #[derive(Clone)]
 struct CompletionCapture {
+    steering: Arc<crate::steering::Deliveries>,
     calls: Arc<Mutex<crate::CallEventCollector>>,
     delivered: Arc<Mutex<Option<ConversationResult>>>,
 }
@@ -949,7 +1007,7 @@ impl CompletionCapture {
     fn finish(&self, inputs: FinishConversationInputs) -> Result<SettlementOutputs, ChatError> {
         let mut completion = inputs.into_turn_completion()?;
         self.retain(&mut completion.response);
-        let completion = crate::turn::complete(completion)?.completion;
+        let completion = crate::turn::complete(completion, &self.steering)?.completion;
         Ok(SettlementOutputs {
             settlement: Settlement { completion },
         })
@@ -1208,21 +1266,30 @@ pub fn run_conversation_with_context_windows(
         &automatic_compaction,
         observer,
         ConversationPresentation {
+            queued_prompt: false,
+            on_admitted: None,
             preview,
             tools: None,
+            steering: None,
             context_windows,
         },
     )
 }
 
-pub(super) struct ConversationPresentation {
+#[derive(Default)]
+pub struct ConversationPresentation {
+    /// This invocation admits a prompt claimed from the session's next-turn queue.
+    pub queued_prompt: bool,
+    /// Called once, after the original user message and turn have been durably admitted.
+    pub on_admitted: Option<Box<dyn FnOnce() + Send>>,
+    pub steering: Option<crate::SteeringInbox>,
     pub preview: Option<PreviewConsumer>,
     pub tools: Option<crate::ToolExecutionMetrics>,
     pub context_windows: ModelContextWindowCache,
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn run_observed_conversation(
+pub fn run_observed_conversation(
     database: &ChatDatabase,
     mut request: BeginTurnInputs,
     backend: Arc<dyn ConversationBackend>,
@@ -1234,7 +1301,10 @@ pub(super) fn run_observed_conversation(
 ) -> Result<ReconciledCompletion, ChatError> {
     automatic_compaction.validate()?;
     let ConversationPresentation {
+        queued_prompt,
+        on_admitted,
         mut preview,
+        steering,
         tools,
         context_windows,
     } = presentation;
@@ -1250,6 +1320,10 @@ pub(super) fn run_observed_conversation(
         turn_id: request.turn_id.clone(),
         call_id: request.call_id.clone(),
     };
+    ensure!(
+        steering.is_none() || backend.supports_steering(),
+        crate::error::SteeringClosedSnafu
+    );
     let calls = Arc::new(Mutex::new(crate::CallEventCollector::default()));
     let collected = calls.clone();
     let _events = mf_telemetry::events::collect(move |event| {
@@ -1271,6 +1345,11 @@ pub(super) fn run_observed_conversation(
         .flatten();
     let observer = observer.cloned().unwrap_or_else(|| Observer::stderr(0));
     let mut registry = NodeRegistry::from_inventory()?;
+    let steering = steering.map(crate::steering::DeliveryLog::new);
+    let callbacks: mf_runtime::callback::HostCallbacks = steering
+        .iter()
+        .map(|log| (crate::steering::CALLBACK_NAME.into(), log.callback()))
+        .collect();
     let registered = backend.registered_workflow();
     let embedded = registered
         .is_none()
@@ -1284,6 +1363,11 @@ pub(super) fn run_observed_conversation(
             parameters: parameters.clone(),
         }
     } else if let Some((embedded, parameters)) = embedded {
+        registry.bind_callbacks(
+            &mf_runtime::callback::callback_sites(&embedded.graph),
+            &["workflow".into()],
+            &callbacks,
+        )?;
         InvocationTarget::Embedded {
             body: Box::new(mf_compiler::prepare_call_body(
                 &plan, &registry, "workflow",
@@ -1319,14 +1403,22 @@ pub(super) fn run_observed_conversation(
         });
     }
     let capture = CompletionCapture {
+        steering: database.deliveries.clone(),
         calls,
         delivered: Arc::new(Mutex::new(None)),
     };
+    let on_admitted = Mutex::new(on_admitted);
     bind_call(
         &mut registry,
         &plan,
         "begin",
-        host_task("begin", crate::turn::begin),
+        host_task("begin", move |input| {
+            let started = crate::turn::begin(input, queued_prompt)?;
+            if let Some(notify) = on_admitted.lock().unwrap().take() {
+                notify();
+            }
+            Ok(started)
+        }),
     )?;
     bind_call(
         &mut registry,
@@ -1345,6 +1437,8 @@ pub(super) fn run_observed_conversation(
             },
             observer: observer.clone(),
             capture: capture.clone(),
+            steering,
+            callbacks,
             previews: preview.is_some(),
         }
         .prepare(),

@@ -23,6 +23,92 @@ fn caller(body: &WorkflowDefinition) -> WorkflowDefinition {
 }
 
 #[test]
+fn callback_authority_is_unique_scoped_and_absent_from_movable_children() {
+    use mf_runtime::callback::{CallbackReply, HostCallback};
+    let body = json!({
+        "nodes": [{"id":"arg", "kind":"builtin.parameters", "config": {
+            "parameters": {"s": {"type":"string", "default":"fallback"}}
+        }}],
+        "outputs": [{"name":"value", "node":"arg", "port":"s"}]
+    });
+    let call = |id: &str, name: &str| {
+        json!({
+            "id":id, "kind":"workflow.call", "config":{"flow":format!("callback:{name}"), "body":body}
+        })
+    };
+    let doc: WorkflowDefinition = serde_json::from_value(json!({
+        "version":"2026-11-13", "dependencies":{},
+        "nodes": [call("selected", "choose"), call("other", "ambiguous"), call("third", "ambiguous"), {
+            "id":"tool", "kind":"builtin.constant", "config":{"type":"flow", "value":{
+                "version":"2026-11-13", "dependencies":{}, "nodes":[call("inner", "choose")],
+                "outputs":[{"name":"value", "node":"inner", "port":"value"}]
+            }}
+        }],
+        "outputs":[{"name":"value", "node":"selected", "port":"value"},
+                   {"name":"other", "node":"other", "port":"value"}]
+    })).unwrap();
+    let mut registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_resolved_definition(&doc, &registry).unwrap();
+    let manifest = plan.manifest(&registry).unwrap();
+    let mut invalid = manifest.clone();
+    for path in [
+        vec![],
+        vec!["missing".to_owned()],
+        vec!["selected".to_owned()],
+    ] {
+        invalid.descriptor.callbacks.insert("other".into(), path);
+        assert!(invalid.validate().is_err());
+    }
+    let sites = manifest.descriptor.callbacks;
+    assert_eq!(sites, [("choose".into(), vec!["selected".into()])].into());
+    let callback = HostCallback::new(|args, _| {
+        assert!(args.0["arg.s"].is_secret());
+        Ok(CallbackReply::from(mf_runtime::Outputs::from([(
+            "value".into(),
+            "bound".into(),
+        )])))
+    });
+    let bound = [("choose".into(), callback.clone())].into();
+    assert!(
+        registry
+            .bind_callbacks(
+                &sites,
+                &[],
+                &[
+                    ("choose".into(), callback.clone()),
+                    ("unbound".into(), callback)
+                ]
+                .into()
+            )
+            .is_err()
+    );
+    registry.bind_callbacks(&sites, &[], &bound).unwrap();
+    assert!(registry.bind_callbacks(&sites, &[], &bound).is_err());
+    let result = mf_compiler::execute_compiled(&plan, &registry, None).unwrap();
+    assert_eq!(result["value"].as_str(), Some("bound"));
+    assert_eq!(result["other"].as_str(), Some("fallback"));
+}
+
+#[test]
+fn a_reserved_callback_declaration_needs_a_nonblank_binding_name() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let definition: WorkflowDefinition = serde_json::from_value(json!({
+        "version":"2026-10-28", "dependencies":{}, "nodes":[{
+            "id":"bad", "kind":"workflow.call", "config":{"flow":"callback: ", "body":{
+                "nodes":[{"id":"literal","kind":"builtin.constant","config":{"value":1}}],
+                "outputs":[{"name":"value","node":"literal","port":"value"}]
+            }}
+        }]
+    }))
+    .unwrap();
+    let error = compile_resolved_definition(&definition, &registry).unwrap_err();
+    assert!(
+        error.to_string().contains("host callbacks require a name"),
+        "{error}"
+    );
+}
+
+#[test]
 fn registered_calls_use_host_execution_without_loading_child_providers() {
     let mut registry = NodeRegistry::from_inventory().unwrap();
     let body = child();

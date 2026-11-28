@@ -250,6 +250,279 @@ fn public_stream_requiredness_is_preserved_independently_of_the_source_port() {
     }
 }
 
+fn wired_child(config: Value) -> Value {
+    json!({"version":"2026-10-28", "nodes":[
+        {"id":"step","kind":"fixture.task_stream","config":config},
+        {"id":"buffer","kind":"builtin.batch","config":{"max_items":2,"max_wait_ms":60000},
+         "inputs":{"item":{"from":{"node":"step","port":"delta"}}}},
+        {"id":"copy","kind":"builtin.identity","inputs":{"input":{"from":{"node":"buffer","port":"items"}}}}
+    ], "outputs":[{"name":"increment","node":"copy","port":"value"},{"name":"count","node":"step","port":"total"}]})
+}
+
+#[test]
+fn callback_bindings_replace_a_scheduled_body_only_when_its_public_interface_is_finite() {
+    let mut registry = NodeRegistry::from_inventory().unwrap();
+    let mut document = caller(wired_child(json!({})));
+    let config = &mut document["nodes"][0]["config"];
+    config["flow"] = json!("callback:count");
+    let parse = |document: &Value| serde_json::from_value(document.clone()).unwrap();
+    let error = compile_definition(&parse(&document), &registry).unwrap_err();
+    assert!(error.to_string().contains("finite interface"), "{error}");
+
+    document["nodes"][0]["config"]["body"]["outputs"]
+        .as_array_mut()
+        .unwrap()
+        .remove(0);
+    document["outputs"].as_array_mut().unwrap().remove(0);
+    let plan = compile_definition(&parse(&document), &registry).unwrap();
+    let run = |registry: &NodeRegistry| {
+        mf_compiler::execute_compiled_with_inputs(
+            &plan,
+            registry,
+            arguments("invoke.step.count"),
+            None,
+        )
+        .unwrap()["count"]
+            .clone()
+    };
+    assert_eq!(run(&registry), json!(2));
+    let sites = plan.manifest(&registry).unwrap().descriptor.callbacks;
+    let callback = mf_runtime::callback::HostCallback::new(|args, _| {
+        assert_eq!(args.0["step.count"], json!(2));
+        Ok(mf_runtime::Outputs::from([("count".into(), 17_u64.into())]).into())
+    });
+    registry
+        .bind_callbacks(&sites, &[], &[("count".into(), callback)].into())
+        .unwrap();
+    assert_eq!(run(&registry), json!(17));
+}
+
+#[test]
+fn callable_stream_edges_flush_before_return_and_isolate_concurrent_invocations() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(
+        &serde_json::from_value(caller(wired_child(json!({})))).unwrap(),
+        &registry,
+    )
+    .unwrap();
+    let body = mf_compiler::prepare_call_body(&plan, &registry, "invoke").unwrap();
+    let flow = mf_runtime::FlowValue::new(body).unwrap();
+    assert_eq!(flow.stream_output_ports()[0].name, "increment");
+    assert_eq!(flow.output_ports()[0].name, "count");
+    std::thread::scope(|threads| {
+        for count in [5_usize, 0, 4, 1] {
+            let flow = &flow;
+            threads.spawn(move || {
+                let mut ctx = mf_runtime::ExecutionContext::default();
+                ctx.configure_worker_limit(1.try_into().unwrap());
+                let args = json!({"step.count":count}).try_into().unwrap();
+                ctx.set_workflow_arguments(args);
+                let invocation = flow.body().start_in_context(ctx).unwrap();
+                let mut batches = Vec::new();
+                while let Some(record) = invocation.recv().unwrap() {
+                    assert_eq!(record.result.outputs.len(), 1);
+                    batches
+                        .push(serde_json::to_value(&record.result.outputs["increment"]).unwrap());
+                }
+                assert_eq!(
+                    batches,
+                    (0..count)
+                        .collect::<Vec<_>>()
+                        .chunks(2)
+                        .map(|b| json!(b))
+                        .collect::<Vec<_>>()
+                );
+                assert_eq!(invocation.join().unwrap().unwrap()["count"], json!(count));
+            });
+        }
+    });
+}
+
+struct Receiver<F>(F);
+impl<F: FnMut(mf_runtime::NodeResult) -> Result<(), mf_runtime::StreamError>>
+    mf_runtime::EmissionSink for Receiver<F>
+{
+    fn send(&mut self, packet: mf_runtime::NodeResult) -> Result<(), mf_runtime::StreamError> {
+        (self.0)(packet)
+    }
+}
+
+fn callable(child: Value) -> mf_runtime::FlowValue {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan =
+        compile_definition(&serde_json::from_value(caller(child)).unwrap(), &registry).unwrap();
+    mf_runtime::FlowValue::new(mf_compiler::prepare_call_body(&plan, &registry, "invoke").unwrap())
+        .unwrap()
+}
+
+#[test]
+fn callable_message_selections_keep_related_values_together_and_skip_absent_domains() {
+    let mut leaf = wired_child(json!({}));
+    let outputs = leaf["outputs"].as_array_mut().unwrap();
+    outputs.push(json!({"name":"original","node":"buffer","port":"items"}));
+    outputs.push(json!({"name":"delta","node":"step","port":"delta"}));
+    let flow = callable(leaf);
+    assert!(flow.stream_output_ports().iter().all(|p| !p.required));
+    let mut ctx = mf_runtime::ExecutionContext::default();
+    let mut deltas = Vec::new();
+    let mut batches = Vec::new();
+    let result = flow
+        .invoke_with_sink(
+            "caller",
+            json!({"step.count":3}).try_into().unwrap(),
+            &mut ctx,
+            &mut Receiver(|record: mf_runtime::NodeResult| {
+                if let Some(delta) = record.outputs.get("delta") {
+                    assert_eq!(
+                        record.skipped,
+                        ["increment".to_string(), "original".to_string()].into()
+                    );
+                    deltas.push(delta.as_u64().unwrap());
+                } else {
+                    assert_eq!(record.skipped, ["delta".to_string()].into());
+                    assert!(record.outputs["increment"].ptr_eq(&record.outputs["original"]));
+                    batches.push(serde_json::to_value(&record.outputs["increment"]).unwrap());
+                }
+                Ok(())
+            }),
+        )
+        .unwrap();
+    assert_eq!(result["count"], json!(3));
+    assert_eq!(deltas, [0, 1, 2]);
+    assert_eq!(batches, [json!([0, 1]), json!([2])]);
+}
+
+#[test]
+fn a_task_stream_edge_alone_schedules_a_callable_body_and_preserves_cancellation() {
+    let root = tempfile::tempdir().unwrap();
+    let mut leaf = child(json!({"wait_path":root.path().join("unreleased")}));
+    leaf["version"] = json!("2026-10-28");
+    leaf["nodes"].as_array_mut().unwrap().push(json!({"id":"copy","kind":"builtin.identity","inputs":{"input":{"from":{"node":"step","port":"delta"}}}}));
+    leaf["outputs"][0] = json!({"name":"increment","node":"copy","port":"value"});
+    let flow = callable(leaf);
+    let mut ctx = mf_runtime::ExecutionContext::default();
+    let token = ctx.cancellation();
+    let mut delivered = 0;
+    let result = flow.invoke_with_sink(
+        "caller",
+        arguments("step.count"),
+        &mut ctx,
+        &mut Receiver(|packet: mf_runtime::NodeResult| {
+            assert_eq!(packet.outputs["increment"], json!(0));
+            delivered += 1;
+            token.cancel(
+                mf_runtime::StreamExecutionSnafu {
+                    message: "stop child after prefix",
+                }
+                .build(),
+            );
+            Ok(())
+        }),
+    );
+    assert_eq!(delivered, 1);
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("stop child after prefix")
+    );
+}
+
+#[test]
+fn reconstructed_operators_must_still_match_their_prepared_contract() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static DRIFT: AtomicUsize = AtomicUsize::new(0);
+    inventory::submit! { mf_runtime::NodeRegistration { kind: "fixture.wired_operator", factory: mf_runtime::NodeFactory::Plain(|config| {
+        let registry = NodeRegistry::from_inventory().unwrap();
+        let drift = DRIFT.load(Ordering::Relaxed);
+        let kind = if drift == 1 { "builtin.identity" } else { "builtin.batch" };
+        let mut node = registry.get(kind).unwrap().instantiate(config)?;
+        if drift == 2 { node.metadata.ports.outputs.clear(); }
+        Ok(node)
+    }) } }
+    let mut leaf = wired_child(json!({}));
+    leaf["nodes"][1]["kind"] = json!("fixture.wired_operator");
+    let flow = callable(leaf);
+    let mut ctx = mf_runtime::ExecutionContext::default();
+    for (drift, reason) in [(1, "execution kind"), (2, "port contract")] {
+        DRIFT.store(drift, Ordering::Relaxed);
+        let error = flow
+            .invoke("caller", arguments("step.count"), &mut ctx)
+            .unwrap_err();
+        assert!(error.to_string().contains(reason), "{error}");
+        assert!(ctx.cancellation().failure().is_none());
+    }
+    DRIFT.store(0, Ordering::Relaxed);
+    assert_eq!(
+        flow.invoke("recovered", arguments("step.count"), &mut ctx)
+            .unwrap()["count"],
+        json!(2)
+    );
+}
+
+#[test]
+fn pure_producer_runs_inside_a_call_and_a_rejected_delivery_cancels_its_receiver() {
+    let flow = callable(json!({"version":"2026-10-28","nodes":[
+        {"id":"feed","kind":"fixture.task_stream_feed","config":{"counts":[1,2,3]}},
+        {"id":"copy","kind":"builtin.identity","inputs":{"input":{"from":{"node":"feed","port":"count"}}}},
+        {"id":"startup","kind":"builtin.constant","config":{"value":42}}
+    ],"outputs":[{"name":"increment","node":"copy","port":"value"},{"name":"count","node":"startup","port":"value"}]}));
+    let mut ctx = mf_runtime::ExecutionContext::default();
+    let mut seen = Vec::new();
+    let result = flow
+        .invoke_with_sink(
+            "caller",
+            Default::default(),
+            &mut ctx,
+            &mut Receiver(|record: mf_runtime::NodeResult| {
+                seen.push(record.outputs["increment"].as_u64().unwrap());
+                if seen.len() == 2 {
+                    return Err(mf_runtime::StreamExecutionSnafu {
+                        message: "receiver closed",
+                    }
+                    .build());
+                }
+                Ok(())
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(seen, [1, 2]);
+    assert!(result.to_string().contains("receiver closed"));
+    assert!(ctx.cancellation().failure().is_some());
+    let mut fresh = mf_runtime::ExecutionContext::default();
+    assert_eq!(
+        flow.invoke("again", Default::default(), &mut fresh)
+            .unwrap()["count"],
+        json!(42)
+    );
+}
+
+#[test]
+fn child_streams_reject_cross_domain_joins_and_fail_before_returning_the_startup_frame() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let mut invalid = wired_child(json!({}));
+    invalid["nodes"].as_array_mut().unwrap().push(json!({"id":"join","kind":"fixture.task_stream_join", "inputs":{
+        "delta":{"from":{"node":"step","port":"delta"}}, "total":{"from":{"node":"step","port":"total"}}}}));
+    let error = compile_definition(&serde_json::from_value(caller(invalid)).unwrap(), &registry)
+        .unwrap_err();
+    assert!(error.to_string().contains("one message domain"), "{error}");
+
+    let mut leaf = wired_child(json!({}));
+    // A downstream failure must suppress even an independently selected startup result.
+    leaf["nodes"].as_array_mut().unwrap().push(json!({"id":"fail","kind":"fixture.iteration_stream", "config":{"fail_count":0}, "inputs":{"count":{"from":{"node":"step","port":"delta"}}}}));
+    let mut parent = caller(leaf);
+    parent["outputs"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|o| o["name"] == "count");
+    let plan = compile_definition(&serde_json::from_value(parent).unwrap(), &registry).unwrap();
+    let error = instantiate_compiled(&plan, &registry)
+        .unwrap()
+        .execute_with_inputs(arguments("invoke.step.count"))
+        .unwrap_err();
+    assert!(error.to_string().contains("item 0 failed"), "{error}");
+}
+
 #[cfg(unix)]
 #[test]
 fn standalone_calls_forward_frozen_streams_without_sources() {
@@ -260,7 +533,7 @@ fn standalone_calls_forward_frozen_streams_without_sources() {
     let child_path = root.path().join("child.json");
     let output = root.path().join("runner");
     let build = root.path().join("build");
-    let mut leaf = child(json!({"marker":marker}));
+    let mut leaf = wired_child(json!({"marker":marker}));
     leaf["execution"] = json!({});
     leaf["dependencies"] = json!({"fixture":{"package":"fixture-multi-nodes","path":std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/multi-nodes")}});
     let mut parent = caller(leaf.clone());
@@ -292,7 +565,7 @@ fn standalone_calls_forward_frozen_streams_without_sources() {
     let invoke = |drift: bool| {
         let mut command = Command::new(&output);
         command
-            .args(["--inputs", r#"{"invoke.step.count":2}"#])
+            .args(["--inputs", r#"{"invoke.step.count":3}"#])
             .env_clear()
             .env("PATH", "");
         if drift {
@@ -323,7 +596,7 @@ fn standalone_calls_forward_frozen_streams_without_sources() {
             .filter_map(|value| value.get("increment"))
             .cloned()
             .collect::<Vec<_>>(),
-        vec![json!(0), json!(1)]
+        vec![json!([0, 1]), json!([2])]
     );
     assert_eq!(
         values
@@ -331,7 +604,7 @@ fn standalone_calls_forward_frozen_streams_without_sources() {
             .filter(|value| value.get("count").is_some())
             .cloned()
             .collect::<Vec<_>>(),
-        vec![json!({"count":2})]
+        vec![json!({"count":3})]
     );
 }
 

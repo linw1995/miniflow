@@ -176,7 +176,7 @@
         "until": {
           "variable": "outcome",
           "operator": "ne",
-          "value": "tool_calls"
+          "value": "continue"
         },
         "body": {
           "version": "2026-11-13",
@@ -290,6 +290,46 @@
                     "port": "usages"
                   }
                 }
+              }
+            },
+            {
+              "id": "can_steer_check",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "outcome": "string"
+                },
+                "code": {
+                  "active": "outcome == 'tool_calls' || outcome == 'completed'"
+                }
+              },
+              "inputs": {
+                "outcome": {
+                  "from": {
+                    "node": "record_pass",
+                    "port": "outcome"
+                  }
+                }
+              }
+            },
+            {
+              "id": "can_steer",
+              "kind": "builtin.if_else",
+              "config": {
+                "branches": [
+                  {
+                    "id": "active",
+                    "condition": {
+                      "source": {
+                        "output": "can_steer_check.active",
+                        "path": ""
+                      },
+                      "operator": "eq",
+                      "value": true
+                    }
+                  }
+                ]
               }
             },
             {
@@ -637,10 +677,20 @@
               }
             },
             {
-              "id": "finished_generated",
-              "kind": "builtin.identity",
+              "id": "non_tool_reply",
+              "kind": "builtin.parameters",
+              "config": {
+                "parameters": {
+                  "generated": {
+                    "type": {
+                      "list": "object"
+                    },
+                    "secret": false
+                  }
+                }
+              },
               "inputs": {
-                "input": {
+                "generated": {
                   "from": {
                     "node": "append_assistant",
                     "port": "generated"
@@ -649,18 +699,202 @@
               }
             },
             {
-              "id": "generated",
-              "kind": "builtin.identity",
+              "id": "reply_generated",
+              "kind": "builtin.parameters",
+              "config": {
+                "parameters": {
+                  "generated": {
+                    "type": {
+                      "list": "object"
+                    },
+                    "secret": false
+                  }
+                }
+              },
               "inputs": {
-                "input": {
+                "generated": {
                   "exclusive": [
                     {
                       "node": "append_tool_results",
                       "port": "generated"
                     },
                     {
-                      "node": "finished_generated",
-                      "port": "value"
+                      "node": "non_tool_reply",
+                      "port": "generated"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "id": "steering",
+              "kind": "workflow.call",
+              "config": {
+                "flow": "callback:steering",
+                "body": {
+                  "nodes": [
+                    {
+                      "id": "empty",
+                      "kind": "builtin.constant",
+                      "config": {
+                        "value": []
+                      }
+                    },
+                    {
+                      "id": "result",
+                      "kind": "builtin.parameters",
+                      "config": {
+                        "parameters": {
+                          "messages": {
+                            "type": {
+                              "list": "object"
+                            },
+                            "secret": false
+                          }
+                        }
+                      },
+                      "inputs": {
+                        "messages": {
+                          "from": {
+                            "node": "empty",
+                            "port": "value"
+                          }
+                        }
+                      }
+                    }
+                  ],
+                  "outputs": [
+                    {
+                      "name": "messages",
+                      "node": "result",
+                      "port": "messages"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "id": "steered_generated",
+              "kind": "workflow.call",
+              "config": {
+                "flow": "agent-request"
+              },
+              "inputs": {
+                "params.prefix": {
+                  "from": {
+                    "node": "reply_generated",
+                    "port": "generated"
+                  }
+                },
+                "params.generated": {
+                  "from": {
+                    "node": "steering",
+                    "port": "messages"
+                  }
+                }
+              }
+            },
+            {
+              "id": "steered_outcome",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "additions": {
+                    "list": "object"
+                  },
+                  "outcome": "string"
+                },
+                "code": {
+                  "outcome": "outcome == 'tool_calls' || size(additions) > 0 ? 'continue' : outcome"
+                }
+              },
+              "inputs": {
+                "additions": {
+                  "from": {
+                    "node": "steering",
+                    "port": "messages"
+                  }
+                },
+                "outcome": {
+                  "from": {
+                    "node": "turn",
+                    "port": "outcome"
+                  }
+                }
+              }
+            },
+            {
+              "id": "failed_reply",
+              "kind": "builtin.parameters",
+              "config": {
+                "parameters": {
+                  "generated": {
+                    "type": {
+                      "list": "object"
+                    },
+                    "secret": false
+                  },
+                  "outcome": {
+                    "type": "string",
+                    "secret": false
+                  }
+                }
+              },
+              "inputs": {
+                "generated": {
+                  "from": {
+                    "node": "reply_generated",
+                    "port": "generated"
+                  }
+                },
+                "outcome": {
+                  "from": {
+                    "node": "record_pass",
+                    "port": "outcome"
+                  }
+                }
+              }
+            },
+            {
+              "id": "step_result",
+              "kind": "builtin.parameters",
+              "config": {
+                "parameters": {
+                  "generated": {
+                    "type": {
+                      "list": "object"
+                    },
+                    "secret": false
+                  },
+                  "outcome": {
+                    "type": "string",
+                    "secret": false
+                  }
+                }
+              },
+              "inputs": {
+                "generated": {
+                  "exclusive": [
+                    {
+                      "node": "steered_generated",
+                      "port": "messages"
+                    },
+                    {
+                      "node": "failed_reply",
+                      "port": "generated"
+                    }
+                  ]
+                },
+                "outcome": {
+                  "exclusive": [
+                    {
+                      "node": "steered_outcome",
+                      "port": "outcome"
+                    },
+                    {
+                      "node": "failed_reply",
+                      "port": "outcome"
                     }
                   ]
                 }
@@ -697,6 +931,20 @@
               "to_node": "route"
             },
             {
+              "from_node": "can_steer_check",
+              "to_node": "can_steer"
+            },
+            {
+              "from_node": "can_steer",
+              "from_output": "active",
+              "to_node": "steering"
+            },
+            {
+              "from_node": "can_steer",
+              "from_output": "else",
+              "to_node": "failed_reply"
+            },
+            {
               "from_node": "route",
               "from_output": "tool_calls",
               "to_node": "dispatch"
@@ -704,11 +952,16 @@
             {
               "from_node": "route",
               "from_output": "else",
-              "to_node": "finished_generated"
+              "to_node": "non_tool_reply"
             },
             {
               "from_node": "append_assistant",
               "to_node": "dispatch"
+            },
+            {
+              "from_node": "reply_generated",
+              "from_output": "generated",
+              "to_node": "steering"
             }
           ],
           "clusters": [
@@ -717,6 +970,8 @@
               "annotation": "Append the assistant message and decide whether to dispatch tools.",
               "collapsed": true,
               "nodes": [
+                "can_steer_check",
+                "can_steer",
                 "route",
                 "append_assistant"
               ]
@@ -743,16 +998,21 @@
                 "record_pass",
                 "provider_error",
                 "pass_error",
-                "finished_generated",
-                "generated"
+                "non_tool_reply",
+                "reply_generated",
+                "steering",
+                "steered_generated",
+                "steered_outcome",
+                "failed_reply",
+                "step_result"
               ]
             }
           ],
           "outputs": [
             {
               "name": "generated",
-              "node": "generated",
-              "port": "value"
+              "node": "step_result",
+              "port": "generated"
             },
             {
               "name": "checkpoint",
@@ -772,7 +1032,7 @@
             },
             {
               "name": "outcome",
-              "node": "record_pass",
+              "node": "step_result",
               "port": "outcome"
             },
             {

@@ -1,5 +1,16 @@
 //! Supervision and terminal presentation for one locally launched workflow.
 
+mod pips;
+use mf_runtime::{
+    callback::{CallbackSites, HostCallbacks},
+    callback_rpc::{
+        HostSession,
+        host::{Listener, Server},
+    },
+};
+
+use pips::{PipGrid, PipScene, PipSurface};
+
 use crate::{
     duration::format_duration_ns,
     graph::{
@@ -43,6 +54,7 @@ use ratatui::{
 use signal_hook::{SigId, consts::SIGINT, flag, low_level::unregister};
 use snafu::{IntoError, ResultExt, Snafu, ensure};
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet, VecDeque},
     env,
     fs::File,
@@ -68,6 +80,10 @@ const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Snafu)]
 pub enum RunError {
+    #[snafu(transparent)]
+    Callback {
+        source: mf_runtime::callback::CallbackError,
+    },
     #[snafu(transparent)]
     StreamTransport { source: mf_runtime::StreamError },
     #[snafu(display("TUI requires terminal stdin and stderr"))]
@@ -192,6 +208,11 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
     let manifest = read_manifest(path).context(ManifestSnafu)?;
     let arguments = options.workflow_arguments(&manifest.descriptor.input_schema)?;
     let description = manifest.description()?;
+    let arguments = mf_runtime::resolve_workflow_inputs(
+        &manifest.descriptor.input_schema,
+        &arguments,
+        |name| std::env::var_os(name),
+    )?;
     let needs_stdin = manifest
         .descriptor
         .input_schema
@@ -199,7 +220,7 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
         .is_some();
     if needs_stdin {
         return option_error(
-            "TUI execution cannot supply workflow stdin; provide source parameters or run the executable directly",
+            "TUI execution cannot supply workflow stdin; provide source parameters",
         );
     }
     let arguments = if !arguments.0.is_empty() {
@@ -442,6 +463,11 @@ pub struct LocalOutcome {
 
 #[derive(Debug, Snafu)]
 pub enum CaptureFailure {
+    #[snafu(display("runner host RPC failed: {source}"))]
+    Callback {
+        #[snafu(source(from(mf_runtime::callback::CallbackError, Arc::new)))]
+        source: Arc<mf_runtime::callback::CallbackError>,
+    },
     #[snafu(display("invalid workflow output record: {source}"))]
     OutputRecord { source: serde_json::Error },
     #[snafu(display("workflow output consumer disconnected: {source}"))]
@@ -509,9 +535,17 @@ struct StreamCaptureState {
     sender: std::sync::mpsc::SyncSender<mf_runtime::NodeValues>,
     cancellation: mf_runtime::StreamCancellation,
 }
+pub enum InvocationIo {
+    Standard(crate::runner::RunnerOutput),
+    /// No argument file or stdout decoder: the consumer receives native business records.
+    Hosted(WorkflowArguments),
+}
+
 pub struct LocalRun {
+    cancellation: mf_runtime::StreamCancellation,
     records: Option<std::sync::mpsc::Receiver<mf_runtime::NodeValues>>,
     child: ChildGuard,
+    rpc: Option<Server>,
     capture: CaptureWorker,
     receiver: LoopbackReceiver,
     started: Instant,
@@ -529,7 +563,16 @@ impl LocalRun {
         run_id: RunId,
         stdout_limit: u64,
     ) -> Result<Self, RunError> {
-        Self::start_inner(command, description, run_id, stdout_limit, None)
+        Self::start_invocation(
+            command,
+            description,
+            run_id,
+            Default::default(),
+            None,
+            InvocationIo::Standard(crate::runner::RunnerOutput::Finite {
+                limit: stdout_limit,
+            }),
+        )
     }
 
     pub fn start_stream(
@@ -538,52 +581,83 @@ impl LocalRun {
         run_id: RunId,
         cancellation: mf_runtime::StreamCancellation,
     ) -> Result<Self, RunError> {
-        Self::start_inner(
+        Self::start_invocation(
             command,
             description,
             run_id,
-            MAX_STDOUT_BYTES,
-            Some(cancellation),
+            cancellation,
+            None,
+            InvocationIo::Standard(crate::runner::RunnerOutput::Records),
         )
     }
 
-    fn start_inner(
+    pub fn start_invocation(
         mut command: Command,
         description: WorkflowDescription,
         run_id: RunId,
-        stdout_limit: u64,
-        stream: Option<mf_runtime::StreamCancellation>,
+        cancellation: mf_runtime::StreamCancellation,
+        bindings: Option<(&CallbackSites, HostCallbacks)>,
+        io: InvocationIo,
     ) -> Result<Self, RunError> {
-        let (records, stream) = stream
-            .map(|cancellation| {
-                let (sender, receiver) = std::sync::mpsc::sync_channel(64);
-                (
-                    receiver,
-                    StreamCaptureState {
-                        decoder: NativeOutputDecoder::default(),
-                        sender,
-                        cancellation,
-                    },
-                )
-            })
-            .unzip();
-        if let Some(error) = stream
-            .as_ref()
-            .and_then(|stream| stream.cancellation.failure())
-        {
+        use crate::runner::RunnerOutput;
+        if let Some(error) = cancellation.failure() {
             return Err(error.into());
         }
+        let (spool_limit, inputs) = match io {
+            InvocationIo::Standard(RunnerOutput::Finite { limit }) => (Some(limit), None),
+            InvocationIo::Standard(RunnerOutput::Records) => (None, None),
+            InvocationIo::Hosted(inputs) => (None, Some(inputs)),
+        };
+        let hosted = inputs.is_some();
+        let capture = Arc::new(Mutex::new(Capture::new(spool_limit).context(SpoolSnafu)?));
+        let empty = CallbackSites::new();
+        let (sites, callbacks) = bindings.unwrap_or_else(|| (&empty, HostCallbacks::new()));
+        let mut session = HostSession {
+            callbacks,
+            inputs,
+            ..Default::default()
+        };
+        let (sender, records) = spool_limit
+            .is_none()
+            .then(|| std::sync::mpsc::sync_channel(64))
+            .unzip();
+        let mut stream = None;
+        if let Some(sender) = sender {
+            if hosted {
+                session.output = Some(Box::new(move |record, cancel| {
+                    send_record(&sender, record, cancel, || false)
+                        .boxed()
+                        .context(mf_runtime::callback::HandlerSnafu)
+                }));
+                let diagnostics = capture.clone();
+                session.diagnostics = Some(Box::new(move |value, _| {
+                    let level = match value.level {
+                        mf_runtime::DiagnosticLevel::Warning => "warning",
+                        mf_runtime::DiagnosticLevel::Error => "error",
+                    };
+                    diagnostics
+                        .lock()
+                        .unwrap()
+                        .store_stderr(format!("{level}: {}\n", value.message).as_bytes());
+                    Ok(())
+                }));
+            } else {
+                stream = Some(StreamCaptureState {
+                    decoder: Default::default(),
+                    sender,
+                    cancellation: cancellation.clone(),
+                });
+            }
+        }
+        let listener = Listener::prepare_session(&mut command, sites, session)?;
         let receiver = LoopbackReceiver::bind(description, run_id).context(ReceiverSnafu)?;
-        let capture = Arc::new(Mutex::new(Capture::new().context(SpoolSnafu)?));
-        capture.lock().expect("capture lock was not poisoned").limit =
-            stdout_limit.min(MAX_STDOUT_BYTES);
-        capture
-            .lock()
-            .expect("capture lock was not poisoned")
-            .record_mode = stream.is_some();
         command
             .stdin(Stdio::null())
-            .stdout(Stdio::piped())
+            .stdout(if hosted {
+                Stdio::null()
+            } else {
+                Stdio::piped()
+            })
             .stderr(Stdio::piped());
         for (name, _) in env::vars_os() {
             if name.to_string_lossy().starts_with("OTEL_EXPORTER_OTLP_") {
@@ -603,6 +677,17 @@ impl LocalRun {
         let mut command = CommandWrap::from(command);
         command.wrap(ProcessGroup::leader());
         let mut child = ChildGuard::new(command.spawn().context(SpawnSnafu { path })?);
+        let diagnostics = capture.clone();
+        let rpc = listener
+            .map(|listener| {
+                listener.start(child.child.id(), &cancellation, move |error| {
+                    diagnostics
+                        .lock()
+                        .unwrap()
+                        .record_failure(CallbackSnafu.into_error(error));
+                })
+            })
+            .transpose()?;
         capture
             .lock()
             .expect("capture lock was not poisoned")
@@ -611,12 +696,11 @@ impl LocalRun {
                 operation: "attach workflow output pipes",
             })?;
         Ok(Self {
+            cancellation,
             records,
             child,
-            capture: match stream {
-                Some(stream) => CaptureWorker::start_with_stream(capture, Some(stream)),
-                None => CaptureWorker::start(capture),
-            },
+            rpc,
+            capture: CaptureWorker::start(capture, stream),
             receiver,
             started: Instant::now(),
             exited: None,
@@ -645,6 +729,9 @@ impl LocalRun {
     pub fn cancel(&mut self) {
         if !self.finished && self.interrupted_at.is_none() {
             self.capture.cancel();
+            if let Some(rpc) = &self.rpc {
+                rpc.cancel();
+            }
             let _ = nix::sys::signal::killpg(
                 nix::unistd::Pid::from_raw(self.child.child.id() as i32),
                 Signal::SIGINT,
@@ -656,7 +743,7 @@ impl LocalRun {
         if self.finished {
             return Ok(None);
         }
-        if self.capture.cancelled() && self.interrupted_at.is_none() {
+        if self.cancellation.failure().is_some() && self.interrupted_at.is_none() {
             self.cancel();
         }
         if self.exited.is_none()
@@ -703,34 +790,36 @@ impl LocalRun {
         // Reap descendants even when they have already closed their inherited streams.
         let _ = self.child.child.start_kill();
         self.capture.stop();
+        // Do not hold the capture lock while joining a worker that may report a failure.
+        let rpc_error = self.rpc.take().and_then(|server| {
+            if status.success() && self.interrupted_at.is_none() {
+                server.finish().err()
+            } else {
+                None
+            }
+        });
         let mut capture = self
             .capture
             .capture
             .lock()
             .expect("capture lock was not poisoned");
+        if let Some(error) = rpc_error {
+            capture.record_failure(CallbackSnafu.into_error(error));
+        }
         if capture.stdout.is_some() {
             capture.record_failure(OpenPipeSnafu.build());
         }
         capture.stdout = None;
         capture.stderr = None;
-        let stdout = if capture.record_mode {
-            Vec::new()
-        } else {
-            capture
-                .spool
-                .seek(SeekFrom::Start(0))
-                .context(SuperviseSnafu {
-                    operation: "seek captured workflow output",
-                })?;
-            let mut stdout = Vec::new();
-            capture
-                .spool
-                .read_to_end(&mut stdout)
-                .context(SuperviseSnafu {
-                    operation: "read captured workflow output",
-                })?;
-            stdout
-        };
+        let mut stdout = Vec::new();
+        if let Some(spool) = &mut capture.spool {
+            spool.seek(SeekFrom::Start(0)).context(SuperviseSnafu {
+                operation: "seek captured workflow output",
+            })?;
+            spool.read_to_end(&mut stdout).context(SuperviseSnafu {
+                operation: "read captured workflow output",
+            })?;
+        }
         self.receiver
             .finish_with_interruption(self.interrupted_at.is_some());
         let outcome = LocalOutcome {
@@ -850,14 +939,13 @@ impl Drop for ChildGuard {
 struct Capture {
     stdout: Option<std::process::ChildStdout>,
     stderr: Option<std::process::ChildStderr>,
-    spool: File,
+    spool: Option<File>,
     written: u64,
     limit: u64,
     stderr_tail: VecDeque<u8>,
     stderr_dropped: u64,
     error: Option<String>,
     failure: Option<Arc<CaptureFailure>>,
-    record_mode: bool,
     record_bytes: Vec<u8>,
 }
 
@@ -870,29 +958,40 @@ pub struct CaptureView {
     pub error: Option<String>,
 }
 
+fn send_record(
+    sender: &std::sync::mpsc::SyncSender<mf_runtime::NodeValues>,
+    mut values: mf_runtime::NodeValues,
+    cancellation: &mf_runtime::StreamCancellation,
+    stopped: impl Fn() -> bool,
+) -> Result<(), CaptureFailure> {
+    loop {
+        ensure!(!stopped(), OutputStoppedSnafu);
+        if let Some(error) = cancellation.failure() {
+            return Err(error).context(OutputCancelledSnafu);
+        }
+        match sender.try_send(values) {
+            Ok(()) => return Ok(()),
+            Err(std::sync::mpsc::TrySendError::Full(pending)) => values = pending,
+            Err(error) => return Err(error).context(OutputDeliverySnafu),
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 struct CaptureWorker {
     capture: Arc<Mutex<Capture>>,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
-    cancellation: Option<mf_runtime::StreamCancellation>,
     record_processing: Arc<AtomicBool>,
     record_mode: bool,
     progress: Arc<Mutex<Instant>>,
 }
 
 impl CaptureWorker {
-    fn start(capture: Arc<Mutex<Capture>>) -> Self {
-        Self::start_with_stream(capture, None)
-    }
-
-    fn start_with_stream(
-        capture: Arc<Mutex<Capture>>,
-        mut stream: Option<StreamCaptureState>,
-    ) -> Self {
+    fn start(capture: Arc<Mutex<Capture>>, mut stream: Option<StreamCaptureState>) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let processing = Arc::new(AtomicBool::new(false));
         let progress = Arc::new(Mutex::new(Instant::now()));
-        let cancellation = stream.as_ref().map(|stream| stream.cancellation.clone());
         let record_mode = stream.is_some();
         let shared_capture = Arc::clone(&capture);
         let shared_stop = Arc::clone(&stop);
@@ -921,25 +1020,12 @@ impl CaptureWorker {
                 };
                 if process_records {
                     let stream = stream.as_mut().expect("stream codec exists");
-                    let cancellation = stream.cancellation.clone();
-                    let mut emit = |mut values| -> Result<(), CaptureFailure> {
-                        loop {
-                            ensure!(!shared_stop.load(Ordering::Relaxed), OutputStoppedSnafu);
-                            if let Some(error) = cancellation.failure() {
-                                return Err(error).context(OutputCancelledSnafu);
-                            }
-                            match stream.sender.try_send(values) {
-                                Ok(()) => {
-                                    *shared_progress.lock().unwrap() = Instant::now();
-                                    return Ok(());
-                                }
-                                Err(std::sync::mpsc::TrySendError::Full(pending)) => {
-                                    values = pending
-                                }
-                                Err(error) => return Err(error).context(OutputDeliverySnafu),
-                            }
-                            thread::sleep(Duration::from_millis(10));
-                        }
+                    let mut emit = |values| -> Result<(), CaptureFailure> {
+                        send_record(&stream.sender, values, &stream.cancellation, || {
+                            shared_stop.load(Ordering::Relaxed)
+                        })?;
+                        *shared_progress.lock().unwrap() = Instant::now();
+                        Ok(())
                     };
                     let mut result = stream.decoder.feed(&bytes, &mut emit);
                     if result.is_ok() && stdout_closed {
@@ -970,7 +1056,6 @@ impl CaptureWorker {
             capture,
             stop,
             worker: Some(worker),
-            cancellation,
             record_processing: processing,
             record_mode,
             progress,
@@ -979,12 +1064,6 @@ impl CaptureWorker {
 
     fn cancel(&self) {
         self.stop.store(true, Ordering::Relaxed);
-    }
-
-    fn cancelled(&self) -> bool {
-        self.cancellation
-            .as_ref()
-            .is_some_and(|cancellation| cancellation.failure().is_some())
     }
 
     fn processing(&self) -> bool {
@@ -1032,28 +1111,28 @@ impl Capture {
         }
     }
 
-    fn new() -> io::Result<Self> {
+    fn new(spool_limit: Option<u64>) -> io::Result<Self> {
         Ok(Self {
             stdout: None,
             stderr: None,
-            spool: tempfile::tempfile()?,
+            spool: spool_limit.map(|_| tempfile::tempfile()).transpose()?,
             written: 0,
-            limit: MAX_STDOUT_BYTES,
+            limit: spool_limit.unwrap_or(0).min(MAX_STDOUT_BYTES),
             stderr_tail: VecDeque::new(),
             stderr_dropped: 0,
             error: None,
             failure: None,
-            record_mode: false,
             record_bytes: Vec::new(),
         })
     }
 
     fn attach(&mut self, child: &mut Box<dyn ChildWrapper>) -> io::Result<()> {
-        let stdout = child.stdout().take().expect("stdout was piped");
+        self.stdout = child.stdout().take();
+        if let Some(stdout) = &self.stdout {
+            set_nonblocking(stdout)?;
+        }
         let stderr = child.stderr().take().expect("stderr was piped");
-        set_nonblocking(&stdout)?;
         set_nonblocking(&stderr)?;
-        self.stdout = Some(stdout);
         self.stderr = Some(stderr);
         Ok(())
     }
@@ -1104,12 +1183,12 @@ impl Capture {
         if self.error.is_some() {
             return;
         }
-        if self.record_mode {
+        let Some(spool) = &mut self.spool else {
             self.record_bytes.extend_from_slice(bytes);
             return;
-        }
+        };
         let allowed = (self.limit - self.written).min(bytes.len() as u64) as usize;
-        if let Err(error) = self.spool.write_all(&bytes[..allowed]) {
+        if let Err(error) = spool.write_all(&bytes[..allowed]) {
             self.record_failure(
                 IoSnafu {
                     operation: "spool write",
@@ -1168,6 +1247,7 @@ struct ViewState {
     graph_size: Option<(u16, u16)>,
     mouse_graph: Rect,
     mouse_overlays: Vec<Rect>,
+    pips: RefCell<PipGrid>,
     details_visible: bool,
     help_visible: bool,
     traces: TraceView,
@@ -1497,7 +1577,7 @@ fn supervise(
             run.cancel();
         }
         view.draw(terminal, &observation)?;
-        if event::poll(Duration::from_millis(100)).context(TerminalSnafu)? {
+        if event::poll(view.frame_wait(Duration::from_millis(100))).context(TerminalSnafu)? {
             match event::read().context(TerminalSnafu)? {
                 Event::Key(key)
                     if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
@@ -1559,9 +1639,6 @@ fn scroll_into_view(offset: (u32, u32), node: GraphRect, size: (u16, u16)) -> (u
     )
 }
 
-const PIP_MIN_WIDTH: u16 = 32;
-const PIP_MIN_HEIGHT: u16 = 8;
-
 fn running_display_nodes(layout: &GraphLayout, observations: &[NodeObservation]) -> Vec<usize> {
     let running: Vec<_> = (0..layout.nodes().len())
         .filter(|display| {
@@ -1613,54 +1690,15 @@ fn centered_offset(node: GraphRect, size: (u16, u16)) -> (u32, u32) {
     )
 }
 
-fn parallel_pip_areas(count: usize, area: Rect) -> (Vec<Rect>, usize) {
-    if count < 2 {
-        return (Vec::new(), 0);
-    }
-    pip_areas(count, area, area.height / 2)
-}
-
-fn pip_areas(count: usize, area: Rect, reserved_height: u16) -> (Vec<Rect>, usize) {
-    if count == 0 {
-        return (Vec::new(), 0);
-    }
-    let max_columns = usize::from(area.width / PIP_MIN_WIDTH);
-    let max_rows = usize::from(area.height.saturating_sub(reserved_height) / PIP_MIN_HEIGHT);
-    let capacity = max_columns.saturating_mul(max_rows);
-    let visible = count.min(capacity);
-    if visible == 0 {
-        return (Vec::new(), count);
-    }
-    let ideal_columns = (1..=visible)
-        .find(|columns| *columns >= visible.div_ceil(*columns))
-        .unwrap_or(visible);
-    let columns = ideal_columns
-        .max(visible.div_ceil(max_rows))
-        .min(max_columns);
-    let rows = visible.div_ceil(columns);
-    let grid_height = u16::try_from(rows).unwrap_or(u16::MAX) * PIP_MIN_HEIGHT;
-    let column_width = area.width / columns as u16;
-    let top = area.y + area.height - grid_height;
-    let areas = (0..visible)
-        .map(|index| {
-            let row = index / columns;
-            let column = index % columns;
-            Rect {
-                x: area.x + column as u16 * column_width,
-                y: top + row as u16 * PIP_MIN_HEIGHT,
-                width: if column + 1 == columns {
-                    area.width - column as u16 * column_width
-                } else {
-                    column_width
-                },
-                height: PIP_MIN_HEIGHT,
-            }
-        })
-        .collect();
-    (areas, count - visible)
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum PipKey {
+    Static(Vec<String>, String),
+    Iteration(ItemIdentity, Vec<ScopePathEntry>, String),
+    Call(Option<u64>, Vec<ScopePathEntry>, String),
 }
 
 struct ExecutionPip<'a> {
+    key: PipKey,
     display: usize,
     title: String,
     source: PipSource<'a>,
@@ -1869,6 +1907,11 @@ fn execution_pips<'a>(
             }
             if seen.insert((item.identity.clone(), runtime.clone(), display)) {
                 views.push(ExecutionPip {
+                    key: PipKey::Iteration(
+                        item.identity.clone(),
+                        runtime.clone(),
+                        observed.node.id.clone(),
+                    ),
                     display,
                     title: format!(
                         "{} · item {} · call {}{}",
@@ -1958,6 +2001,7 @@ fn execution_pips<'a>(
                     .collect::<Vec<_>>()
                     .join(" / ");
                 views.push(ExecutionPip {
+                    key: PipKey::Call(pass.stream_invocation, pass.path.clone(), node.id.clone()),
                     display,
                     title,
                     source: PipSource::Call {
@@ -1981,74 +2025,13 @@ fn execution_pips<'a>(
             .collect::<Vec<_>>()
             .join(" / ");
         views.push(ExecutionPip {
+            key: PipKey::Static(layout.node_path(display).to_vec(), node.id.clone()),
             display,
             title,
             source: PipSource::Static,
         });
     }
     views
-}
-
-fn draw_parallel_pips(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    layout: &GraphLayout,
-    observations: &[NodeObservation],
-    receiver: &ObservationReader,
-    elapsed_ns: u64,
-    views: Vec<ExecutionPip<'_>>,
-) {
-    let placement = parallel_pip_areas(views.len(), area);
-    draw_pips(
-        frame,
-        layout,
-        observations,
-        receiver,
-        elapsed_ns,
-        views,
-        placement,
-    );
-}
-
-fn draw_pips(
-    frame: &mut Frame<'_>,
-    layout: &GraphLayout,
-    observations: &[NodeObservation],
-    receiver: &ObservationReader,
-    elapsed_ns: u64,
-    views: Vec<ExecutionPip<'_>>,
-    placement: (Vec<Rect>, usize),
-) {
-    let (areas, overflow) = placement;
-    let visible = areas.len();
-    for (position, (view, rect)) in views.into_iter().zip(areas).enumerate() {
-        let ExecutionPip {
-            display, ref title, ..
-        } = view;
-        let node = &layout.nodes()[display];
-        let mut block = Block::default()
-            .title(format!(" Running: {title} "))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Yellow));
-        if overflow > 0 && position + 1 == visible {
-            block = block.title_bottom(format!(" +{overflow} more "));
-        }
-        let inner = block.inner(rect);
-        frame.render_widget(Clear, rect);
-        frame.render_widget(block, rect);
-        let offset = centered_offset(node.rect, (inner.width, inner.height));
-        let scoped_nodes = view.observations(layout, observations);
-        let nodes = scoped_nodes.as_deref().unwrap_or(observations);
-        frame.render_widget(
-            GraphView::new(layout)
-                .reader(receiver)
-                .nodes(nodes)
-                .selected(display)
-                .offset(offset.0, offset.1)
-                .elapsed_ns(elapsed_ns),
-            inner,
-        );
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2066,6 +2049,7 @@ fn draw<B: Backend>(
     presentation: Presentation,
 ) -> Result<(), B::Error> {
     if view_state.traces.visible {
+        view_state.pips.get_mut().clear();
         terminal.draw(|frame| {
             let traces = receiver.trace_snapshot();
             let logs = receiver.log_snapshot();
@@ -2145,35 +2129,39 @@ fn draw<B: Backend>(
         } else { graph };
         view_state.reveal(layout, graph);
         view_state.mouse_graph = graph;
-        let mut graph_view = GraphView::new(layout)
+        let elapsed_ns = elapsed.as_nanos().min(u64::MAX as u128) as u64;
+        let graph_view = GraphView::new(layout)
             .reader(receiver)
             .selected(view_state.selected)
             .offset(view_state.offset.0, view_state.offset.1)
-            .elapsed_ns(elapsed.as_nanos().min(u64::MAX as u128) as u64)
-            .minimap(!view_state.minimap_hidden);
-        graph_view = graph_view.nodes(&display_nodes);
+            .elapsed_ns(elapsed_ns)
+            .minimap(!view_state.minimap_hidden)
+            .nodes(&display_nodes);
         let minimap_area = graph_view.minimap_area(graph);
         frame.render_widget(graph_view, graph);
         let observations = display_nodes.as_slice();
-        let pip_nodes = inline_observations_with_items(
-            pip_layout,
-            description,
-            snapshot,
-            &view_state.history_offsets(),
-            &view_state.iteration_items,
-        );
-        let pip_views = execution_pips(pip_layout, &pip_nodes, description, snapshot);
-        view_state.mouse_overlays = parallel_pip_areas(pip_views.len(), graph).0;
+        view_state.mouse_overlays = if presentation == Presentation::Live {
+            let pip_nodes = inline_observations_with_items(
+                pip_layout,
+                description,
+                snapshot,
+                &view_state.history_offsets(),
+                &view_state.iteration_items,
+            );
+            let pip_views = execution_pips(pip_layout, &pip_nodes, description, snapshot);
+            view_state.pips.get_mut().draw(
+                frame,
+                graph,
+                PipSurface::Graph,
+                PipScene { layout: pip_layout, nodes: &pip_nodes, reader: receiver, elapsed_ns },
+                &pip_views,
+                Instant::now(),
+            )
+        } else {
+            view_state.pips.get_mut().clear();
+            Vec::new()
+        };
         view_state.mouse_overlays.extend(minimap_area);
-        draw_parallel_pips(
-            frame,
-            graph,
-            pip_layout,
-            &pip_nodes,
-            receiver,
-            elapsed.as_nanos().min(u64::MAX as u128) as u64,
-            pip_views,
-        );
         if let Some(details) = details {
             view_state.details_height = usize::from(details.height.saturating_sub(2));
             let selected = view_state.selected;
@@ -3167,6 +3155,13 @@ fn default_body_states(description: &WorkflowDescription) -> BTreeMap<Vec<String
         .collect()
 }
 
+struct ExecutionFrame<'a> {
+    reader: &'a ObservationReader,
+    snapshot: &'a StateSnapshot,
+    elapsed: Duration,
+    phase: &'a str,
+}
+
 pub struct ObservationView {
     description: WorkflowDescription,
     root: Arc<GraphLayout>,
@@ -3541,6 +3536,14 @@ impl ObservationView {
             false
         }
     }
+    pub fn hide_pips(&self) {
+        self.state.pips.borrow_mut().clear();
+    }
+
+    pub fn frame_wait(&self, idle: Duration) -> Duration {
+        self.state.pips.borrow().frame_wait(idle, Instant::now())
+    }
+
     pub fn render_execution(
         &self,
         frame: &mut Frame<'_>,
@@ -3560,21 +3563,28 @@ impl ObservationView {
         self.render_execution_snapshot(
             frame,
             area,
-            &observation.reader,
-            &snapshot,
-            elapsed,
-            &phase,
+            ExecutionFrame {
+                reader: &observation.reader,
+                snapshot: &snapshot,
+                elapsed,
+                phase: &phase,
+            },
+            Instant::now(),
         );
     }
     fn render_execution_snapshot(
         &self,
         frame: &mut Frame<'_>,
         area: Rect,
-        reader: &ObservationReader,
-        snapshot: &StateSnapshot,
-        elapsed: Duration,
-        phase: &str,
+        execution: ExecutionFrame<'_>,
+        now: Instant,
     ) {
+        let ExecutionFrame {
+            reader,
+            snapshot,
+            elapsed,
+            phase,
+        } = execution;
         let completed = snapshot
             .nodes
             .iter()
@@ -3632,23 +3642,18 @@ impl ObservationView {
             &BTreeMap::new(),
         );
         let pip_views = execution_pips(&self.pip_layout, &pip_nodes, &self.description, snapshot);
-        // The chat overview keeps orchestration folded, so a single running body node still needs its own PiP.
-        let nested = pip_views
-            .iter()
-            .any(|view| !self.pip_layout.node_path(view.display).is_empty());
-        let placement = if nested {
-            pip_areas(pip_views.len(), graph, graph.height / 2)
-        } else {
-            parallel_pip_areas(pip_views.len(), graph)
-        };
-        draw_pips(
+        self.state.pips.borrow_mut().draw(
             frame,
-            &self.pip_layout,
-            &pip_nodes,
-            reader,
-            elapsed_ns,
-            pip_views,
-            placement,
+            graph,
+            PipSurface::ChatOverview,
+            PipScene {
+                layout: &self.pip_layout,
+                nodes: &pip_nodes,
+                reader,
+                elapsed_ns,
+            },
+            &pip_views,
+            now,
         );
         frame.render_widget(
             Paragraph::new(format!("Delivery: {:?}", snapshot.lifecycle.completeness))
@@ -3721,7 +3726,7 @@ impl ObservationView {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{pips::parallel_pip_areas, *};
 
     fn wait_for_outcome(run: &mut LocalRun) -> LocalOutcome {
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -3788,6 +3793,77 @@ mod tests {
         assert!(outcome.capture_failure.is_none());
         assert_eq!(run.try_record().unwrap()["value"].as_u64(), Some(2));
         assert!(outcome.stdout.is_empty());
+    }
+
+    #[test]
+    fn hosted_cancellation_releases_the_worker_even_with_an_undrained_record_queue() {
+        let mut command = Command::new("python3");
+        command.arg("-c").arg(
+            r#"
+import json, os, socket, sys
+sock = socket.socket(socket.AF_UNIX)
+sock.connect(json.loads(os.environ['MF_RUNNER_RPC_V1'])['socket'])
+reply = sock.makefile('rb')
+sock.sendall(b'{"get_inputs":{}}\n')
+assert json.loads(reply.readline()) == {'inputs': {'values': {}}}
+sock.sendall(b'{"output":{"value":1}}\n' * 128 + b'{"flush":{}}\n')
+print('waiting for drain', file=sys.stderr, flush=True)
+assert not reply.readline()
+"#,
+        );
+        let cancellation = mf_runtime::StreamCancellation::default();
+        let mut run = LocalRun::start_invocation(
+            command,
+            scope_fixture(),
+            RunId::new(),
+            cancellation.clone(),
+            None,
+            InvocationIo::Hosted(Default::default()),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !run.capture.view().stderr_tail.contains("waiting for drain") {
+            assert!(run.poll().unwrap().is_none() && Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(run.capture.capture.lock().unwrap().spool.is_none());
+        cancellation.cancel(
+            mf_runtime::StreamExecutionSnafu {
+                message: "host stopped",
+            }
+            .build(),
+        );
+        let outcome = wait_for_outcome(&mut run);
+        assert!(outcome.interrupted && outcome.stdout.is_empty());
+    }
+
+    #[test]
+    fn hosted_supervision_rejects_stdout_from_a_child_that_ignores_its_grant() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf '{\"value\":1}'; printf 'raw stderr' >&2"]);
+        let mut run = LocalRun::start_invocation(
+            command,
+            scope_fixture(),
+            RunId::new(),
+            Default::default(),
+            None,
+            InvocationIo::Hosted(Default::default()),
+        )
+        .unwrap();
+        let outcome = wait_for_outcome(&mut run);
+        assert!(outcome.status.success());
+        assert!(matches!(
+            outcome.capture_failure.as_deref(),
+            Some(CaptureFailure::Callback { .. })
+        ));
+        assert!(
+            outcome
+                .capture_error
+                .unwrap()
+                .contains("without completing hosted I/O")
+        );
+        assert!(outcome.stdout.is_empty() && run.try_record().is_err());
+        assert_eq!(outcome.stderr, "raw stderr");
     }
 
     #[test]
@@ -3924,6 +4000,34 @@ mod tests {
         }
     }
 
+    fn draw_parallel_pips(
+        frame: &mut Frame<'_>,
+        area: Rect,
+        layout: &GraphLayout,
+        observations: &[NodeObservation],
+        reader: &ObservationReader,
+        elapsed_ns: u64,
+        views: Vec<ExecutionPip<'_>>,
+    ) {
+        let scene = PipScene {
+            layout,
+            nodes: observations,
+            reader,
+            elapsed_ns,
+        };
+        let mut grid = PipGrid::default();
+        let now = Instant::now();
+        grid.draw(frame, area, PipSurface::Graph, scene, &views, now);
+        grid.draw(
+            frame,
+            area,
+            PipSurface::Graph,
+            scene,
+            &views,
+            now + pips::MOTION,
+        );
+    }
+
     fn render_parallel_pips_for_layout(
         layout: &GraphLayout,
         observations: &[NodeObservation],
@@ -3979,8 +4083,16 @@ mod tests {
     }
 
     fn render_chat_execution(view: &ObservationView, snapshot: &StateSnapshot) -> String {
-        let receiver = LoopbackReceiver::bind(view.description.clone(), RunId::new()).unwrap();
-        let reader = receiver.reader();
+        let reader = ObservationReader::detached(view.description.clone(), RunId::new()).unwrap();
+        render_chat_execution_at(view, &reader, snapshot, Instant::now())
+    }
+
+    fn render_chat_execution_at(
+        view: &ObservationView,
+        reader: &ObservationReader,
+        snapshot: &StateSnapshot,
+        now: Instant,
+    ) -> String {
         let (width, height) = (128, 64);
         let mut terminal =
             Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
@@ -3989,10 +4101,13 @@ mod tests {
                 view.render_execution_snapshot(
                     frame,
                     frame.area(),
-                    &reader,
-                    snapshot,
-                    Duration::from_secs(1),
-                    "Running",
+                    ExecutionFrame {
+                        reader,
+                        snapshot,
+                        elapsed: Duration::from_secs(1),
+                        phase: "Running",
+                    },
+                    now,
                 );
             })
             .unwrap();
@@ -4465,7 +4580,7 @@ mod tests {
     }
 
     #[test]
-    fn parallel_pips_render_running_nodes_and_disappear_below_parallelism() {
+    fn parallel_pips_render_eligible_nodes_and_report_overflow() {
         let description = parallel_fixture(6);
         let receiver = LoopbackReceiver::bind(description.clone(), RunId::new()).unwrap();
         let reader = receiver.reader();
@@ -4499,6 +4614,68 @@ mod tests {
         }
         assert_observation_and_chat_pips_include_running_nodes_in_a_folded_body();
         assert_observation_pips_include_every_running_member_of_a_folded_cluster();
+    }
+
+    #[test]
+    fn pip_motion_and_hitboxes_follow_the_clock_after_parallelism_ends() {
+        let description = parallel_fixture(2);
+        let reader = ObservationReader::detached(description.clone(), RunId::new()).unwrap();
+        let mut snapshot = reader.snapshot();
+        for node in &mut snapshot.nodes {
+            node.status = NodeStatus::Running;
+        }
+        let layout = GraphLayout::with_view(&description, ConnectionView::Execution).unwrap();
+        let views = execution_pips(&layout, &snapshot.nodes, &description, &snapshot);
+        let scene = PipScene {
+            layout: &layout,
+            nodes: &snapshot.nodes,
+            reader: &reader,
+            elapsed_ns: 0,
+        };
+        let mut grid = PipGrid::default();
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(100, 32)).unwrap();
+        let area = Rect::new(4, 2, 92, 26);
+        let mut draw = |running, now| {
+            let mut hitboxes = Vec::new();
+            terminal
+                .draw(|frame| {
+                    hitboxes = grid.draw(
+                        frame,
+                        area,
+                        PipSurface::Graph,
+                        scene,
+                        &views[..running],
+                        now,
+                    );
+                })
+                .unwrap();
+            (hitboxes, buffer_text(terminal.backend().buffer()))
+        };
+        let entered = Instant::now();
+        let (entering, text) = draw(2, entered);
+        assert_eq!(text.matches(" Running: ").count(), 2, "{text}");
+        let (settled, _) = draw(2, entered + pips::MOTION);
+        assert_eq!(settled, parallel_pip_areas(2, area).0);
+        for (visible, full) in entering.iter().zip(&settled) {
+            assert_eq!(visible.bottom(), full.bottom());
+            assert!(visible.height < full.height);
+        }
+
+        let left = entered + pips::MOTION + Duration::from_millis(1);
+        let (holding, text) = draw(1, left);
+        assert_eq!(holding, settled);
+        assert_eq!(text.matches(" Recent: ").count(), 2, "{text}");
+        assert!(!text.contains(" Running: "), "{text}");
+        assert_eq!(draw(1, left + pips::LINGER).0, settled);
+        let (retracting, _) = draw(0, left + pips::LINGER + pips::MOTION * 3 / 4);
+        for (visible, full) in retracting.iter().zip(&settled) {
+            assert_eq!(visible.bottom(), full.bottom());
+            assert!(visible.height < full.height);
+        }
+        assert_eq!(retracting.len(), 2);
+        let (gone, text) = draw(0, left + pips::LINGER + pips::MOTION);
+        assert!(gone.is_empty());
+        assert!(!text.contains(" Recent: "), "{text}");
     }
 
     #[test]
@@ -4622,16 +4799,35 @@ mod tests {
         assert!(text.contains(" Running: first / source "), "{text}");
         assert!(text.contains(" Running: first / target "), "{text}");
 
-        let chat = render_chat_execution(&view, &snapshot);
+        let now = Instant::now();
+        let chat = render_chat_execution_at(&view, &reader, &snapshot, now);
         assert_eq!(chat.matches(" Running: ").count(), 2, "{chat}");
         assert!(chat.contains(" Running: first / source "), "{chat}");
         assert!(chat.contains(" Running: first / target "), "{chat}");
 
         snapshot.loop_passes[0].nodes[1].status = NodeStatus::Succeeded;
-        let chat = render_chat_execution(&view, &snapshot);
+        let left = now + pips::MOTION;
+        let chat = render_chat_execution_at(&view, &reader, &snapshot, left);
         assert_eq!(chat.matches(" Running: ").count(), 1, "{chat}");
         assert!(chat.contains(" Running: first / source "), "{chat}");
-        assert!(!chat.contains(" Running: first / target "), "{chat}");
+        assert!(chat.contains(" Recent: first / target "), "{chat}");
+        let chat = render_chat_execution_at(
+            &view,
+            &reader,
+            &snapshot,
+            left + pips::LINGER + pips::MOTION,
+        );
+        assert!(chat.contains(" Running: first / source "), "{chat}");
+        assert!(!chat.contains(" Recent: "), "{chat}");
+
+        let new_run = ObservationReader::detached(view.description.clone(), RunId::new()).unwrap();
+        let chat = render_chat_execution_at(
+            &view,
+            &new_run,
+            &new_run.snapshot(),
+            left + Duration::from_secs(1),
+        );
+        assert!(!chat.contains(" Recent: "), "{chat}");
     }
 
     #[test]
@@ -6428,6 +6624,31 @@ mod tests {
                 .to_string()
                 .contains("cannot supply workflow stdin")
         );
+        let binding = &mut manifest
+            .descriptor
+            .input_schema
+            .inputs
+            .get_mut("source/id")
+            .unwrap()
+            .get_mut("path")
+            .unwrap()
+            .binding;
+        binding.env = Some("PATH".into());
+        binding.default = Some(serde_json::json!("fallback.txt"));
+        std::fs::write(
+            &runner,
+            crate::test_support::elf(Some(&manifest.to_bytes().unwrap()), 1),
+        )
+        .unwrap();
+        let resolved = prepare_launch(&runner, &RunOptions::default())
+            .unwrap()
+            .arguments
+            .unwrap();
+        let args = WorkflowArguments::from_json(&std::fs::read(resolved.path()).unwrap()).unwrap();
+        assert_eq!(
+            args.0["source/id.path"].as_str().unwrap(),
+            std::env::var("PATH").unwrap_or_else(|_| "fallback.txt".into())
+        );
         let mut corrupt = std::fs::read(&runner).unwrap();
         *corrupt.last_mut().unwrap() = 0xff;
         std::fs::write(&runner, corrupt).unwrap();
@@ -7178,6 +7399,7 @@ mod tests {
         let pips = execution_pips(&view.pip_layout, &nodes, &description, &snapshot);
         assert_eq!(pips.len(), 2);
         assert_eq!(pips[0].display, pips[1].display);
+        assert!(pips[0].key != pips[1].key);
         assert!(pips.iter().any(|pip| pip.title == "B / leaf"));
         assert!(pips.iter().any(|pip| pip.title == "A / invoke → B / leaf"));
         let chat = render_chat_execution(&view, &snapshot);
@@ -7654,14 +7876,15 @@ mod tests {
 
     #[test]
     fn stdout_spool_limit_preserves_the_available_prefix() {
-        let mut capture = Capture::new().unwrap();
+        let mut capture = Capture::new(Some(MAX_STDOUT_BYTES)).unwrap();
         capture.written = MAX_STDOUT_BYTES - 2;
         capture.store_stdout(&[1, 0, 255, 4]);
         assert_eq!(capture.written, MAX_STDOUT_BYTES);
         assert!(capture.error.as_deref().unwrap().contains("spool limit"));
-        capture.spool.seek(SeekFrom::Start(0)).unwrap();
+        let spool = capture.spool.as_mut().unwrap();
+        spool.seek(SeekFrom::Start(0)).unwrap();
         let mut bytes = Vec::new();
-        capture.spool.read_to_end(&mut bytes).unwrap();
+        spool.read_to_end(&mut bytes).unwrap();
         assert_eq!(bytes, [1, 0]);
     }
 
@@ -7670,8 +7893,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("read-only-spool");
         std::fs::write(&path, []).unwrap();
-        let mut capture = Capture::new().unwrap();
-        capture.spool = File::open(path).unwrap();
+        let mut capture = Capture::new(Some(MAX_STDOUT_BYTES)).unwrap();
+        capture.spool = Some(File::open(path).unwrap());
         capture.store_stdout(b"result");
         assert!(
             capture
@@ -7693,9 +7916,9 @@ mod tests {
             .spawn()
             .unwrap();
         let mut child: Box<dyn ChildWrapper> = Box::new(child);
-        let capture = Arc::new(Mutex::new(Capture::new().unwrap()));
+        let capture = Arc::new(Mutex::new(Capture::new(Some(MAX_STDOUT_BYTES)).unwrap()));
         capture.lock().unwrap().attach(&mut child).unwrap();
-        let mut worker = CaptureWorker::start(Arc::clone(&capture));
+        let mut worker = CaptureWorker::start(Arc::clone(&capture), None);
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             let view = worker.view();

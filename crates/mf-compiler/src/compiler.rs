@@ -583,6 +583,7 @@ pub fn prepare_compiled_graph_with_layouts(
     let origin_identity = Arc::new(OnceLock::new());
     let (nodes, order) = prepare_graph(
         graph,
+        &mut Default::default(),
         &mut GraphPreparation {
             registry,
             root_version: graph.definition.version,
@@ -621,6 +622,7 @@ fn finalize_origin_identity(
 #[derive(Default)]
 pub struct ScopeLayout {
     pub domains: Option<mf_runtime::ExecutionDomains>,
+    pub stream_plan: Option<Arc<mf_runtime::StreamPlan>>,
     pub streams: Vec<mf_runtime::SubgraphStreamOutput>,
     pub declarations: Vec<mf_runtime::NodeContract>,
     pub contracts: Vec<mf_runtime::NodeContract>,
@@ -642,12 +644,14 @@ struct GraphPreparation<'a> {
 
 fn prepare_graph(
     graph: &mf_runtime::CompiledGraph,
+    operators: &mut mf_runtime::StreamOperatorFactories,
     preparation: &mut GraphPreparation<'_>,
 ) -> Result<(Vec<FlowNode>, Vec<DefinitionId>), WorkflowCompileError> {
     let definition = &graph.definition;
     let order = graph.execution_order.clone();
-    let mut nodes = resolve_nodes_in_scope(graph, preparation)?;
+    let mut nodes = resolve_nodes_in_scope(graph, operators, preparation)?;
     if !preparation.path.is_empty()
+        && !graph.relations.is_callable()
         && let Some(node) = nodes.iter().find(|node| {
             matches!(
                 &node.node,
@@ -1385,6 +1389,18 @@ pub fn resolve_execution(
     definition: &WorkflowDefinition,
     nodes: &[FlowNode],
 ) -> Result<WorkflowDefinition, WorkflowCompileError> {
+    let mut resolved = definition.clone();
+    resolved.execution = requires_stream_scheduler(definition, nodes, true)
+        .then(|| definition.execution.clone().unwrap_or_default());
+    crate::validate_execution(&resolved).context(StreamConstructionSnafu)?;
+    Ok(resolved)
+}
+
+fn requires_stream_scheduler(
+    definition: &WorkflowDefinition,
+    nodes: &[FlowNode],
+    include_exports: bool,
+) -> bool {
     let stream_outputs: BTreeSet<_> = nodes
         .iter()
         .flat_map(|node| {
@@ -1394,24 +1410,22 @@ pub fn resolve_execution(
                 .map(move |port| (node.definition_id.as_str(), port.name.as_ref()))
         })
         .collect();
-    let streaming =
-        nodes.iter().any(|node| {
-            matches!(
-                node.node,
-                Some(mf_runtime::NodeExecution::Event(_) | mf_runtime::NodeExecution::Stream(_))
-            )
-        }) || definition.edges.iter().any(|edge| {
+    nodes.iter().any(|node| {
+        matches!(
+            node.node,
+            Some(mf_runtime::NodeExecution::Event(_) | mf_runtime::NodeExecution::Stream(_))
+        )
+    }) || definition
+        .edges
+        .iter()
+        .any(|edge| stream_outputs.contains(&(edge.from_node.as_str(), edge.from_output.as_ref())))
+        || definition.control_edges.iter().any(|edge| {
             stream_outputs.contains(&(edge.from_node.as_str(), edge.from_output.as_ref()))
-        }) || definition.control_edges.iter().any(|edge| {
-            stream_outputs.contains(&(edge.from_node.as_str(), edge.from_output.as_ref()))
-        }) || definition
-            .outputs
-            .iter()
-            .any(|output| stream_outputs.contains(&(output.node.as_str(), output.port.as_ref())));
-    let mut resolved = definition.clone();
-    resolved.execution = streaming.then(|| definition.execution.clone().unwrap_or_default());
-    crate::validate_execution(&resolved).context(StreamConstructionSnafu)?;
-    Ok(resolved)
+        })
+        || (include_exports
+            && definition.outputs.iter().any(|output| {
+                stream_outputs.contains(&(output.node.as_str(), output.port.as_ref()))
+            }))
 }
 
 /// Plan graph structure without loading nodes. Preparation validates linked node implementations.
@@ -2110,6 +2124,7 @@ pub fn prepare_compiled_plan(
     let origin_identity = Arc::new(OnceLock::new());
     let (nodes, _) = prepare_graph(
         &plan.graph,
+        &mut Default::default(),
         &mut GraphPreparation {
             registry,
             root_version: plan.graph.definition.version,
@@ -2337,6 +2352,7 @@ pub fn resolve_nodes(
     let origin_identity = Arc::new(OnceLock::new());
     let nodes = resolve_nodes_in_scope(
         &normalized.graph,
+        &mut Default::default(),
         &mut GraphPreparation {
             registry,
             root_version: definition.version,
@@ -2421,35 +2437,11 @@ fn prepare_subgraph_body(
     preparation
         .path
         .push(graph.child_scope_key(node, name).into());
-    let prepared = prepare_graph(graph, preparation);
+    let mut operators = mf_runtime::StreamOperatorFactories::default();
+    let prepared = prepare_graph(graph, &mut operators, preparation);
     let path = preparation.path.clone();
     preparation.path.pop();
     let (nodes, order) = crate::calls::child_result(node, prepared)?;
-    let mut stream_outputs = prepare_stream_outputs(&graph.relations.streams, &nodes, node)?;
-    let mut terminal_outputs = Vec::new();
-    for output in &body.outputs {
-        let (index, source) = nodes
-            .iter()
-            .enumerate()
-            .find(|(_, node)| node.definition_id == output.node)
-            .expect("validated body output source");
-        if call_like
-            && let Some(port) = source
-                .metadata
-                .stream_outputs
-                .iter()
-                .find(|port| port.name == output.port)
-        {
-            stream_outputs.push(mf_runtime::SubgraphStreamOutput {
-                node: mf_runtime::NodeId::new(index),
-                port: port.clone(),
-                name: output.name.to_string(),
-                optional: output.optional,
-            });
-        } else {
-            terminal_outputs.push(output.clone());
-        }
-    }
     let identities = body
         .nodes
         .iter()
@@ -2466,7 +2458,35 @@ fn prepare_subgraph_body(
             path: Vec::new(),
         })
         .collect();
-    let builder = crate::FlowBuilder::prepare(nodes, body.edges.clone(), order, terminal_outputs)
+    // A forwarded TaskStream export alone stays on the synchronous fast path.
+    let scheduled = call_like && requires_stream_scheduler(body, &nodes, false);
+    let mut stream_outputs = prepare_stream_outputs(&graph.relations.streams, &nodes, node)?;
+    let mut selected = Vec::new();
+    for output in &body.outputs {
+        let (index, source) = nodes
+            .iter()
+            .enumerate()
+            .find(|(_, node)| node.definition_id == output.node)
+            .expect("validated body output source");
+        if !scheduled
+            && call_like
+            && let Some(port) = source
+                .metadata
+                .stream_outputs
+                .iter()
+                .find(|port| port.name == output.port)
+        {
+            stream_outputs.push(mf_runtime::SubgraphStreamOutput {
+                node: mf_runtime::NodeId::new(index),
+                port: port.clone(),
+                name: output.name.to_string(),
+                optional: output.optional,
+            });
+        } else {
+            selected.push(output.clone());
+        }
+    }
+    let builder = crate::FlowBuilder::prepare(nodes, body.edges.clone(), order, selected)
         .and_then(|flow| flow.with_control_edges(body.control_edges.clone()))
         .and_then(|flow| flow.with_order_edges(body.order_edges.clone()))
         .context(FlowConstructionSnafu)?;
@@ -2475,46 +2495,66 @@ fn prepare_subgraph_body(
     } else {
         builder
     };
-    let flow = builder
-        .with_root_scope(graph.relations.root.clone())
-        .into_tasks()
-        .context(FlowConstructionSnafu)?;
-    if let Some(layouts) = preparation.body_layouts.as_mut() {
-        let streams = stream_outputs
-            .iter()
-            .cloned()
-            .map(|mut output| {
-                output.node = mf_runtime::NodeId::new(
-                    flow.execution_order()
-                        .iter()
-                        .position(|id| *id == output.node)
-                        .expect("prepared child exists"),
-                );
-                output
-            })
-            .collect();
-        let layout = layouts.get_mut(&path).expect("prepared child contracts");
-        layout.domains = Some(flow.execution_domains().clone());
-        layout.streams = streams;
-        layout.input_schema = flow.input_schema().clone();
-    }
-    let flow = flow
-        .with_stream_outputs(stream_outputs)
-        .context(NodeConstructionSnafu {
-            definition_id: node.id.clone(),
-            kind: node.kind.clone(),
-        })?;
-    let prepared = PreparedSubgraph::from_flow(flow, identities)
+    let builder = builder.with_root_scope(graph.relations.root.clone());
+    let prepared = if scheduled {
+        ensure!(
+            body.version.supports_child_streams(),
+            InvalidGraphSnafu {
+                definition_id: node.id.clone(),
+                message: "callable stream wiring requires definition version 2026-10-28"
+            }
+        );
+        let input_metadata = builder.subgraph_input_metadata();
+        let stream = builder
+            .into_stream(body.execution.clone().unwrap_or_default())
+            .context(StreamConstructionSnafu)?;
+        let interface =
+            crate::streaming::callable_interface(stream.plan(), &body.outputs, input_metadata);
+        PreparedSubgraph::from_stream_plan(stream, operators, identities, interface).context(
+            NodeConstructionSnafu {
+                definition_id: node.id.clone(),
+                kind: node.kind.clone(),
+            },
+        )?
+    } else {
+        let flow = builder.into_tasks().context(FlowConstructionSnafu)?;
+        if let Some(layouts) = preparation.body_layouts.as_mut() {
+            let streams = stream_outputs
+                .iter()
+                .cloned()
+                .map(|mut output| {
+                    output.node = mf_runtime::NodeId::new(
+                        flow.execution_order()
+                            .iter()
+                            .position(|id| *id == output.node)
+                            .expect("prepared child exists"),
+                    );
+                    output
+                })
+                .collect();
+            let layout = layouts.get_mut(&path).expect("prepared child contracts");
+            layout.domains = Some(flow.execution_domains().clone());
+            layout.streams = streams;
+        }
+        let flow = flow
+            .with_stream_outputs(stream_outputs)
+            .context(NodeConstructionSnafu {
+                definition_id: node.id.clone(),
+                kind: node.kind.clone(),
+            })?;
+        PreparedSubgraph::from_flow(flow, identities)
+    };
+    let prepared = prepared
         .with_relations(graph.relations.clone())
         .with_origin_source(
             preparation.origin_identity.clone(),
             path.iter().map(ToString::to_string).collect(),
         );
     if let Some(layouts) = preparation.body_layouts.as_mut() {
-        layouts
-            .get_mut(&path)
-            .expect("prepared child contracts")
-            .interface = Some(mf_runtime::SubgraphInterface {
+        let layout = layouts.get_mut(&path).expect("prepared child contracts");
+        layout.input_schema = prepared.inputs.clone();
+        layout.stream_plan = prepared.scheduled_plan().cloned();
+        layout.interface = Some(mf_runtime::SubgraphInterface {
             outputs: prepared.outputs.clone(),
             stream_outputs: prepared.stream_outputs.clone(),
             input_metadata: prepared.input_metadata().clone(),
@@ -2528,6 +2568,7 @@ fn prepare_node_subgraphs(
     definition: &WorkflowDefinition,
     node: &crate::NodeDefinition,
     flows: &BTreeMap<String, mf_runtime::CompiledGraph>,
+    operators: &mut mf_runtime::StreamOperatorFactories,
     preparation: &mut GraphPreparation<'_>,
 ) -> Result<FlowNode, WorkflowCompileError> {
     let registration = registration_for(node, preparation.registry)?;
@@ -2567,6 +2608,14 @@ fn prepare_node_subgraphs(
             .host
             .as_deref()
             .and_then(|name| preparation.registry.flow(name));
+        let path = |preparation: &GraphPreparation<'_>| {
+            preparation
+                .path
+                .iter()
+                .map(ToString::to_string)
+                .chain(std::iter::once(key.clone()))
+                .collect::<Vec<_>>()
+        };
         let prepared = if let Some(registered) = host {
             let subgraphs = preparation.registry.subgraph_scopes();
             validate_host_flow_binding(
@@ -2583,19 +2632,30 @@ fn prepare_node_subgraphs(
                     message: "host Flow executors cannot be emitted into generated execution plans"
                 }
             );
-            let path = preparation
-                .path
-                .iter()
-                .map(ToString::to_string)
-                .chain(std::iter::once(key))
-                .collect();
             registered
                 .body
                 .clone()
                 .with_relations(body.relations.clone())
-                .with_origin_source(preparation.origin_identity.clone(), path)
+                .with_origin_source(preparation.origin_identity.clone(), path(preparation))
         } else {
             prepare_subgraph_body(node, name, preparation, body)?
+        };
+        let prepared = if let Some(callback) = body.relations.callback_name() {
+            ensure!(
+                !callback.trim().is_empty()
+                    && !prepared.is_event_stream()
+                    && prepared.stream_outputs.is_empty()
+                    && prepared.inputs.stdin.is_empty(),
+                InvalidGraphSnafu {
+                    definition_id: node.id.clone(),
+                    message: "host callbacks require a name and a finite interface without stdin"
+                }
+            );
+            preparation
+                .registry
+                .bind_callback_body(&path(preparation), callback, prepared)
+        } else {
+            prepared
         };
         ensure!(
             prepared.stream_outputs.is_empty() || definition.version.supports_child_streams(),
@@ -2606,8 +2666,8 @@ fn prepare_node_subgraphs(
         );
         subgraphs.insert(name.clone(), prepared);
     }
-    let instance = registration
-        .instantiate_subgraphs(node.id.as_str(), node.config.clone(), subgraphs)
+    let instance = operators
+        .prepare(registration, &node.id, &node.config, subgraphs)
         .context(NodeConstructionSnafu {
             definition_id: node.id.clone(),
             kind: node.kind.clone(),
@@ -2622,6 +2682,7 @@ fn prepare_node_subgraphs(
 
 fn resolve_nodes_in_scope(
     graph: &mf_runtime::CompiledGraph,
+    operators: &mut mf_runtime::StreamOperatorFactories,
     preparation: &mut GraphPreparation<'_>,
 ) -> Result<Vec<FlowNode>, WorkflowCompileError> {
     let definition = &graph.definition;
@@ -2678,12 +2739,11 @@ fn resolve_nodes_in_scope(
                     definition,
                     node,
                     flows,
+                    operators,
                     preparation,
                 );
             }
-            let instance =
-                registration
-                    .instantiate(node.config.clone())
+            let instance = operators.prepare(registration, &node.id, &node.config, BTreeMap::new())
                     .context(NodeConstructionSnafu {
                         definition_id: node.id.clone(),
                         kind: node.kind.clone(),

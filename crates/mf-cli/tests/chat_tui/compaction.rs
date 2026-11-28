@@ -1,5 +1,5 @@
 use super::{CODING_AGENT, call, compiled, submit};
-use crate::example_support::streamed_tool_calls_with_usage;
+use crate::{example_support::streamed_tool_calls_with_usage, gated};
 use mf_chat::{ChatDatabase, MessageUpdate, contract::CompletionState};
 use mf_tui::{
     chat::{ChatCommand, ChatController, ChatEvent, ChatLaunch, ChatOptions},
@@ -19,6 +19,7 @@ use std::{
 
 const RULE: &str = "Current workspace instructions only.";
 const SUMMARY: &str = "The first file was checked and the command already ran.";
+const CORRECTION: &str = "Report only the differences.";
 
 struct Fixture {
     root: tempfile::TempDir,
@@ -26,6 +27,7 @@ struct Fixture {
     db: PathBuf,
     id: String,
     server: Server,
+    release_batch: Arc<AtomicBool>,
     binary: PathBuf,
 }
 
@@ -42,6 +44,13 @@ impl Fixture {
             .unwrap();
         }
         fs::write(work.join("AGENTS.md"), RULE).unwrap();
+        let (last_batch, release_batch) = gated(
+            streamed_tool_calls_with_usage(
+                json!([call("read-2", "read", json!({"path":"second"}))]),
+                15750,
+            ),
+            String::new(),
+        );
         let mut sequence = vec![
             streamed_tool_calls_with_usage(
                 json!([
@@ -50,10 +59,7 @@ impl Fixture {
                 ]),
                 4200,
             ),
-            streamed_tool_calls_with_usage(
-                json!([call("read-2", "read", json!({"path":"second"}))]),
-                15750,
-            ),
+            last_batch,
         ];
         sequence.extend(replies);
         let server = Server::start_with_models(
@@ -73,15 +79,12 @@ impl Fixture {
             db,
             id,
             server,
+            release_batch,
             binary,
         }
     }
 
-    fn inputs(&self) -> Value {
-        json!({"params.workspace_root":self.work})
-    }
-
-    fn start(&self) -> ChatController {
+    fn start_with_steering(&self) -> ChatController {
         let inputs = json!({"params.workspace_root":self.work, "params.model":"example-model", "params.api_key":"synthetic-key"});
         let launch = ChatLaunch::prepare(
             &self.binary,
@@ -102,6 +105,15 @@ impl Fixture {
                 prompt: "Inspect both files.".into(),
             })
             .unwrap();
+        self.server.wait_for_requests(2);
+        let invocation = std::iter::from_fn(|| controller.try_event())
+            .find_map(|event| match event {
+                ChatEvent::Submitted { invocation, .. } => Some(invocation),
+                _ => None,
+            })
+            .expect("admission precedes the model request");
+        controller.steer(&invocation, CORRECTION.into()).unwrap();
+        self.release_batch.store(true, Ordering::Release);
         controller
     }
 
@@ -156,7 +168,7 @@ fn checkpoint_precedes_the_next_model_request_without_replaying_or_replacing_too
         Reply::stream_text("Reopened."),
     ]);
     crate::fail_save(&f.db, true);
-    let controller = f.start();
+    let controller = f.start_with_steering();
     let CompletionState::Uncommitted(pending) = crate::next_completion(&controller).state else {
         panic!("expected a save-only candidate")
     };
@@ -191,13 +203,17 @@ fn checkpoint_precedes_the_next_model_request_without_replaying_or_replacing_too
     else {
         panic!("expected checkpoint")
     };
-    assert_eq!(display_messages.len(), 8);
+    let steering = json!({"role":"user", "content":CORRECTION});
+    assert_eq!(display_messages.len(), 9);
+    assert_eq!(json!(display_messages[5]), steering);
     let requests = f.server.requests();
     assert!(requests[2].body.get("tools").is_none());
     let summary_request = requests[2].body["messages"].to_string();
     assert!(summary_request.contains("Inspect both files.") && summary_request.contains("oldxxxx"));
     assert!(!summary_request.contains(RULE) && !summary_request.contains("newxxxx"));
+    assert!(!summary_request.contains(CORRECTION));
     let third = requests[3].body["messages"].as_array().unwrap();
+    assert_eq!(third.last(), Some(&steering));
     let (calls, results) = tool_ids(third);
     assert_eq!(calls, ["read-2"]);
     assert_eq!(calls, results);
@@ -215,7 +231,7 @@ fn checkpoint_precedes_the_next_model_request_without_replaying_or_replacing_too
             &db,
             &f.id,
             &f.work,
-            9,
+            10,
             &["once", "read-1", "read-2", "list"],
         );
         assert_eq!(db.model_context(&f.id).unwrap().messages, *context_messages);
@@ -245,6 +261,15 @@ fn checkpoint_precedes_the_next_model_request_without_replaying_or_replacing_too
             && resumed.to_string().contains("New workspace rules.")
     );
     assert!(!resumed.to_string().contains(RULE));
+    assert_eq!(
+        resumed
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| **m == steering)
+            .count(),
+        1
+    );
     assert_eq!(tool_ids(resumed.as_array().unwrap()).1, ["read-2", "list"]);
     f.check_no_replay(6);
 }
@@ -254,7 +279,19 @@ fn failed_mid_turn_summary_keeps_completed_effects_and_usage_without_a_continuat
     let mut incomplete = Reply::text("Partial summary must not be used.");
     incomplete.body = incomplete.body.replace("\"stop\"", "\"length\"");
     let f = Fixture::new([incomplete]);
-    let result = submit(&f.binary, &f.db, &f.id, f.inputs(), "Inspect both files.");
+    let controller = f.start_with_steering();
+    let mut drafts = Vec::new();
+    let resolution = crate::observe_completion(&controller, |event| {
+        if let ChatEvent::UnsentSteering { prompts, .. } = event {
+            drafts.extend_from_slice(prompts);
+        }
+    });
+    controller.close().unwrap();
+    assert_eq!(drafts, [CORRECTION]);
+    let CompletionState::Committed(completion) = resolution.state else {
+        panic!("expected a recorded compaction failure")
+    };
+    let result = completion.result;
     assert!(matches!(result.update, MessageUpdate::Append { .. }));
     assert_eq!(result.status, "failed");
     assert!(
@@ -282,12 +319,9 @@ fn failed_mid_turn_summary_keeps_completed_effects_and_usage_without_a_continuat
 
 #[test]
 fn cancelling_a_pending_summary_does_not_resume_or_publish_a_tool_exchange() {
-    let release = Arc::new(AtomicBool::new(false));
-    let mut summary = Reply::text(SUMMARY);
-    summary.fragments = Some(vec![vec![], summary.body.as_bytes().to_vec()]);
-    summary.release_after_prefix = Some(release.clone());
+    let (summary, release) = gated(Reply::text(SUMMARY), String::new());
     let f = Fixture::new([summary]);
-    let controller = f.start();
+    let controller = f.start_with_steering();
     f.server.wait_for_requests(3);
     assert!(f.server.requests()[2].body.get("tools").is_none());
     controller.cancel();

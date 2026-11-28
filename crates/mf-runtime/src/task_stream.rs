@@ -196,14 +196,18 @@ impl<'a, 'sink, O: crate::NodeOutputs> TypedEmitter<'a, 'sink, O> {
     }
 }
 
+#[derive(Clone)]
 pub struct TaskStreamExecutor {
-    node: Box<dyn TaskStreamNode>,
+    node: Arc<dyn TaskStreamNode>,
     outputs: Vec<PortSpec>,
 }
 
 impl TaskStreamExecutor {
     pub fn new(node: Box<dyn TaskStreamNode>, outputs: Vec<PortSpec>) -> Self {
-        Self { node, outputs }
+        Self {
+            node: node.into(),
+            outputs,
+        }
     }
 
     pub fn set_stream_contract(&mut self, outputs: &[PortSpec]) {

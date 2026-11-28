@@ -224,6 +224,68 @@ Set `capture_errors: true` on LLM nodes that should report request failures as d
 input, cancellation, and infrastructure errors can still abort before any terminal result. Previews
 and observations are never substitutes for missing messages or usages.
 
+## Queuing and steering
+
+A **turn** runs from admission of one prompt to settlement. It has one `turn_id` and can include
+several model requests and tool batches. While it runs, choose where new input belongs:
+
+| Intent | Submit | Withdraw newest unclaimed | When the text reaches the model |
+| --- | --- | --- | --- |
+| New turn in the same session (all chatflows) | Alt+Enter | Alt+Up | After the preceding turn commits successfully, with its newly committed context |
+| Steer this turn (opt-in Agent) | Alt+S | Alt+Down | In the same runner's next request, after a complete reply and its entire tool batch |
+
+`Alt+Enter` starts a turn when idle. During a turn it **always queues**: the host keeps the prompt
+in memory, without allocating a turn or writing a message until its turn starts. One successful
+commit releases at most one queued prompt, in FIFO order. Failure, cancellation, or an unsaved
+result stops the queue and returns unadmitted prompts for editing. Saving that result or reopening
+the application does not restart the queue.
+
+`Alt+S` requests steering. A normal text answer with pending input also continues the same execution.
+No tool is interrupted or replayed. A closed inbox rejects late steering without clearing the editor
+or turning it into a follow-up. Withdrawing from either queue leaves the other queue, the active
+turn and newer edits alone. An already claimed input cannot be withdrawn.
+
+A dim queue strip stays above the editor even when you scroll the transcript or open the Flow
+execution panel. Each `Steering:` or `Follow-up:` row previews the first line of a waiting message;
+long lines end in `...`. The hint shows how to return the full text to the editor. On a short
+terminal the strip leaves room for the conversation and reports how many more entries are waiting.
+Claiming or withdrawing an entry removes its preview; an empty queue takes no space.
+
+These previews show the requested destination, not a saved user message. Final labels come from
+what happened, not which key was pressed:
+
+- `You [steering]`: the Flow placed the input after tool results, before the answer.
+- `You [queued]`: the Flow placed it after an assistant answer as a follow-up in the **same** turn,
+  or the host admitted it from the next-turn queue into a **new** turn.
+- `You`: an ordinary prompt. Older admissions with no recorded queue origin keep this label.
+
+These labels also apply to saved history and do not change the text sent to the model.
+
+The standard Agent declares a finite zero-argument `workflow.call` named `callback:steering`. The
+calculator, context, and DeepSeek examples need no steering-specific startup ports, nodes or
+forwarding. The host binds the unique declared site to the invocation's inbox. Embedded execution
+calls it directly; a compiled runner uses the [host callback RPC](workflows.md#host-callback-rpc).
+The Flow calls it only when it wants pending steering messages, with no arguments; it never sends
+or exposes its transcript to the callback, and skips it on failed replies. With no host binding the
+ordinary local body returns an empty list. Only the invoked conversation Flow is inspected; the
+host's title and compaction calls and movable tool Flows do not inherit the binding. In a custom
+chatflow, reserve `steering` for the main exchange. Multiple static sites of that name disable
+steering rather than guessing which Agent should receive the input. Neither tools nor the model
+receive the callable or its transport. `ChatJob::steer` returns an ID;
+`job.steering().unwrap().withdraw(id)` returns the text only if withdrawal won the race with the
+pull. A cloned inbox can also recover unsent steering after cancellation or failure. Each queue
+accepts up to 32 pending messages totaling 256 KiB of UTF-8.
+
+The host keeps delivery receipts in memory for the active call and any pending save-only recovery.
+How the Flow places delivered steering messages is validated on the final output: the host checks
+that user additions in the display delta match the delivered text and order verbatim. Steering does
+not read or write SQLite during execution: user messages become durable only in the ordinary turn
+settlement. A Flow cannot invent user input for the audit. A failed turn still publishes no model
+context. Cancellation, failure, or closing the invocation never delivers remaining pending input;
+the TUI restores it beside any newer draft while open. Late submissions after the invocation closes
+are rejected without clearing the editor. Closing the application discards the in-memory queue;
+reopening does not resume it.
+
 ## Turn lifecycle
 
 The host-bound `begin` call atomically stores the original user, running turn and application invocation,
@@ -310,7 +372,16 @@ host.close()?;
 result is stored. `cancel` requests cooperative cancellation. Dropping a job cancels it; closing or
 dropping the host cancels and joins workers before releasing storage ownership. The default host
 admits four active workflows independently of the runtime domain limit. Busy sessions and capacity
-limits produce explicit admission errors.
+limits produce explicit admission errors for `submit` and `retry`.
+
+For normal start-or-queue behavior, use `host.submit_or_queue(session_id, prompt)` and match
+`PromptSubmission::Started(job)` or `PromptSubmission::Queued(receipt)`. To queue **only** if that
+session is active, use `host.queue_next(session_id, prompt)`; to withdraw, call
+`host.withdraw_next(session_id, receipt.id)`. `receipt.wait()` yields the next `ChatJob` once claimed,
+including its own optional steering inbox. The worker does not wait for you to poll or join either
+job, and dropping an unread receipt does not cancel an accepted prompt. An unstarted receipt returns
+`ChatError::NextTurnNotStarted { prompt }`; if the claimed prompt fails admission, `job.join()`
+returns `ChatError::NextTurnAdmission` with the original text and error source. Neither is retried.
 
 Profiles contain resolved configuration or an injected `ConversationBackend`. Environment bindings
 resolve during profile construction; model-specific references remain user-Flow policy. An optional
@@ -608,11 +679,17 @@ and output from unsuccessful turns as well as completed conversations.
 `ChatContract` validates the external startup/result interface, not internal model counts, graph
 layout, loops, or business policy. `mf run runner --chat` uses the frozen executable as the backend
 of the application Flow's `workflow` call. Opening chat and submitting turns do not rebuild the
-executable or load original Flow sources. Provider configuration travels through a private argument
-file. The supervisor owns child execution, cancellation, and observation.
+executable or load original Flow sources. Every turn uses an authenticated
+[host session](workflows.md#optional-hosted-io): the child pulls the admitted messages and parameters,
+then sends finite or streaming business records and structured diagnostics. There is no turn argument
+file, business stdout reader, or callback-only chat mode. Raw stderr and OTLP remain separate.
+Recompile older runners before using them for chat.
 
-Finite executables keep terminal JSON. Native streaming executables use JSONL with optional `answer`
-records and exactly one complete alternative result. Capture validates the whole invocation and
+Hosted I/O does not grant steering. Only an explicitly bound `callback:steering` can pull user
+input during execution, on the same connection. A missing or broken session fails the turn without
+relaunching the runner or trying stdout, even if it printed a valid-looking result and exited zero.
+
+Optional `answer` and `tool_call_delta` records are previews; exactly one complete alternative result is required. Capture validates the whole invocation and
 retains the candidate until normal closure. A later conflicting result invalidates recovery rather
 than preserving a first-result winner. Unrelated workflow outputs do not supply missing result facts.
 Result capture is bounded by `MAX_RECOVERY_BYTES` (16 MiB).
@@ -716,7 +793,9 @@ resources on session change, eviction, or exit.
 
 | Interaction | Key |
 | --- | --- |
-| Send the prompt | Alt+Enter, or Esc then Enter |
+| Send now if idle, otherwise queue a new turn | Alt+Enter, or Esc then Enter |
+| Steer the active turn (when supported) | Alt+S |
+| Withdraw the newest pending next-turn / steering input | Alt+Up / Alt+Down |
 | Insert a newline | Enter while editing |
 | Browse messages / return to editing | Esc / i |
 | Open commands | Ctrl+P |
@@ -743,8 +822,10 @@ context replacement is marked pending, not published. Failed records stay visibl
 including failed results with tool records or no assistant answer. Saving a failed audit result does
 not publish its snapshot. A retry action starts a fresh execution and may repeat tool effects.
 
-Session switching waits for active or retained work to be resolved. Extra submissions are rejected,
-not queued. Drafts survive idle switches. History opens at a bounded latest page; Earlier/Latest
+Session switching waits for active or retained work to be resolved. Pending input never owns a turn slot.
+The controller reports `NextTurnClaimed` with the entry ID and new invocation when the predecessor
+commits; `Submitted` follows only if durable admission succeeds.
+Drafts survive idle switches. History opens at a bounded latest page; Earlier/Latest
 commands page original records, not model context. Turn-level performance appears once per page and
 is not duplicated on reload.
 

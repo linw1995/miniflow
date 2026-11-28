@@ -3,7 +3,10 @@
 ### Requirement: Bind configuration separately from conversation inputs
 
 The backend SHALL bind one unambiguous required `messages` startup input with the shared
-`List(Object)` message contract and optional application-owned `context`. Input messages SHALL be
+`List(Object)` message contract and optional application-owned `context`. The host MAY bind a declared
+zero-argument `steering` callback for this invocation. It SHALL deliver input only on demand; admission and
+withdrawal remain host-owned until the batch is claimed. The callback SHALL NOT expose the separate
+next-turn queue. Input messages SHALL be
 the admitted model context plus the current user exactly once. Effective context SHALL incorporate
 successful explicit replacements, not an unconditional replay of all displayed messages. Remaining
 inputs SHALL use ordinary parameter resolution. Conversation inputs MUST NOT be overridable as
@@ -55,7 +58,8 @@ alternatives where applicable so recovery does not require a manifest. Both back
 The backend SHALL decode bounded unique-key JSON containing exactly one self-contained append or
 replace_context result object. Required status/usages, optional error/title, and message fields SHALL
 come from that same payload, never other branches or outputs. The host normalizes its facts and
-internal update enum. Both alternatives yield newly generated assistant/tool display messages;
+internal update enum. Both alternatives yield newly generated assistant/tool display messages and
+any verbatim user steering delivered by the host in order during this invocation;
 no kind field or single update port SHALL be required.
 Success SHALL require complete display tool exchanges and a final nonempty assistant answer without
 pending calls or a nonempty error. Failure SHALL require an error, forbid a title, and MAY return an
@@ -73,6 +77,16 @@ Stored success MUST win over late errors or conflicting output, with separate di
 
 - **WHEN** an append delta contains an empty-content assistant call batch, matching tool results, and final answer
 - **THEN** validation accepts and retains the ordered exchange without flattening tool records
+
+#### Scenario: Reject invented steering
+
+- **WHEN** a workflow returns user display additions that do not match host-delivered steering text and order
+- **THEN** neither settlement nor save-only recovery accepts the terminal result
+
+#### Scenario: Interrupt a steered turn before settlement
+
+- **WHEN** the owning host exits after delivering steering but before settling the turn
+- **THEN** reopening MUST NOT recover the steering as a message, pending request, or save-only candidate
 
 #### Scenario: Persist a failed workflow result
 

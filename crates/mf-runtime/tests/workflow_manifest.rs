@@ -60,7 +60,7 @@ fn frame(payload: &[u8]) -> Vec<u8> {
 fn inspection_persists_a_projection_without_compiler_relationships() {
     let manifest = sample();
     let payload = serde_json::to_value(&manifest).unwrap();
-    assert_eq!(payload["version"], "2026-11-18");
+    assert_eq!(payload["version"], "2026-11-27");
     assert_eq!(
         payload["definition"],
         serde_json::to_value(&manifest.definition).unwrap()
@@ -208,9 +208,11 @@ fn rejects_corrupt_framing_and_lengths_without_allocating_declared_payloads() {
 fn rejects_invalid_versions_and_duplicate_members_with_json_sources() {
     let payload = serde_json::to_string(&sample()).unwrap();
     for invalid in [
-        payload.replace("2026-11-18", "2099-01-01"),
-        payload.replace("2026-11-18", "2026-11-14"),
-        payload.replacen("{", "{\"version\":\"2026-11-18\",", 1),
+        payload.replace("2026-11-27", "2099-01-01"),
+        payload.replace("2026-11-27", "2026-11-26"),
+        payload.replace("2026-11-27", "2026-11-25"),
+        payload.replace("2026-11-27", "2026-11-18"),
+        payload.replacen("{", "{\"version\":\"2026-11-27\",", 1),
         payload.replace("\"required\":false", "\"required\":false,\"required\":true"),
         format!("{payload}{{}}"),
         "{".into(),

@@ -131,6 +131,13 @@ fn wait_ready(file: &File, writing: bool, cancellation: &StreamCancellation) -> 
             continue;
         }
         if descriptor.revents & libc::POLLNVAL != 0 {
+            // Darwin reports POLLNVAL for valid character devices such as /dev/null.
+            #[cfg(target_os = "macos")]
+            if writing
+                && std::os::unix::fs::FileTypeExt::is_char_device(&file.metadata()?.file_type())
+            {
+                return Ok(());
+            }
             return Err(io::Error::other("stream descriptor is invalid"));
         }
         if writing && descriptor.revents & (libc::POLLERR | libc::POLLHUP) != 0 {
@@ -150,77 +157,158 @@ fn wait_ready(_: &File, _: bool, _: &StreamCancellation) -> io::Result<()> {
     ))
 }
 
-pub struct StreamStdio {
-    input: Option<TextInput>,
-    output: File,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticLevel {
+    Warning,
+    Error,
 }
 
-impl StreamStdio {
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerDiagnostic {
+    pub level: DiagnosticLevel,
+    pub message: String,
+}
+
+/// Reserves the runner's standard streams even when an invocation routes business output elsewhere.
+pub struct RunnerStdio {
+    output: File,
+    #[cfg(unix)]
+    rpc: Option<crate::callback_rpc::Client>,
+}
+
+impl RunnerStdio {
     #[cfg(unix)]
     pub fn claim() -> Result<Self, StreamError> {
         use std::os::fd::{AsRawFd, FromRawFd};
-        fn duplicate(fd: libc::c_int) -> io::Result<File> {
-            let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
-            if duplicate < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(unsafe { File::from_raw_fd(duplicate) })
-        }
-        fn redirect(source: libc::c_int, target: libc::c_int) -> io::Result<()> {
-            if unsafe { libc::dup2(source, target) } < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        }
-        let claim = || -> io::Result<Self> {
+        let reserve = || -> io::Result<Self> {
             io::stdout().flush()?;
-            let input = TextInput::new(duplicate(libc::STDIN_FILENO)?);
-            let output = duplicate(libc::STDOUT_FILENO)?;
+            let fd = unsafe { libc::fcntl(libc::STDOUT_FILENO, libc::F_DUPFD_CLOEXEC, 3) };
+            if fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let output = unsafe { File::from_raw_fd(fd) };
             let null = File::open("/dev/null")?;
-            redirect(null.as_raw_fd(), libc::STDIN_FILENO)?;
-            redirect(libc::STDERR_FILENO, libc::STDOUT_FILENO)?;
-            Ok(Self {
-                input: Some(input),
-                output,
-            })
+            if unsafe { libc::dup2(null.as_raw_fd(), libc::STDIN_FILENO) } < 0
+                || unsafe { libc::dup2(libc::STDERR_FILENO, libc::STDOUT_FILENO) } < 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(Self { output, rpc: None })
         };
-        claim().context(StdioSnafu)
+        reserve().context(StdioSnafu)
     }
 
     #[cfg(not(unix))]
     pub fn claim() -> Result<Self, StreamError> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "stream stdio requires Linux or macOS",
+            "runner stdio requires Linux or macOS",
         ))
         .context(StdioSnafu)
     }
 
-    pub fn take_input(&mut self) -> Option<TextInput> {
-        self.input.take()
+    #[cfg(unix)]
+    pub fn attach_host(
+        &mut self,
+        sites: &crate::callback::CallbackSites,
+        cancellation: &StreamCancellation,
+    ) -> Result<
+        (
+            crate::callback::HostCallbacks,
+            Option<crate::WorkflowArguments>,
+        ),
+        crate::callback::CallbackError,
+    > {
+        self.rpc = crate::callback_rpc::from_env(sites, cancellation)?;
+        let Some(client) = &mut self.rpc else {
+            return Ok(Default::default());
+        };
+        Ok((client.callbacks(), client.take_inputs()?))
     }
 
-    pub fn write_json(&mut self, value: &impl serde::Serialize) -> Result<(), StreamError> {
-        serde_json::to_writer(&mut self.output, value).context(OutputEncodeSnafu)?;
-        self.output
-            .write_all(b"\n")
-            .and_then(|()| self.output.flush())
-            .context(OutputWriteSnafu)
+    pub fn diagnostic(
+        &self,
+        level: DiagnosticLevel,
+        message: std::fmt::Arguments<'_>,
+    ) -> Result<(), crate::callback::CallbackError> {
+        #[cfg(unix)]
+        if let Some(client) = &self.rpc
+            && client.io().diagnostics
+        {
+            return client.diagnostic(RunnerDiagnostic {
+                level,
+                message: message.to_string(),
+            });
+        }
+        let _ = level;
+        eprintln!("{message}");
+        Ok(())
     }
 
-    pub fn run(mut self, instance: StreamInstance) -> Result<StreamSummary, StreamError> {
+    pub fn warn(&self, message: std::fmt::Arguments<'_>) {
+        // Observation warnings do not replace a workflow failure. A failed RPC write poisons the invocation.
+        let _ = self.diagnostic(DiagnosticLevel::Warning, message);
+    }
+
+    pub fn finish(self) -> Result<(), crate::callback::CallbackError> {
+        #[cfg(unix)]
+        if let Some(client) = self.rpc {
+            client.finish()?;
+        }
+        Ok(())
+    }
+
+    pub fn write_output(
+        &self,
+        values: crate::NodeValues,
+        cancellation: &StreamCancellation,
+    ) -> Result<(), StreamError> {
+        #[cfg(unix)]
+        if let Some(client) = &self.rpc
+            && client.io().output
+        {
+            return client
+                .output(values, cancellation)
+                .context(crate::stream_instance::OutputRpcSnafu);
+        }
+        let mut bytes = serde_json::to_vec(&values).context(OutputEncodeSnafu)?;
+        bytes.push(b'\n');
+        let mut remaining = bytes.as_slice();
+        let mut file = &self.output;
+        while !remaining.is_empty() {
+            wait_ready(file, true, cancellation).context(OutputWriteSnafu)?;
+            if let Some(error) = cancellation.failure() {
+                return Err(error);
+            }
+            let written = match file.write(&remaining[..remaining.len().min(512)]) {
+                Ok(0) => {
+                    return Err(io::Error::from(io::ErrorKind::WriteZero))
+                        .context(OutputWriteSnafu);
+                }
+                Ok(written) => written,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(source) => return Err(source).context(OutputWriteSnafu),
+            };
+            remaining = &remaining[written..];
+        }
+        file.flush().context(OutputWriteSnafu)
+    }
+
+    pub fn run(&self, instance: StreamInstance) -> Result<StreamSummary, StreamError> {
         let cancellation = instance.cancellation();
         while let Ok(Some(delivery)) = instance.receive() {
-            let result = write_record(&mut self.output, delivery.output(), &cancellation);
-            match result {
+            match self.write_output(delivery.output().outputs.clone(), &cancellation) {
                 Ok(()) => {
                     if delivery.acknowledge().is_err() {
                         break;
                     }
                 }
                 Err(error) => {
-                    delivery.fail(error);
-                    break;
+                    delivery.fail(error.clone());
+                    let _ = instance.join();
+                    return Err(error);
                 }
             }
         }
@@ -228,28 +316,38 @@ impl StreamStdio {
     }
 }
 
-fn write_record(
-    file: &mut File,
-    output: &crate::StreamOutput,
-    cancellation: &StreamCancellation,
-) -> Result<(), StreamError> {
-    let mut bytes = serde_json::to_vec(&output.outputs).context(OutputEncodeSnafu)?;
-    bytes.push(b'\n');
-    let mut remaining = bytes.as_slice();
-    while !remaining.is_empty() {
-        wait_ready(file, true, cancellation).context(OutputWriteSnafu)?;
-        if let Some(error) = cancellation.failure() {
-            return Err(error);
-        }
-        let written = match file.write(&remaining[..remaining.len().min(512)]) {
-            Ok(0) => {
-                return Err(io::Error::from(io::ErrorKind::WriteZero)).context(OutputWriteSnafu);
-            }
-            Ok(written) => written,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(source) => return Err(source).context(OutputWriteSnafu),
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_supports_dev_null_but_preserves_cancellation_and_write_failures() {
+        let output = RunnerStdio {
+            rpc: None,
+            output: File::options().write(true).open("/dev/null").unwrap(),
         };
-        remaining = &remaining[written..];
+        let cancel = StreamCancellation::default();
+        output.write_output(Default::default(), &cancel).unwrap();
+        cancel.cancel(
+            crate::StreamExecutionSnafu {
+                message: "cancelled before output",
+            }
+            .build(),
+        );
+        assert!(matches!(
+            output.write_output(Default::default(), &cancel),
+            Err(StreamError::Execution { .. })
+        ));
+
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let read_only = RunnerStdio {
+            rpc: None,
+            output: File::open(file.path()).unwrap(),
+        };
+        assert!(matches!(
+            read_only.write_output(Default::default(), &Default::default()),
+            Err(StreamError::OutputWrite { .. })
+        ));
+        assert_eq!(file.as_file().metadata().unwrap().len(), 0);
     }
-    file.flush().context(OutputWriteSnafu)
 }

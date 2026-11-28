@@ -374,6 +374,15 @@ impl FlowBuilder {
         .with_root_scope(data.root_scope);
         Ok(crate::dependencies::bind_task_guards(flow, guards))
     }
+    pub fn subgraph_input_metadata(&self) -> mf_runtime::SubgraphInputMetadata {
+        mf_runtime::SubgraphInputMetadata::from_domains(
+            &self.build_execution_domains(),
+            &self.execution_order,
+            &self.nodes,
+            &self.input_schema,
+        )
+    }
+
     pub fn into_stream(
         self,
         execution: crate::StreamExecution,
@@ -1149,6 +1158,43 @@ pub fn bind_domain_snapshots<N>(
         })
         .collect();
     domains.with_snapshot_visibility(visibility)
+}
+
+/// Selected startup-frame values are terminal; selections from the same emitted frame form one packet.
+/// Derive this from the frozen routing table, not from the kind of the last node on an edge.
+pub fn stream_output_messages(
+    plan: &mf_runtime::StreamPlan,
+) -> BTreeMap<(&str, &str), (&mf_runtime::PortSpec, usize)> {
+    let mut owners = vec![0; plan.nodes().len()];
+    for (message, entry) in plan.program().messages.iter().enumerate() {
+        for &domain in entry.schedule.domains.iter() {
+            for node in plan.execution_domain(domain).nodes.iter() {
+                owners[node.index()] = message;
+            }
+        }
+    }
+    let mut ports = BTreeMap::new();
+    for (index, node) in plan.nodes().iter().enumerate() {
+        let route = plan.program().emissions[index].as_ref();
+        let ordinary = route
+            .filter(|r| !r.terminal)
+            .map_or(owners[index], |r| r.message);
+        for port in &node.metadata.ports.outputs {
+            ports.insert(
+                (node.definition_id.as_str(), port.name.as_ref()),
+                (port, ordinary),
+            );
+        }
+        if let Some(route) = route {
+            for port in &node.metadata.stream_outputs {
+                ports.insert(
+                    (node.definition_id.as_str(), port.name.as_ref()),
+                    (port, route.message),
+                );
+            }
+        }
+    }
+    ports
 }
 
 /// Validates message ownership and partitions execution domains for a stream graph.

@@ -51,11 +51,20 @@ parallel storage DTO.
 
 ### Requirement: Export built-in Agent transcript additions
 
-The Agent SHALL preserve supplied messages and return only generated assistant/tool additions.
-Its append policy MUST NOT restrict enclosing Flow context replacement. Each assistant, including
-the final answer, SHALL appear once; parallel tool results SHALL follow call order. The Agent SHALL
-continue while the model requests tools, without an Agent-specific round limit. Captured failures
-SHALL return available messages/usages with failed status, not an invented assistant or echoed input prefix.
+The Agent SHALL preserve the request, returning only new assistant/tool messages and any additions from
+the zero-argument host-bindable `callback:steering` Call. Unbound, its authored body SHALL return an
+empty list. Failed replies SHALL skip the callback.
+The Agent SHALL NOT interpret a host endpoint or require a chat provider.
+An enclosing Flow MAY replace context. Each assistant, including the final answer, SHALL appear once;
+parallel tool results SHALL follow call order. The Agent SHALL continue while the model requests tools,
+without a fixed round limit. Captured failures SHALL retain available messages and usages with failed
+status, without inventing an assistant or echoing the input prefix.
+
+#### Scenario: Steer at a complete reply boundary
+
+- **WHEN** an opted-in Agent completes a reply and any matching tool batch with pending steering
+- **THEN** the next request in the same execution includes all delivered user messages in FIFO order after that exchange
+- **AND** it neither interrupts the batch, replays a tool, nor creates a new application turn
 
 #### Scenario: Return one tool round and a final answer
 
@@ -79,12 +88,14 @@ SHALL return available messages/usages with failed status, not an invented assis
 
 - **WHEN** the caller supplies a compaction Flow and its policy replaces a prefix after a completed tool batch
 - **THEN** the next conversation request uses the checkpoint and only subsequent additions, with no replay of the batch
+- **AND** steering waiting at that boundary follows the checkpoint in the next request and appears once in the generated transcript
 - **AND** the generated transcript remains complete and auxiliary calls retain separate usage attribution
 
 #### Scenario: Compaction fails before the next request
 
 - **WHEN** the configured policy reports a failed summary after tools have completed
 - **THEN** the Agent returns the completed tool transcript, captured usages, and an error without another conversation request
+- **AND** steering waiting at that boundary remains unclaimed for the host to return to the user
 - **AND** cancellation still aborts the workflow rather than publishing a partial summary
 
 #### Scenario: Continue a long tool exchange
