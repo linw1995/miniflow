@@ -439,6 +439,10 @@ with or without callbacks. Omitted flags are false. Values and handler implement
 unknown grant fields rather than switching transports. File sources, provider environment bindings,
 OTLP, and process exit status are unchanged.
 
+A bare executable or ordinary `mf run` / `mf run --tui` does not need a host session. Native
+hosts can opt into any combination of these capabilities through `mf-runtime`. Executable `--chat`
+always uses hosted I/O, whether or not the executable declares a steering callback.
+
 | Capability | Not granted | Granted |
 | --- | --- | --- |
 | Startup inputs | Named arguments, `--inputs`, or `--inputs-file` | The runner pulls `{"get_inputs":{}}` once, before provider construction; the host replies `{"inputs":{"values":{"params.model":"example"}}}`. No argument file is needed. |
@@ -496,7 +500,7 @@ terminal map. This wire mode includes finite streaming workflows as well as auto
 Since records can come from different execution domains, the derived stream ports are optional per
 record (`required: false`); the loader's supplied ports still match the manifest's selection optionality.
 Use `policy.stream_output_ports()` to inspect that derived contract. Records are forwarded live through
-the same supervised transport as chat, without accumulating the stream into a terminal result.
+the shared process supervisor, without accumulating the stream into a terminal result.
 Arguments and results cross a JSON boundary, so nested callable arguments cannot cross
 into the subprocess. Output values are conservatively secret because runner JSON does
 not preserve native privacy labels. The subprocess uses its own internal execution
@@ -511,11 +515,11 @@ implementing other independently observed executors can use `FlowValue::external
 with a validated manifest and a sink-aware executor using the same boundary semantics.
 
 `--chat` and runner-backed Flow parameters share `mf_tui::runner::RunnerInvocation`
-for argument-file transport, launch, live observation, cancellation, output draining,
-and process-group cleanup. It supports both terminal JSON and backpressured JSON
-records. Chat supplies its conversation decoder and preview consumer, then reconciles
-the retained terminal reply and usage events, including after protocol or process
-failure. Its streaming composition uses `PreparedSubgraph` and `workflow.call`; runner-backed Flow
+for launch, live observation, cancellation, output draining, and process-group cleanup.
+Runner-backed Flow parameters use an argument file and read JSON from stdout. Executable chat
+requires [hosted I/O](#optional-hosted-io), including for finite replies. Its conversation decoder
+retains only a validated terminal reply for recovery, never preview fragments, and reconciles it with
+observed usage events. Its streaming composition uses `PreparedSubgraph` and `workflow.call`; runner-backed Flow
 values select terminal or record transport from the manifest and use the same executor.
 
 Both `--chat` and runner-backed Flow values hold the same prepared-runner abstraction.
@@ -615,7 +619,13 @@ unchanged.
 
 The Agent accepts complete `params.messages` as a read-only Loop prefix and calls `mfn-llm.tool-catalog`
 once before the first request. The Loop carries only the generated suffix and continues while the
-model requests tools, without a fixed round limit. The
+model requests tools or a [steering message](chat.md#queuing-and-steering) arrives at a complete
+reply boundary, without a fixed round limit. `callback:steering` is a finite, zero-argument
+host-bindable Call, not a transport endpoint or model tool. After a completed reply or a completed
+tool batch, the Agent calls it with no arguments to pull any pending `messages: List(Object)`. It
+skips the call on failed outcomes and never sends or lets the callback rewrite its transcript.
+A completed text answer continues only on nonempty input; a failed outcome never continues. Without
+a caller source the local default returns an empty list, leaving the suffix unchanged. The
 [request Flow](../crates/builtin-nodes/llm/workflows/agent-request.json) forwards the prefix unchanged
 when the suffix is empty, avoiding CEL conversion of the request history on the first model request.
 After a completed tool round, it joins the prefix and the generated messages with CEL, while the

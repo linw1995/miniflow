@@ -2,7 +2,7 @@
 
 use crate::{
     manifest::read_manifest,
-    run::{LocalObservation, LocalOutcome, LocalRun, RunError},
+    run::{InvocationIo, LocalObservation, LocalOutcome, LocalRun, RunError},
 };
 use mf_runtime::{NodeValues, StreamCancellation, WorkflowArguments, WorkflowManifest};
 use mf_telemetry::{
@@ -113,6 +113,9 @@ pub struct RunnerInvocation<'a> {
     pub arguments: &'a WorkflowArguments,
     pub verbose: u8,
     pub snapshots: bool,
+    /// Pull arguments and deliver all outputs (including a finite result) to the record consumer.
+    pub host_io: bool,
+    pub callbacks: mf_runtime::callback::HostCallbacks,
 }
 
 /// Preserve raw completion on protocol failure so hosts can reconcile or recover
@@ -163,31 +166,21 @@ impl RunnerInvocation<'_> {
             std::env::var_os(name)
         })?;
         schema.validate_stdin(&arguments, false)?;
-        let mut file = tempfile::NamedTempFile::new().context(IoSnafu {
-            operation: "create private runner arguments",
-        })?;
-        serde_json::to_writer(&mut file, &arguments).context(ArgumentsSnafu)?;
-        let size = file
-            .as_file()
-            .metadata()
-            .context(IoSnafu {
-                operation: "inspect private runner arguments",
-            })?
-            .len();
-        ensure!(
-            size <= mf_runtime::MAX_WORKFLOW_INPUT_BYTES as u64,
-            mf_runtime::WorkflowInputTooLargeSnafu {
-                limit: mf_runtime::MAX_WORKFLOW_INPUT_BYTES
-            }
-        );
+        let mut command = Command::new(&self.runner.executable);
+        let file;
+        let io = if self.host_io {
+            InvocationIo::Hosted(arguments)
+        } else {
+            file = argument_file(&arguments)?;
+            command.arg("--inputs-file").arg(file.path());
+            InvocationIo::Standard(self.runner.output)
+        };
         if should_cancel() {
             cancel(&cancellation);
         }
         if let Some(error) = cancellation.failure() {
             return Err(error.into());
         }
-        let mut command = Command::new(&self.runner.executable);
-        command.arg("--inputs-file").arg(file.path());
         for _ in 0..self.verbose.min(3) {
             command.arg("--verbose");
         }
@@ -197,12 +190,14 @@ impl RunnerInvocation<'_> {
         );
         let run_id = RunId::new();
         let description = self.runner.description.clone();
-        let mut run = match self.runner.output {
-            RunnerOutput::Finite { limit } => LocalRun::start(command, description, run_id, limit)?,
-            RunnerOutput::Records => {
-                LocalRun::start_stream(command, description, run_id, cancellation.clone())?
-            }
-        };
+        let mut run = LocalRun::start_invocation(
+            command,
+            description,
+            run_id,
+            cancellation.clone(),
+            Some((&self.runner.manifest.descriptor.callbacks, self.callbacks)),
+            io,
+        )?;
         observe(run.observation());
         let mut protocol_failure = None;
         loop {
@@ -223,6 +218,27 @@ impl RunnerInvocation<'_> {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
+}
+
+fn argument_file(arguments: &WorkflowArguments) -> Result<tempfile::NamedTempFile, RunnerError> {
+    let mut file = tempfile::NamedTempFile::new().context(IoSnafu {
+        operation: "create private runner arguments",
+    })?;
+    serde_json::to_writer(&mut file, arguments).context(ArgumentsSnafu)?;
+    let size = file
+        .as_file()
+        .metadata()
+        .context(IoSnafu {
+            operation: "inspect private runner arguments",
+        })?
+        .len();
+    ensure!(
+        size <= mf_runtime::MAX_WORKFLOW_INPUT_BYTES as u64,
+        mf_runtime::WorkflowInputTooLargeSnafu {
+            limit: mf_runtime::MAX_WORKFLOW_INPUT_BYTES
+        }
+    );
+    Ok(file)
 }
 
 fn cancel(cancellation: &StreamCancellation) {
@@ -278,6 +294,8 @@ mod tests {
                 arguments,
                 verbose: 0,
                 snapshots: false,
+                host_io: false,
+                callbacks: Default::default(),
             }
             .run(
                 Default::default(),

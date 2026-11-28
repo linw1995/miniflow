@@ -207,13 +207,17 @@ impl ConversationResult {
             }
         };
         ensure!(
-            self.display_messages().iter().all(|message| matches!(
-                message,
-                ChatMessage::Assistant { .. } | ChatMessage::ToolResult { .. }
-            )),
+            self.display_messages()
+                .iter()
+                .enumerate()
+                .all(|(index, message)| match message {
+                    ChatMessage::Assistant { .. } | ChatMessage::ToolResult { .. } => true,
+                    ChatMessage::User { metadata: None, .. } => index != 0,
+                    _ => false,
+                }),
             InvalidSnafu {
                 field: "display messages",
-                reason: "must contain only newly generated assistant and tool messages"
+                reason: "requires assistant/tool additions or host-delivered steering after a reply"
             }
         );
         validate_transcript(self.display_messages(), mode)

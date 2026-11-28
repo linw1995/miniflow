@@ -51,11 +51,20 @@ parallel storage DTO.
 
 ### Requirement: Export built-in Agent transcript additions
 
-The Agent SHALL preserve supplied messages and return only generated assistant/tool additions.
-Its append policy MUST NOT restrict enclosing Flow context replacement. Each assistant, including
-the final answer, SHALL appear once; parallel tool results SHALL follow call order. The Agent SHALL
-continue while the model requests tools, without an Agent-specific round limit. Captured failures
-SHALL return available messages/usages with failed status, not an invented assistant or echoed input prefix.
+The Agent SHALL preserve the request, returning only new assistant/tool messages and any additions from
+the zero-argument host-bindable `callback:steering` Call. Unbound, its authored body SHALL return an
+empty list. Failed replies SHALL skip the callback.
+The Agent SHALL NOT interpret a host endpoint or require a chat provider.
+An enclosing Flow MAY replace context. Each assistant, including the final answer, SHALL appear once;
+parallel tool results SHALL follow call order. The Agent SHALL continue while the model requests tools,
+without a fixed round limit. Captured failures SHALL retain available messages and usages with failed
+status, without inventing an assistant or echoing the input prefix.
+
+#### Scenario: Steer at a complete reply boundary
+
+- **WHEN** an opted-in Agent completes a reply and any matching tool batch with pending steering
+- **THEN** the next request in the same execution includes all delivered user messages in FIFO order after that exchange
+- **AND** it neither interrupts the batch, replays a tool, nor creates a new application turn
 
 #### Scenario: Return one tool round and a final answer
 

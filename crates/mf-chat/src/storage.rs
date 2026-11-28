@@ -117,6 +117,7 @@ const CONNECTION_PRAGMAS: &str = "PRAGMA busy_timeout = 5000; PRAGMA foreign_key
 
 /// Owns initialization and recovery rights for one database until dropped.
 pub struct ChatDatabase {
+    pub(crate) deliveries: std::sync::Arc<crate::steering::Deliveries>,
     path: PathBuf,
     _ownership: File,
 }
@@ -173,6 +174,7 @@ impl ChatDatabase {
         }
         initialize(&path)?;
         let database = Self {
+            deliveries: Default::default(),
             path,
             _ownership: ownership,
         };

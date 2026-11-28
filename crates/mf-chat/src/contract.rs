@@ -196,6 +196,8 @@ pub struct ProviderParameterPorts {
 #[derive(Clone, Debug)]
 pub struct ChatContract {
     pub parameters: WorkflowInputSchema,
+    /// The user workflow declares an unambiguous Agent reply callback.
+    pub supports_steering: bool,
     pub answer_stream: bool,
     pub tool_call_delta_stream: bool,
     pub streaming: bool,
@@ -329,6 +331,10 @@ impl ChatContract {
             answer_stream,
             tool_call_delta_stream,
             streaming,
+            supports_steering: manifest
+                .descriptor
+                .callbacks
+                .contains_key(crate::steering::CALLBACK_NAME),
             inputs,
             alternatives,
         })
@@ -624,6 +630,7 @@ mod output_tests {
             answer_stream: answer,
             tool_call_delta_stream: false,
             streaming: true,
+            supports_steering: false,
             inputs: Default::default(),
         })
     }
@@ -771,6 +778,7 @@ mod output_tests {
             answer_stream: false,
             tool_call_delta_stream: false,
             streaming: false,
+            supports_steering: false,
             inputs: BTreeMap::new(),
             alternatives: ResultAlternatives::Append,
         };

@@ -1,15 +1,14 @@
 //! A single conversation execution lane over a supplied workflow executable.
 
 use crate::{
-    run::{LocalObservation, LocalOutcome, RunError, RunOptions},
-    runner::{PreparedRunner, RunnerError, RunnerInvocation},
+    run::{LocalObservation, RunError, RunOptions},
+    runner::{PreparedRunner, RunnerCompletion, RunnerError, RunnerInvocation},
 };
-use mf_chat::contract::{
-    ChatContract, CompletionState, ConversationExit, ReconciledCompletion, TurnExit,
-};
+use mf_chat::contract::{ChatContract, CompletionState, ReconciledCompletion, TurnExit};
 use mf_chat::{
-    ChatDatabase, Invocation, ModelInfo, ModelSelection, ModelSelectionCancellation, Session,
-    SessionPage, UncommittedCompletion, display,
+    ChatDatabase, ConversationResult, Invocation, ModelInfo, ModelSelection,
+    ModelSelectionCancellation, NextTurnQueue, PendingMessageId, Session, SessionPage,
+    UncommittedCompletion, display,
 };
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
@@ -38,8 +37,6 @@ const PAGE_SIZE: usize = 50;
 #[snafu(visibility(pub))]
 pub enum ChatRunError {
     #[snafu(transparent)]
-    Json { source: serde_json::Error },
-    #[snafu(transparent)]
     Domain { source: mf_chat::ChatError },
     #[snafu(transparent)]
     Inputs {
@@ -66,6 +63,10 @@ pub enum ChatRunError {
     WorkerPanic,
     #[snafu(display("finish, cancel, or recover the current turn first"))]
     Busy,
+    #[snafu(display("this session is not accepting next-turn input"))]
+    NextTurnClosed,
+    #[snafu(display("this turn is not accepting steering input"))]
+    SteeringClosed,
     #[snafu(display("there is no reply to recover"))]
     MissingReply,
     #[snafu(display("invalid chat options: {reason}"))]
@@ -160,6 +161,19 @@ pub enum ChatEvent {
         invocation: Invocation,
         prompt: String,
     },
+    /// A committed predecessor released this entry. `Submitted` still requires durable admission.
+    NextTurnClaimed {
+        id: PendingMessageId,
+        invocation: Invocation,
+    },
+    UnsentNextTurns {
+        session_id: String,
+        prompts: Vec<String>,
+    },
+    UnsentSteering {
+        invocation: Invocation,
+        prompts: Vec<String>,
+    },
     Observing(LocalObservation),
     Preview {
         invocation: Invocation,
@@ -182,7 +196,13 @@ pub enum ChatEvent {
     },
 }
 
+type ActiveSteering = Arc<Mutex<Option<mf_chat::SteeringInbox>>>;
+type ActiveNextTurns = Arc<Mutex<Option<NextTurnQueue<Arc<str>>>>>;
+
 pub struct ChatController {
+    next_turns: ActiveNextTurns,
+    steering: ActiveSteering,
+    supports_steering: bool,
     _database: Arc<ChatDatabase>,
     commands: SyncSender<ChatCommand>,
     events: Receiver<ChatEvent>,
@@ -226,7 +246,12 @@ impl ChatController {
         let cancel = Arc::new(AtomicBool::new(false));
         let preview = Arc::new(Mutex::new(Capture::default()));
         let compacting = Arc::new(Mutex::new((None, false)));
+        let steering = ActiveSteering::default();
+        let supports_steering = launch.contract.supports_steering;
+        let next_turns = ActiveNextTurns::default();
         let controller = Controller {
+            next_turns: next_turns.clone(),
+            steering: steering.clone(),
             launch: Arc::new(launch),
             model_selection,
             database: Arc::clone(&database),
@@ -247,6 +272,9 @@ impl ChatController {
             })?;
         Ok(Self {
             _database: database,
+            next_turns,
+            steering,
+            supports_steering,
             commands,
             events,
             deferred: Mutex::new(None),
@@ -264,6 +292,71 @@ impl ChatController {
             cancel,
             worker: Some(worker),
         })
+    }
+    /// Queue a new turn, not a command or an input to the in-flight executable.
+    pub fn queue_next(
+        &self,
+        session_id: &str,
+        text: String,
+    ) -> Result<PendingMessageId, ChatRunError> {
+        let mut next = self.next_turns.lock().unwrap();
+        ensure!(!self.closed.load(Ordering::Acquire), ClosedSnafu);
+        ensure!(!self.cancel.load(Ordering::Acquire), CancelledSnafu);
+        Ok(next
+            .as_mut()
+            .filter(|q| q.session_id() == session_id)
+            .context(NextTurnClosedSnafu)?
+            .enqueue(text.into())?)
+    }
+    fn pending_next(&self, session_id: &str) -> Vec<(PendingMessageId, Arc<str>)> {
+        self.next_turns
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|q| q.session_id() == session_id)
+            .map_or_else(Vec::new, |q| q.pending().cloned().collect())
+    }
+    pub fn withdraw_next(&self, session_id: &str, id: PendingMessageId) -> Option<String> {
+        self.next_turns
+            .lock()
+            .unwrap()
+            .as_mut()
+            .filter(|q| q.session_id() == session_id)?
+            .withdraw(id)
+            .map(|s| s.to_string())
+    }
+    pub fn withdraw_last_next(&self, session_id: &str) -> Option<String> {
+        self.next_turns
+            .lock()
+            .unwrap()
+            .as_mut()
+            .filter(|q| q.session_id() == session_id)?
+            .withdraw_last()
+            .map(|s| s.to_string())
+    }
+    pub fn supports_steering(&self) -> bool {
+        self.supports_steering
+    }
+    /// Never route live input through the command queue blocked by the current invocation.
+    pub fn steer(
+        &self,
+        target: &Invocation,
+        text: String,
+    ) -> Result<mf_chat::PendingMessageId, ChatRunError> {
+        let inbox = self.steering(target).context(SteeringClosedSnafu)?;
+        ensure!(
+            !self.closed.load(Ordering::Acquire) && !self.cancel.load(Ordering::Acquire),
+            SteeringClosedSnafu
+        );
+        Ok(inbox.submit(text)?)
+    }
+    pub fn steering(&self, target: &Invocation) -> Option<mf_chat::SteeringInbox> {
+        self.steering
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|inbox| inbox.invocation() == target)
+            .cloned()
     }
     pub fn supports_model_selection(&self) -> bool {
         self.supports_model_selection
@@ -304,6 +397,9 @@ impl ChatController {
     }
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Release);
+        if let Some(inbox) = &*self.steering.lock().unwrap() {
+            inbox.close();
+        }
         self.model_selection_cancel.cancel_active();
     }
     pub fn try_event(&self) -> Option<ChatEvent> {
@@ -397,15 +493,25 @@ impl Drop for ChatController {
     }
 }
 
+struct CapturedTurn {
+    status: ExitStatus,
+    reason: TurnExit,
+    stderr: String,
+    capture_error: Option<String>,
+    reply: Option<ConversationResult>,
+}
+
 enum RetainedResponse {
     Ready(UncommittedCompletion),
-    Exited(LocalOutcome),
+    Exited(CapturedTurn),
 }
 struct Retained {
     invocation: Invocation,
     response: RetainedResponse,
 }
 struct Controller {
+    next_turns: ActiveNextTurns,
+    steering: ActiveSteering,
     launch: Arc<ChatLaunch>,
     model_selection: ModelSelection,
     database: Arc<ChatDatabase>,
@@ -504,16 +610,7 @@ impl Controller {
             }
             ChatCommand::Load { session_id, before } => {
                 let session = self.database.session(&session_id)?;
-                let end = before.unwrap_or(session.next_sequence);
-                let after = (end > PAGE_SIZE as i64).then_some(end - PAGE_SIZE as i64 - 1);
-                let mut page = self.database.display_page(&session_id, PAGE_SIZE, after)?;
-                page.messages.retain(|record| record.sequence < end);
-                let context_tokens = self.database.context_tokens(&session.id)?;
-                self.emit(ChatEvent::Loaded {
-                    session,
-                    page,
-                    context_tokens,
-                });
+                self.present_page(&session, before)?;
             }
             ChatCommand::ListModels => {
                 let result = self
@@ -585,18 +682,128 @@ impl Controller {
         }
         Ok(())
     }
+    fn present_page(&self, session: &Session, before: Option<i64>) -> Result<(), ChatRunError> {
+        let end = before.unwrap_or(session.next_sequence);
+        let after = (end > PAGE_SIZE as i64).then_some(end - PAGE_SIZE as i64 - 1);
+        let mut page = self.database.display_page(&session.id, PAGE_SIZE, after)?;
+        page.messages.retain(|record| record.sequence < end);
+        self.emit(ChatEvent::Loaded {
+            session: session.clone(),
+            page,
+            context_tokens: self.database.context_tokens(&session.id)?,
+        });
+        Ok(())
+    }
+
     fn submit(
         &mut self,
-        session: Session,
-        prompt: String,
-        retry_of: Option<String>,
+        mut session: Session,
+        mut prompt: String,
+        mut retry_of: Option<String>,
     ) -> Result<(), ChatRunError> {
+        let mut invocation = Invocation::new(&session.id);
+        *self.next_turns.lock().unwrap() = Some(NextTurnQueue::new(invocation.clone()));
+        let mut queued = false;
+        loop {
+            let admitted = Arc::new(AtomicBool::new(false));
+            let result = (|| {
+                if queued {
+                    session = self.database.session(&session.id)?;
+                    // Show the committed predecessor even while the next runner occupies the command lane.
+                    if let Err(source) = self.present_page(&session, None) {
+                        self.emit(ChatEvent::Error {
+                            admission: false,
+                            source,
+                        });
+                    }
+                }
+                self.execute_turn(
+                    &session,
+                    &invocation,
+                    &prompt,
+                    retry_of.take(),
+                    queued,
+                    admitted.clone(),
+                )
+            })();
+            let committed = match &result {
+                Ok(ChatEvent::Finished {
+                    resolution:
+                        Ok(ReconciledCompletion {
+                            state: CompletionState::Committed(saved),
+                            ..
+                        }),
+                    ..
+                }) => Some(saved),
+                _ => None,
+            };
+            let mut unsent = Vec::new();
+            let next = {
+                let mut active = self.next_turns.lock().unwrap();
+                let queue = active.as_mut().expect("worker owns the session queue");
+                let may_continue =
+                    !self.cancel.load(Ordering::Acquire) && !self.closed.load(Ordering::Acquire);
+                let next = queue.advance(committed.filter(|_| may_continue));
+                if next.is_none() {
+                    if queued && !admitted.load(Ordering::Acquire) {
+                        unsent.push(std::mem::take(&mut prompt));
+                    }
+                    unsent.extend(queue.stop().into_iter().map(|s| s.to_string()));
+                    *active = None;
+                }
+                next
+            };
+            if !unsent.is_empty() {
+                self.emit(ChatEvent::UnsentNextTurns {
+                    session_id: session.id.clone(),
+                    prompts: unsent,
+                });
+            }
+            let finished = result?;
+            if let Some(next) = &next {
+                self.emit(ChatEvent::NextTurnClaimed {
+                    id: next.id,
+                    invocation: next.invocation.clone(),
+                });
+                // Preserve the final frame before the next invocation replaces the live capture.
+                let preview = self.preview.lock().unwrap().frame.clone();
+                if !preview.segments.is_empty() || preview.warning.is_some() {
+                    let _ = self.output.try_send(ChatEvent::Preview {
+                        invocation: invocation.clone(),
+                        preview,
+                    });
+                }
+            } else {
+                self.busy.store(self.retained.is_some(), Ordering::Release);
+            }
+            self.emit(finished);
+            let Some(next) = next else {
+                return Ok(());
+            };
+            invocation = next.invocation;
+            prompt = next.message.to_string();
+            queued = true;
+        }
+    }
+
+    fn execute_turn(
+        &mut self,
+        session: &Session,
+        invocation: &Invocation,
+        prompt: &str,
+        retry_of: Option<String>,
+        queued_prompt: bool,
+        admitted: Arc<AtomicBool>,
+    ) -> Result<ChatEvent, ChatRunError> {
+        ensure!(
+            !self.cancel.load(Ordering::Acquire) && !self.closed.load(Ordering::Acquire),
+            CancelledSnafu
+        );
         let parameters = mf_runtime::resolve_workflow_inputs(
             &self.launch.contract.parameters,
             self.model_selection.effective_parameters(),
             |name| std::env::var_os(name),
         )?;
-        let invocation = Invocation::new(&session.id);
         if self.launch.contract.has_previews() {
             self.preview
                 .lock()
@@ -609,7 +816,6 @@ impl Controller {
             cancellation: cancellation.clone(),
             launch: Arc::clone(&self.launch),
             parameters,
-            session: session.clone(),
             output: self.output.clone(),
             closed: Arc::clone(&self.closed),
             cancel: Arc::clone(&self.cancel),
@@ -628,9 +834,9 @@ impl Controller {
             session_id: session.id.clone(),
             turn_id: invocation.turn_id.clone(),
             call_id: invocation.call_id.clone(),
-            prompt,
+            prompt: prompt.into(),
             model: mf_chat::ModelIdentity {
-                profile: session.profile,
+                profile: session.profile.clone(),
                 model: None,
             },
             retry_of,
@@ -672,16 +878,50 @@ impl Controller {
                 }
             }
         });
-        let resolution = mf_chat::workflow::run_conversation_with_context_windows(
+        let inbox = self
+            .launch
+            .contract
+            .supports_steering
+            .then(|| mf_chat::SteeringInbox::new(invocation.clone()));
+        *self.steering.lock().unwrap() = inbox.clone();
+        let submitted = ChatEvent::Submitted {
+            session: session.clone(),
+            invocation: invocation.clone(),
+            prompt: prompt.into(),
+        };
+        let output = self.output.clone();
+        let closed = self.closed.clone();
+        let resolution = mf_chat::workflow::run_observed_conversation(
             &self.database,
             request,
             Arc::new(backend),
             cancellation,
             true,
+            &mf_chat::CompactionConfig::default(),
             None,
-            preview_consumer,
-            self.model_selection.context_windows(),
+            mf_chat::workflow::ConversationPresentation {
+                queued_prompt,
+                on_admitted: Some(Box::new(move || {
+                    admitted.store(true, Ordering::Release);
+                    emit(&output, &closed, submitted);
+                })),
+                steering: inbox,
+                preview: preview_consumer,
+                context_windows: self.model_selection.context_windows(),
+                tools: None,
+            },
         );
+        let ended = self.steering.lock().unwrap().take();
+        if let Some(inbox) = ended {
+            inbox.close();
+            let prompts = inbox.take_unsent();
+            if !prompts.is_empty() {
+                self.emit(ChatEvent::UnsentSteering {
+                    invocation: invocation.clone(),
+                    prompts,
+                });
+            }
+        }
         // A captured result may need save-only recovery without visiting the finish node.
         if matches!(
             &resolution,
@@ -694,26 +934,21 @@ impl Controller {
             self.preview.lock().unwrap().seal();
         }
         *self.compacting.lock().unwrap() = (None, false);
-        let outcome = captured
+        let Some(outcome) = captured
             .lock()
             .expect("capture state was not poisoned")
-            .take();
-        if outcome.is_none() {
+            .take()
+        else {
             let mut resolution = resolution?;
             ensure!(
                 !self.cancel.load(Ordering::Acquire) && !self.closed.load(Ordering::Acquire),
                 CancelledSnafu
             );
             return Err(resolution.diagnostics.remove(0).into());
-        }
-        let status = outcome.as_ref().map(|outcome| outcome.status);
-        let stderr = outcome
-            .as_ref()
-            .map(|outcome| outcome.stderr.clone())
-            .unwrap_or_default();
-        let capture_error = outcome
-            .as_ref()
-            .and_then(|outcome| outcome.capture_error.clone());
+        };
+        let status = Some(outcome.status);
+        let stderr = outcome.stderr.clone();
+        let capture_error = outcome.capture_error.clone();
         self.retained = match &resolution {
             Ok(ReconciledCompletion {
                 state: CompletionState::Uncommitted(pending),
@@ -724,21 +959,17 @@ impl Controller {
             }),
             Err(_) => Some(Retained {
                 invocation: invocation.clone(),
-                response: RetainedResponse::Exited(
-                    outcome.expect("failed reconciliation retains the exit"),
-                ),
+                response: RetainedResponse::Exited(outcome),
             }),
             _ => None,
         };
-        self.busy.store(self.retained.is_some(), Ordering::Release);
-        self.emit(ChatEvent::Finished {
-            invocation,
+        Ok(ChatEvent::Finished {
+            invocation: invocation.clone(),
             resolution,
             status,
             stderr,
             capture_error,
-        });
-        Ok(())
+        })
     }
     fn recover(&mut self, abandon: bool) -> Result<(), ChatRunError> {
         let retained = self.retained.as_ref().context(MissingReplySnafu)?;
@@ -748,21 +979,23 @@ impl Controller {
                 state: CompletionState::Uncommitted(pending.clone()),
                 diagnostics: vec![],
             },
-            RetainedResponse::Exited(outcome) => {
-                reconcile_turn(&self.database, &invocation, outcome)?
-            }
+            RetainedResponse::Exited(exit) => self.database.reconcile_result(
+                &invocation,
+                exit.reply.clone().map(Ok),
+                exit.reason,
+                if exit.stderr.is_empty() {
+                    "runner exited without completion"
+                } else {
+                    &exit.stderr
+                },
+            )?,
         };
         if let CompletionState::Uncommitted(pending) = resolution.state {
             self.retained.as_mut().unwrap().response = RetainedResponse::Ready(pending.clone());
             resolution.state = if abandon {
                 self.database.abandon_recovered(&pending)?;
                 self.database
-                    .reconcile_completion(ConversationExit {
-                        invocation: &invocation,
-                        stdout: None,
-                        outcome: TurnExit::Cancelled,
-                        summary: "reply discarded",
-                    })?
+                    .reconcile_result(&invocation, None, TurnExit::Cancelled, "reply discarded")?
                     .state
             } else {
                 CompletionState::Committed(self.database.save_recovered(pending)?)
@@ -785,15 +1018,17 @@ struct ExternalBackend {
     cancellation: mf_runtime::StreamCancellation,
     launch: Arc<ChatLaunch>,
     parameters: mf_runtime::WorkflowArguments,
-    session: Session,
     output: SyncSender<ChatEvent>,
     closed: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
     preview: Arc<Mutex<Capture>>,
-    captured: Arc<Mutex<Option<LocalOutcome>>>,
+    captured: Arc<Mutex<Option<CapturedTurn>>>,
 }
 
 impl mf_chat::ConversationBackend for ExternalBackend {
+    fn supports_steering(&self) -> bool {
+        self.launch.contract.supports_steering
+    }
     fn registered_workflow(
         &self,
     ) -> Option<(
@@ -821,73 +1056,90 @@ impl mf_chat::ConversationBackend for ExternalBackend {
         request: mf_chat::ConversationInputs,
         context: &mut mf_runtime::ExecutionContext,
         preview: Option<&mut dyn FnMut(mf_chat::PreviewDelta) -> Result<(), mf_chat::ChatError>>,
-        _: Option<&mf_telemetry::observation::Observer>,
+        observer: Option<&mf_telemetry::observation::Observer>,
     ) -> Result<mf_chat::ConversationResult, mf_chat::ChatError> {
-        emit(
-            &self.output,
-            &self.closed,
-            ChatEvent::Submitted {
-                session: self.session.clone(),
-                invocation: invocation.clone(),
-                prompt: request.prompt()?.to_owned(),
-            },
-        );
-        let execution = self.execute(request, context, preview);
+        self.invoke_with_callbacks(
+            invocation,
+            request,
+            context,
+            preview,
+            observer,
+            Default::default(),
+        )
+    }
+    fn invoke_with_callbacks(
+        &self,
+        _: &Invocation,
+        _: mf_chat::ConversationInputs,
+        context: &mut mf_runtime::ExecutionContext,
+        preview: Option<&mut dyn FnMut(mf_chat::PreviewDelta) -> Result<(), mf_chat::ChatError>>,
+        _: Option<&mf_telemetry::observation::Observer>,
+        callbacks: mf_runtime::callback::HostCallbacks,
+    ) -> Result<mf_chat::ConversationResult, mf_chat::ChatError> {
+        let mut decoder = mf_chat::contract::ConversationOutputDecoder::new(&self.launch.contract);
+        let execution = self.execute(context, preview, callbacks, &mut decoder);
         let failure = match execution.as_ref().err() {
-            Some(ChatRunError::Runner {
-                source: RunnerError::Cancelled { .. },
-            }) => TurnExit::Cancelled,
-            Some(ChatRunError::Runner {
-                source:
-                    RunnerError::Run {
-                        source: RunError::Supervise { .. },
-                    },
+            Some(RunnerError::Cancelled { .. }) => TurnExit::Cancelled,
+            Some(RunnerError::Run {
+                source: RunError::Supervise { .. },
             }) => TurnExit::Interrupted,
             _ => TurnExit::Failed,
         };
-        let (outcome, protocol_failure) = execution.boxed().context(mf_chat::BackendSnafu {
+        let RunnerCompletion {
+            outcome,
+            protocol_failure,
+        } = execution.boxed().context(mf_chat::BackendSnafu {
             outcome: failure,
             reply: None,
         })?;
-        let reason = if protocol_failure.is_some()
+        let response = decoder.finish().map(|mut response| {
+            outcome.call_events.apply(&mut response.usages);
+            response
+        });
+        let invalid_records = response.is_err() && outcome.capture_failure.is_none();
+        let reason = if (protocol_failure.is_some() || invalid_records)
             && !self.cancel.load(Ordering::Acquire)
             && !self.closed.load(Ordering::Acquire)
         {
             TurnExit::Failed
+        } else if outcome.interrupted {
+            TurnExit::Cancelled
+        } else if outcome.status.code().is_none() {
+            TurnExit::Interrupted
         } else {
-            exit_reason(&outcome)
+            TurnExit::Failed
         };
-        let result = if let Some(failure) = protocol_failure {
-            Err(Box::new(failure) as Box<dyn std::error::Error + Send + Sync>)
-        } else if let Some(failure) = &outcome.capture_failure {
-            Err(Box::new(failure.clone()) as Box<dyn std::error::Error + Send + Sync>)
-        } else if !outcome.status.success() {
-            mf_chat::CaptureSnafu {
-                message: "workflow process exited unsuccessfully",
-            }
-            .fail()
-            .boxed()
-        } else {
-            mf_chat::ConversationResult::from_json(&outcome.stdout).boxed()
-        };
-        let result = result.map(|mut response| {
-            outcome.call_events.apply(&mut response.usages);
-            response
-        });
-        let reply = if result.is_err() {
-            mf_chat::ConversationResult::from_json(&outcome.stdout)
-                .ok()
-                .map(|mut response| {
-                    outcome.call_events.apply(&mut response.usages);
-                    Box::new(response)
-                })
-        } else {
-            None
-        };
+        let failure: Option<Box<dyn std::error::Error + Send + Sync>> =
+            if let Some(error) = protocol_failure {
+                Some(error.into())
+            } else if let Some(error) = outcome.capture_failure {
+                Some(error.into())
+            } else if !outcome.status.success() && !invalid_records {
+                Some(
+                    mf_chat::CaptureSnafu {
+                        message: "workflow process exited unsuccessfully",
+                    }
+                    .build()
+                    .into(),
+                )
+            } else {
+                None
+            };
+        // Once the pipes and session have drained, recovery only needs a validated reply.
         *self
             .captured
             .lock()
-            .expect("capture state was not poisoned") = Some(outcome);
+            .expect("capture state was not poisoned") = Some(CapturedTurn {
+            status: outcome.status,
+            reason,
+            stderr: outcome.stderr,
+            capture_error: outcome.capture_error,
+            reply: response.as_ref().ok().cloned(),
+        });
+        let (result, reply) = match failure {
+            Some(error) => (Err(error), response.ok().map(Box::new)),
+            None => (response.boxed(), None),
+        };
         result.context(mf_chat::BackendSnafu {
             outcome: reason,
             reply,
@@ -898,19 +1150,20 @@ impl mf_chat::ConversationBackend for ExternalBackend {
 impl ExternalBackend {
     fn execute(
         &self,
-        request: mf_chat::ConversationInputs,
         context: &mut mf_runtime::ExecutionContext,
         mut preview: Option<
             &mut dyn FnMut(mf_chat::PreviewDelta) -> Result<(), mf_chat::ChatError>,
         >,
-    ) -> Result<(LocalOutcome, Option<mf_chat::ChatError>), ChatRunError> {
-        let arguments = self.launch.contract.arguments(request, &self.parameters)?;
-        let mut decoder = mf_chat::contract::ConversationOutputDecoder::new(&self.launch.contract);
-        let completion = RunnerInvocation {
+        callbacks: mf_runtime::callback::HostCallbacks,
+        decoder: &mut mf_chat::contract::ConversationOutputDecoder,
+    ) -> Result<RunnerCompletion<mf_chat::ChatError>, RunnerError> {
+        RunnerInvocation {
             runner: &self.launch.runner,
-            arguments: &arguments,
+            arguments: context.workflow_arguments(),
             verbose: self.launch.options.run.verbose,
             snapshots: true,
+            host_io: true,
+            callbacks,
         }
         .run_batches(
             context.cancellation(),
@@ -968,67 +1221,8 @@ impl ExternalBackend {
                 }
                 cancelled
             },
-        )?;
-        let mut outcome = completion.outcome;
-        let mut protocol_failure = completion.protocol_failure;
-        if self.launch.contract.streaming {
-            outcome.stdout = decoder
-                .result()
-                .map(serde_json::to_vec)
-                .transpose()?
-                .unwrap_or_default();
-            if protocol_failure.is_none()
-                && outcome.capture_error.is_none()
-                && let Err(error) = decoder.finish()
-            {
-                protocol_failure = Some(error);
-            }
-        }
-        Ok((outcome, protocol_failure))
+        )
     }
-}
-
-fn exit_reason(outcome: &LocalOutcome) -> TurnExit {
-    if outcome.interrupted {
-        TurnExit::Cancelled
-    } else if outcome.status.code().is_none() {
-        TurnExit::Interrupted
-    } else {
-        TurnExit::Failed
-    }
-}
-
-fn reconcile_turn(
-    database: &ChatDatabase,
-    invocation: &Invocation,
-    outcome: &LocalOutcome,
-) -> Result<ReconciledCompletion, mf_chat::ChatError> {
-    let reason = exit_reason(outcome);
-    let stdout = outcome
-        .capture_error
-        .is_none()
-        .then_some(outcome.stdout.as_slice())
-        .or_else(|| {
-            mf_chat::ConversationResult::from_json(&outcome.stdout)
-                .is_ok()
-                .then_some(outcome.stdout.as_slice())
-        });
-    let result = stdout.map(|bytes| {
-        mf_chat::ConversationResult::from_json(bytes).map(|mut response| {
-            outcome.call_events.apply(&mut response.usages);
-            response
-        })
-    });
-    database.reconcile_result(
-        invocation,
-        result,
-        reason,
-        if outcome.stderr.is_empty() {
-            "runner exited without completion"
-        } else {
-            &outcome.stderr
-        },
-    )
 }
 
 #[cfg(test)]

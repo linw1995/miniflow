@@ -30,9 +30,36 @@ pub struct Tool {
     pub arguments: Text,
 }
 
+/// Where a user message entered the authoritative display exchange.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UserPlacement {
+    Prompt,
+    Steering,
+    Queued,
+}
+
+impl UserPlacement {
+    pub fn admitted(queued: bool) -> Self {
+        if queued { Self::Queued } else { Self::Prompt }
+    }
+
+    fn observe(&mut self, message: &Message) {
+        match message {
+            Message::ToolResult { .. } => *self = Self::Steering,
+            Message::Assistant { .. } => *self = Self::Queued,
+            Message::System(_) => *self = Self::Prompt,
+            // All consecutive users belong to the same reply boundary.
+            Message::User { .. } => {}
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum Message {
-    User(Text),
+    User {
+        content: Text,
+        placement: UserPlacement,
+    },
     System(Text),
     Assistant {
         content: Text,
@@ -48,7 +75,7 @@ pub enum Message {
 impl Message {
     pub fn content(&self) -> &Text {
         match self {
-            Self::User(text)
+            Self::User { content: text, .. }
             | Self::System(text)
             | Self::Assistant { content: text, .. }
             | Self::ToolResult { content: text, .. } => text,
@@ -104,6 +131,7 @@ struct Header {
     bytes: i64,
     tool_id: Option<String>,
     calls: String,
+    queued_admission: Option<bool>,
 }
 
 enum Window<'a> {
@@ -116,14 +144,18 @@ impl Header {
         conn: &mut SqliteConnection,
         session: &str,
         window: Window<'_>,
-    ) -> Result<Vec<Self>, ChatError> {
+        reader: &Reader,
+    ) -> Result<Vec<Record>, ChatError> {
         let query = messages::table.inner_join(turns::table)
             .filter(messages::session_id.eq(session))
             .select((messages::id, messages::turn_id, messages::sequence, turns::state,
                 sql::<sql_types::Text>("payload ->> '$.role'"),
                 sql::<sql_types::BigInt>("length(CAST(payload ->> '$.content' AS BLOB))"),
                 sql::<sql_types::Nullable<sql_types::Text>>("payload ->> '$.tool_call_id'"),
-                sql::<sql_types::Text>("(SELECT json_group_array(json_object('id', value ->> '$.id', 'name', value ->> '$.name') ORDER BY key) FROM json_each(messages.payload, '$.tool_calls') WHERE type = 'object')")))
+                sql::<sql_types::Text>("(SELECT json_group_array(json_object('id', value ->> '$.id', 'name', value ->> '$.name') ORDER BY key) FROM json_each(messages.payload, '$.tool_calls') WHERE type = 'object')"),
+                sql::<sql_types::Nullable<sql_types::Bool>>("CASE WHEN messages.sequence = turns.sequence THEN EXISTS (
+                    SELECT 1 FROM model_calls WHERE turn_id = turns.id AND purpose = 'conversation' AND metadata ->> '$.queued_prompt' = 1
+                ) END")))
             .order(messages::sequence.asc()).into_boxed();
         let query = match window {
             Window::Page { limit, after } => query
@@ -134,12 +166,46 @@ impl Header {
                 .filter(messages::turn_id.eq(turn))
                 .filter(messages::sequence.gt(turns::sequence)),
         };
-        query.load(conn).context(DatabaseSnafu {
+        let headers = query.load::<Self>(conn).context(DatabaseSnafu {
             operation: "read chat display index",
-        })
+        })?;
+        let mut placement = UserPlacement::Prompt;
+        if let Some(first) = headers.first()
+            && first.role == "user"
+            && first.queued_admission.is_none()
+        {
+            // A keyset page can start in the middle of a batch of identical user messages.
+            let role = sql::<sql_types::Text>("payload ->> '$.role'");
+            let after_tool = messages::table
+                .filter(messages::turn_id.eq(&first.turn_id))
+                .filter(messages::sequence.lt(first.sequence))
+                .filter(role.clone().ne("user"))
+                .order(messages::sequence.desc())
+                .select(role.eq("tool"))
+                .first::<bool>(conn)
+                .context(DatabaseSnafu {
+                    operation: "read preceding reply boundary",
+                })?;
+            placement = if after_tool {
+                UserPlacement::Steering
+            } else {
+                UserPlacement::Queued
+            };
+        }
+        headers
+            .into_iter()
+            .map(|header| {
+                if let Some(queued) = header.queued_admission {
+                    placement = UserPlacement::admitted(queued);
+                }
+                let record = header.into_record(reader, placement)?;
+                placement.observe(&record.message);
+                Ok(record)
+            })
+            .collect()
     }
 
-    fn into_record(self, reader: &Reader) -> Result<Record, ChatError> {
+    fn into_record(self, reader: &Reader, placement: UserPlacement) -> Result<Record, ChatError> {
         let id: Arc<str> = self.id.into();
         let bytes = usize::try_from(self.bytes).context(IntegerSnafu {
             operation: "size saved message",
@@ -150,7 +216,7 @@ impl Header {
             reader.message_text(&id, None)
         };
         let message = match self.role.as_str() {
-            "user" => Message::User(content),
+            "user" => Message::User { content, placement },
             "system" => Message::System(content),
             "assistant" => {
                 #[derive(serde::Deserialize)]
@@ -210,27 +276,23 @@ impl ChatDatabase {
         let reader = Reader::open(self.path())?;
         reader.0.lock().unwrap().transaction(|conn| {
             session::load(conn, id)?;
-            let headers = Header::load(
+            let mut messages = Header::load(
                 conn,
                 id,
                 Window::Page {
                     limit,
                     after: after_sequence.unwrap_or(-1),
                 },
+                &reader,
             )?;
             let mut usages = session::page_usages(
                 conn,
                 id,
-                headers.iter().map(|h| h.turn_id.as_str()).collect(),
+                messages.iter().map(|r| r.turn_id.as_str()).collect(),
             )?;
-            let mut messages = headers
-                .into_iter()
-                .map(|h| {
-                    let mut record = h.into_record(&reader)?;
-                    record.usages = usages.remove(&record.turn_id);
-                    Ok(record)
-                })
-                .collect::<Result<Vec<_>, ChatError>>()?;
+            for record in &mut messages {
+                record.usages = usages.remove(&record.turn_id);
+            }
             for records in messages.chunk_by_mut(|a, b| a.turn_id == b.turn_id) {
                 let tail = records.last_mut().expect("nonempty turn group");
                 if matches!(
@@ -252,24 +314,22 @@ impl ChatDatabase {
         expected_messages: usize,
     ) -> Result<Vec<Message>, ChatError> {
         let reader = Reader::open(self.path())?;
-        let headers = Header::load(
+        let records = Header::load(
             &mut reader.0.lock().unwrap(),
             &invocation.session_id,
             Window::Reply {
                 turn: &invocation.turn_id,
             },
+            &reader,
         )?;
         ensure!(
-            headers.len() == expected_messages,
+            records.len() == expected_messages,
             InvalidSnafu {
                 field: "committed reply",
                 reason: "display index disagrees with settlement"
             }
         );
-        headers
-            .into_iter()
-            .map(|h| Ok(h.into_record(&reader)?.message))
-            .collect()
+        Ok(records.into_iter().map(|r| r.message).collect())
     }
 }
 
@@ -295,39 +355,47 @@ fn stage_with(
         }
         Text::inline(value)
     };
+    let mut placement = UserPlacement::Prompt;
     let messages = messages
         .into_iter()
-        .map(|message| match message {
-            ChatMessage::User { content, .. } => Message::User(text(content)),
-            ChatMessage::System { content, .. } => Message::System(text(content)),
-            ChatMessage::ToolResult {
-                tool_call_id: id,
-                content,
-                ..
-            } => Message::ToolResult {
-                id,
-                bytes: content.len(),
-                content: text(content),
-            },
-            ChatMessage::Assistant {
-                content,
-                tool_calls,
-                ..
-            } => Message::Assistant {
-                content: text(content),
-                tools: tool_calls
-                    .into_iter()
-                    .flatten()
-                    .map(|call| Tool {
-                        id: call.id,
-                        name: call.name,
-                        arguments: text(
-                            serde_json::to_string_pretty(&call.arguments)
-                                .unwrap_or_else(|e| format!("[Arguments unavailable: {e}]")),
-                        ),
-                    })
-                    .collect(),
-            },
+        .map(|message| {
+            let message = match message {
+                ChatMessage::User { content, .. } => Message::User {
+                    content: text(content),
+                    placement,
+                },
+                ChatMessage::System { content, .. } => Message::System(text(content)),
+                ChatMessage::ToolResult {
+                    tool_call_id: id,
+                    content,
+                    ..
+                } => Message::ToolResult {
+                    id,
+                    bytes: content.len(),
+                    content: text(content),
+                },
+                ChatMessage::Assistant {
+                    content,
+                    tool_calls,
+                    ..
+                } => Message::Assistant {
+                    content: text(content),
+                    tools: tool_calls
+                        .into_iter()
+                        .flatten()
+                        .map(|call| Tool {
+                            id: call.id,
+                            name: call.name,
+                            arguments: text(
+                                serde_json::to_string_pretty(&call.arguments)
+                                    .unwrap_or_else(|e| format!("[Arguments unavailable: {e}]")),
+                            ),
+                        })
+                        .collect(),
+                },
+            };
+            placement.observe(&message);
+            message
         })
         .collect();
     (messages, store.err())
