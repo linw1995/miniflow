@@ -716,6 +716,9 @@ Node titles and status markers retain their execution-state colors. Annotations 
 words wider than the available line are split at grapheme boundaries. Explicit newlines and initial indentation are preserved.
 Expanded cluster labels stay at the top of their visible region while panning, clipping to the available width.
 The graph hides a cluster's annotation while its label is displaced from its original position.
+Connection routing treats expanded cluster boundaries as barriers: routes leave and enter through member ports and may
+cross a frame perpendicularly, but never run along or turn on it. Pass-through crossings keep the frame line with a
+`┼` junction, so annotations and titles remain legible without hiding the connection.
 Aligned ports use a straight connection when collision checks allow it, including connections spanning multiple columns.
 Press `c` to collapse or
 expand the selected node's cluster; collapsed clusters render as one aggregate node, remap external
