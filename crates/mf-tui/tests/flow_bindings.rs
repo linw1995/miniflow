@@ -199,6 +199,104 @@ fn summary_projects_only_outermost_router_bindings_and_keeps_their_paths() {
 }
 
 #[test]
+fn router_half_fold_projects_each_static_route_as_one_aggregate_node() {
+    let route = ScopePathEntry::binding_key;
+    let first = vec![route("execute", "first")];
+    let second = vec![route("execute", "second")];
+    let nested = [first.clone(), vec![route("inner", "leaf")]].concat();
+    let body = |path: &[String], nodes: &[(&str, &str)]| {
+        json!({
+            "path":path,
+            "nodes":nodes.iter().map(|(id, kind)| json!({"id":id,"kind":kind})).collect::<Vec<_>>(),
+            "execution_order":nodes.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            "data_edges":[],"control_edges":[]
+        })
+    };
+    let description: WorkflowDescription = serde_json::from_value(json!({
+        "version":"2026-11-09", "workflow_id":format!("sha256:{}", "f".repeat(64)),
+        "execution":{"mode":"single"},
+        "nodes":[{"id":"execute","kind":"builtin.router"}],
+        "execution_order":["execute"],"data_edges":[],"control_edges":[],
+        "loop_bodies":[
+            body(&nested, &[("nested_leaf", "fixture.task")]),
+            body(&first, &[("inner", "builtin.router"), ("outer_leaf", "fixture.task")]),
+            body(&second, &[("other_leaf", "fixture.task")]),
+        ]
+    }))
+    .unwrap();
+    let states: BTreeMap<_, _> = description
+        .loop_bodies
+        .iter()
+        .map(|body| (body.path.clone(), BodyDisplay::Summary))
+        .collect();
+    let layout = GraphLayout::with_body_states(
+        &description,
+        ConnectionView::Execution,
+        &states,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let execute = layout.display_index_for_node_id("execute").unwrap();
+    assert_eq!(layout.body_display(execute), Some(BodyDisplay::Summary));
+    assert!(layout.can_summarize_body(execute));
+    assert_eq!(layout.nodes().len(), 3);
+    let placeholders: Vec<_> = (0..layout.nodes().len())
+        .filter(|display| layout.is_route_summary(*display))
+        .map(|display| layout.nodes()[display].id.as_str())
+        .collect();
+    assert_eq!(placeholders, ["first", "second"]);
+    // The placeholder aggregates the whole branch, including its nested Router route.
+    let first_display = layout
+        .display_index_for_scoped_node(&first, "outer_leaf")
+        .unwrap();
+    assert!(layout.is_route_summary(first_display));
+    assert_eq!(layout.sources(first_display).len(), 3);
+    assert!(
+        layout
+            .display_index_for_scoped_node(&nested, "nested_leaf")
+            .is_some_and(|display| display == first_display)
+    );
+    let (width, height) = layout.size();
+    let area = Rect::new(0, 0, width as u16, height as u16);
+    let mut buffer = Buffer::empty(area);
+    GraphView::new(&layout).render(area, &mut buffer);
+    let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+    assert!(text.contains("execute [~]"), "{text}");
+    for label in ["first", "second"] {
+        assert_eq!(text.matches(label).count(), 1, "{label}: {text}");
+    }
+    assert!(!text.contains("nested_leaf"));
+
+    // Expanding the route keeps the nested Router half-folded.
+    let mut expanded = states.clone();
+    expanded.insert(first.clone(), BodyDisplay::Expanded);
+    let layout = GraphLayout::with_body_states(
+        &description,
+        ConnectionView::Execution,
+        &expanded,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert!(layout.is_expanded_body(layout.display_index_for_node_id("execute").unwrap()));
+    assert!(
+        layout
+            .display_index_for_scoped_node(&first, "outer_leaf")
+            .is_some()
+    );
+    let leaf = layout
+        .display_index_for_scoped_node(&nested, "nested_leaf")
+        .unwrap();
+    assert!(layout.is_route_summary(leaf));
+    assert_eq!(layout.nodes()[leaf].id, "leaf");
+    assert_eq!(
+        layout
+            .display_index_for_scoped_node(&second, "other_leaf")
+            .map(|display| layout.is_route_summary(display)),
+        Some(true)
+    );
+}
+
+#[test]
 fn expanded_binding_body_propagates_the_shared_node_budget_error() {
     let path = vec![ScopePathEntry::binding_key("invoke", "provided")];
     // Each scope fits individually, but the owner plus its body exceeds the display budget.

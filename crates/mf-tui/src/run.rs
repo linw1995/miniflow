@@ -2166,7 +2166,8 @@ fn draw<B: Backend>(
             view_state.details_height = usize::from(details.height.saturating_sub(2));
             let selected = view_state.selected;
             let collapsed_cluster = layout.is_collapsed_cluster(selected);
-            let selected_node = (!collapsed_cluster)
+            let route_summary = layout.is_route_summary(selected);
+            let selected_node = (!collapsed_cluster && !route_summary)
                 .then(|| {
                     layout
                         .sources(selected)
@@ -2187,15 +2188,23 @@ fn draw<B: Backend>(
                     )
                 }
             });
+            let route = route_summary.then(|| {
+                route_summary_details(
+                    &layout.nodes()[selected].id,
+                    layout.sources(selected),
+                    observations,
+                )
+            });
             let mut bindings = binding_details(description, &view_state.path, selected_node);
             bindings.push_str(&flow_invocation_details(description, snapshot, &view_state.path, selected_node, pass, iteration));
             if let Some(node) = selected_node.filter(|node| node.kind == "builtin.llm") {
                 bindings.push_str(&crate::performance::details(&crate::performance::node_calls(receiver, node)));
             }
             let details_body = format!(
-                "{}\n{}\n{}\n{}",
+                "{}\n{}\n{}\n{}\n{}",
                 view_state.graph_notice.as_deref().unwrap_or_default(),
                 cluster.unwrap_or_default(),
+                route.unwrap_or_default(),
                 details_text(selected_node, pass, snapshot, capture, &bindings),
                 layout.routing_details(selected)
             );
@@ -2529,11 +2538,28 @@ fn collapsed_cluster_details(
     members: &[usize],
     observations: &[NodeObservation],
 ) -> String {
-    let mut text = format!(
-        "Cluster: {}\n{}\nMembers:\n",
+    format!(
+        "Cluster: {}\n{}\nMembers:\n{}",
         display_text(&cluster.label),
-        display_text(&cluster.annotation)
-    );
+        display_text(&cluster.annotation),
+        member_status_lines(members, observations)
+    )
+}
+
+fn route_summary_details(
+    label: &str,
+    members: &[usize],
+    observations: &[NodeObservation],
+) -> String {
+    format!(
+        "Route: {}\nMembers:\n{}",
+        display_text(label),
+        member_status_lines(members, observations)
+    )
+}
+
+fn member_status_lines(members: &[usize], observations: &[NodeObservation]) -> String {
+    let mut text = String::new();
     for member in members {
         let (id, status) = observations.get(*member).map_or_else(
             || ("?", crate::state::NodeStatus::Pending),
@@ -3264,9 +3290,14 @@ impl ObservationView {
         if self.root.is_collapsed_cluster(self.state.selected) {
             return None;
         }
+        let path = self.root.node_path(self.state.selected);
+        // A route placeholder stands for its whole static branch.
+        if self.root.is_route_summary(self.state.selected) {
+            return (!path.is_empty()).then(|| path.to_vec());
+        }
         let node = self.root.nodes().get(self.state.selected)?;
         self.description
-            .body_paths_for_node(self.root.node_path(self.state.selected), &node.id)
+            .body_paths_for_node(path, &node.id)
             .first()
             .map(|path| (*path).clone())
     }
@@ -7962,36 +7993,50 @@ assert not reply.readline()
         .unwrap();
         let mut view = ObservationView::new(&description).unwrap();
         let execute = view.root.display_index_for_node_id("execute").unwrap();
-        assert_eq!(view.root.body_display(execute), Some(BodyDisplay::Hidden));
+        assert_eq!(view.root.body_display(execute), Some(BodyDisplay::Summary));
+        assert!(view.root.can_summarize_body(execute));
         assert_eq!(
             view.execution
                 .body_display(view.execution.display_index_for_node_id("execute").unwrap()),
-            Some(BodyDisplay::Hidden)
+            Some(BodyDisplay::Summary)
         );
+        let routes: Vec<_> = view
+            .root
+            .nodes()
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| view.root.is_route_summary(*index))
+            .map(|(_, node)| node.id.as_str())
+            .collect();
+        assert_eq!(routes, ["first", "second"]);
+        // A half-folded route keeps its definition path and aggregates its members.
+        let first = view
+            .root
+            .display_index_for_scoped_node(&selected, "calculate")
+            .unwrap();
+        let second = view
+            .root
+            .display_index_for_scoped_node(&unused, "search")
+            .unwrap();
+        assert!(view.root.is_route_summary(first));
+        assert!(view.root.is_route_summary(second));
+        assert_eq!(view.root.node_path(first), selected.as_slice());
+        assert_eq!(view.root.node_path(second), unused.as_slice());
         assert!(
             view.pip_layout
                 .display_index_for_scoped_node(&selected, "calculate")
                 .is_some()
         );
-        view.expand_all_bodies();
-        let selected_display = view
-            .root
-            .display_index_for_scoped_node(&selected, "calculate")
-            .unwrap();
-        let unused_display = view
-            .root
-            .display_index_for_scoped_node(&unused, "search")
-            .unwrap();
         let mut snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
             .unwrap()
             .snapshot();
         let observed = inline_observations(&view.root, &description, &snapshot, &BTreeMap::new());
         assert_eq!(
-            observed[view.root.sources(selected_display)[0]].status,
+            observed[view.root.sources(first)[0]].status,
             NodeStatus::Pending
         );
         assert_eq!(
-            observed[view.root.sources(unused_display)[0]].status,
+            observed[view.root.sources(second)[0]].status,
             NodeStatus::Pending
         );
         snapshot.nodes[0].status = NodeStatus::Running;
@@ -8008,6 +8053,24 @@ assert not reply.readline()
             stream_invocation: None,
             compact_statuses: Vec::new(),
         });
+        let observed = inline_observations(&view.root, &description, &snapshot, &BTreeMap::new());
+        assert_eq!(
+            observed[view.root.sources(first)[0]].status,
+            NodeStatus::Running
+        );
+        assert_eq!(
+            observed[view.root.sources(second)[0]].status,
+            NodeStatus::Pending
+        );
+        view.expand_all_bodies();
+        let selected_display = view
+            .root
+            .display_index_for_scoped_node(&selected, "calculate")
+            .unwrap();
+        let unused_display = view
+            .root
+            .display_index_for_scoped_node(&unused, "search")
+            .unwrap();
         let observed = inline_observations(&view.root, &description, &snapshot, &BTreeMap::new());
         assert_eq!(
             observed[view.root.sources(selected_display)[0]].status,
@@ -8027,6 +8090,62 @@ assert not reply.readline()
         let chat = render_chat_execution(&view, &snapshot);
         assert_eq!(chat.matches(" Running: ").count(), 1, "{chat}");
         assert!(!chat.contains(" Running: execute "), "{chat}");
+    }
+
+    #[test]
+    fn router_body_cycles_through_half_fold_and_route_placeholders() {
+        use mf_telemetry::event::ScopePathEntry;
+        use serde_json::json;
+
+        let first = vec![ScopePathEntry::binding_key("execute", "first")];
+        let second = vec![ScopePathEntry::binding_key("execute", "second")];
+        let description: WorkflowDescription = serde_json::from_value(json!({
+            "version":"2026-11-09",
+            "workflow_id":format!("sha256:{}", "e".repeat(64)),
+            "execution":{"mode":"single"},
+            "nodes":[{"id":"execute", "kind":"builtin.router"}],
+            "execution_order":["execute"], "data_edges":[], "control_edges":[],
+            "loop_bodies":[
+                {"path":first, "nodes":[{"id":"calculate", "kind":"builtin.code"}],
+                 "execution_order":["calculate"], "data_edges":[], "control_edges":[]},
+                {"path":second, "nodes":[{"id":"search", "kind":"builtin.code"}],
+                 "execution_order":["search"], "data_edges":[], "control_edges":[]}
+            ]
+        }))
+        .unwrap();
+        let snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
+            .unwrap()
+            .snapshot();
+        let mut view = ObservationView::new(&description).unwrap();
+        let execute = view.root.display_index_for_node_id("execute").unwrap();
+        view.state.selected = execute;
+        let traces = TraceSnapshot::default();
+        let logs = LogSnapshot::default();
+        for expected in [
+            BodyDisplay::Hidden,
+            BodyDisplay::Expanded,
+            BodyDisplay::Summary,
+        ] {
+            view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
+            assert_eq!(view.root.body_display(view.state.selected), Some(expected));
+            assert_eq!(view.root.nodes()[view.state.selected].id, "execute");
+        }
+        // A route placeholder acts on the Router's entire branch set.
+        view.state.selected = view
+            .root
+            .display_index_for_scoped_node(&first, "calculate")
+            .unwrap();
+        view.handle_navigation(KeyCode::Char('l'), &snapshot, &traces, &logs);
+        assert_eq!(
+            view.root.body_display(view.state.selected),
+            Some(BodyDisplay::Expanded)
+        );
+        assert_eq!(view.root.nodes()[view.state.selected].id, "execute");
+        view.handle_navigation(KeyCode::Char('h'), &snapshot, &traces, &logs);
+        assert_eq!(
+            view.root.body_display(view.state.selected),
+            Some(BodyDisplay::Hidden)
+        );
     }
 
     fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {

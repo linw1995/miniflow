@@ -36,6 +36,8 @@ const COMPONENT_GAP: u32 = 4;
 const MARGIN: u32 = 2;
 const LAYOUT_STACK_BYTES: usize = 64 * 1024 * 1024;
 const CLUSTER_KIND: &str = "node cluster";
+const ROUTER_KIND: &str = "builtin.router";
+const ROUTE_KIND: &str = "router route";
 const FLOW_FRAME_NS: u64 = 100_000_000;
 const ACTIVITY_DENSITIES: [&str; 4] = ["▓", "▒", "░", "·"];
 const TRANSFER_PULSE_NS: u64 = 600_000_000;
@@ -186,7 +188,7 @@ impl<'a> InlineBodies<'a> {
             .flat_map(|(path, nodes)| {
                 nodes
                     .iter()
-                    .filter(|node| node.kind == "builtin.router")
+                    .filter(|node| node.kind == ROUTER_KIND)
                     .map(move |node| (path, node.id.as_str()))
             })
             .collect();
@@ -1159,8 +1161,10 @@ impl GraphLayout {
             if paths.is_empty() {
                 continue;
             }
+            let router = node.kind == ROUTER_KIND;
             let mut display = BodyDisplay::Hidden;
-            let mut summarizable = false;
+            // A Router always has a half-folded projection of its static routes.
+            let mut summarizable = router;
             let mut attach = |child, mode| {
                 if let Some(existing) = children.get_mut(&node.id) {
                     existing.stack_below(child);
@@ -1178,6 +1182,11 @@ impl GraphLayout {
                     BodyDisplay::Expanded => attach(
                         Self::inline_scope(description, child_path, view, bodies, remaining)?,
                         BodyDisplay::Expanded,
+                    ),
+                    // Half-fold a Router into one compact node per static route.
+                    BodyDisplay::Summary if router => attach(
+                        Self::route_summary(description, child_path, view, remaining)?,
+                        BodyDisplay::Summary,
                     ),
                     BodyDisplay::Summary => {
                         let mut outer_route: Option<&[String]> = None;
@@ -1231,6 +1240,83 @@ impl GraphLayout {
             layout.append_body(owner, child);
         }
         Ok(layout)
+    }
+
+    /// Projects a Router route body as one compact node that aggregates its members.
+    ///
+    /// The half-folded Router keeps route names and observed state visible without
+    /// laying out the branch, so wide dispatch tables stay readable.
+    fn route_summary(
+        description: &WorkflowDescription,
+        path: &[String],
+        view: ConnectionView,
+        remaining: &mut usize,
+    ) -> Result<Self, GraphError> {
+        let body = description.body(path).context(MissingLoopBodySnafu)?;
+        let label = path
+            .last()
+            .and_then(|key| ScopePathEntry::split_binding_key(key))
+            .map_or_else(
+                || path.last().cloned().unwrap_or_default(),
+                |(_, name)| name,
+            );
+        let mut all_nodes = Vec::new();
+        let mut source_paths = Vec::new();
+        for scope in std::iter::once(body).chain(
+            description
+                .loop_bodies
+                .iter()
+                .filter(|nested| nested.path.len() > path.len() && nested.path.starts_with(path)),
+        ) {
+            ensure!(
+                scope.nodes.len() <= *remaining,
+                TooManyNodesSnafu {
+                    limit: MAX_SESSION_NODES
+                }
+            );
+            *remaining -= scope.nodes.len();
+            for node in &scope.nodes {
+                all_nodes.push(node.clone());
+                source_paths.push(scope.path.clone());
+            }
+        }
+        let width = NODE_WIDTH.max(ratatui::text::Span::raw(&label).width() as u32 + 4);
+        Ok(Self {
+            streaming: description.is_streaming(),
+            view,
+            hidden_data_count: 0,
+            hidden_transitive_count: 0,
+            hidden_cluster_edge_count: 0,
+            nodes: vec![GraphNode {
+                id: label,
+                kind: ROUTE_KIND.into(),
+                // Route placeholders stack tightly; `append_body` supplies the frame padding.
+                rect: GraphRect {
+                    x: 1,
+                    y: 0,
+                    width,
+                    height: NODE_HEIGHT,
+                },
+            }],
+            sources: vec![(0..all_nodes.len()).collect()],
+            display_of_node: vec![0; all_nodes.len()],
+            node_clusters: vec![None],
+            node_annotations: vec![Vec::new()],
+            all_nodes,
+            source_paths,
+            cluster_keys: Vec::new(),
+            body_displays: BTreeMap::new(),
+            summarizable_nodes: BTreeSet::new(),
+            summary_labels: Vec::new(),
+            clusters: Vec::new(),
+            edges: Vec::new(),
+            transfer_members: Vec::new(),
+            routes: Vec::new(),
+            crossings: Vec::new(),
+            routing_stats: routing::RoutingStats::default(),
+            width: width + 2,
+            height: NODE_HEIGHT,
+        })
     }
 
     fn append_body(&mut self, owner: usize, child: Self) {
@@ -1441,6 +1527,18 @@ impl GraphLayout {
         self.nodes
             .get(display)
             .is_some_and(|node| node.kind == CLUSTER_KIND)
+    }
+
+    /// A compact Router route that aggregates every member of one static branch.
+    pub fn is_route_summary(&self, display: usize) -> bool {
+        self.nodes
+            .get(display)
+            .is_some_and(|node| node.kind == ROUTE_KIND)
+    }
+
+    /// Aggregate displays merge member state instead of tracking a single node.
+    pub fn is_aggregate(&self, display: usize) -> bool {
+        self.is_collapsed_cluster(display) || self.is_route_summary(display)
     }
 
     pub fn sources(&self, display: usize) -> &[usize] {
@@ -2455,6 +2553,7 @@ impl<'a> GraphView<'a> {
         }
         let annotation = &self.layout.node_annotations[index];
         let collapsed = self.layout.is_collapsed_cluster(index);
+        let aggregate = self.layout.is_aggregate(index);
         let annotation_y = if collapsed { rect.y + 3 } else { rect.y };
         if !collapsed && !annotation.is_empty() {
             let header = annotation.len() as u32 + 1;
@@ -2466,9 +2565,9 @@ impl<'a> GraphView<'a> {
             .sources(index)
             .first()
             .copied()
-            .filter(|_| !self.layout.is_collapsed_cluster(index))
+            .filter(|_| !aggregate)
             .and_then(|source| self.observation(source));
-        let status = if self.layout.is_collapsed_cluster(index) {
+        let status = if aggregate {
             self.display_status(index)
         } else {
             observed.map_or(NodeStatus::Pending, |item| item.status)
@@ -2526,8 +2625,10 @@ impl<'a> GraphView<'a> {
             None => "",
         };
         let title = format!("{marker} {}{fold}", display_line(&node.id));
-        let detail = if self.layout.is_collapsed_cluster(index) {
+        let detail = if collapsed {
             format!("{} nodes | collapsed", self.layout.sources(index).len())
+        } else if self.layout.is_route_summary(index) {
+            format!("{} nodes | route", self.layout.sources(index).len())
         } else {
             display_line(&node_detail(node, observed, self.elapsed_ns))
         };
