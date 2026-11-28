@@ -1,13 +1,9 @@
 use crate::error::*;
-use mf_runtime::{
-    ConfigTemplate, ExecutionContext, NodeBuildError, NodeMetadata, PreparedNode, TypedTaskNode,
-    ValueRef, deserialize_config,
-};
+use mf_runtime::{ConfigTemplate, ExecutionContext, NodeMetadata, ValueRef};
 use rustix::{
     fd::OwnedFd,
     fs::{self, AtFlags, FileType, Mode, OFlags, Stat},
 };
-use serde::Deserialize;
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt, ensure};
 use std::{
@@ -20,7 +16,6 @@ const DIR_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::CLOEXEC);
 pub const STAGING_PREFIX: &str = ".mfn-coding-";
-pub const DEFAULT_FILE_BYTES: usize = 1024 * 1024;
 
 pub struct WorkspaceRoot(ConfigTemplate);
 
@@ -46,23 +41,7 @@ impl WorkspaceRoot {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RootConfig {
-    workspace_root: Value,
-}
-
-pub fn prepare_root_node<N: TypedTaskNode + 'static>(
-    value: Value,
-    node: impl FnOnce(WorkspaceRoot) -> N,
-) -> Result<PreparedNode, NodeBuildError> {
-    let config: RootConfig = deserialize_config(value)?;
-    let root = WorkspaceRoot::prepare(config.workspace_root)?;
-    let metadata = root.metadata();
-    PreparedNode::typed_task(node(root), metadata)
-}
-
-pub fn valid_component(part: &str) -> bool {
+fn valid_component(part: &str) -> bool {
     !matches!(part, "" | "." | "..")
         && !part.eq_ignore_ascii_case(".git")
         && !part
@@ -104,30 +83,14 @@ pub fn stat_entry(parent: &OwnedFd, name: &str) -> Result<Stat, CodingError> {
     })
 }
 
-pub fn is_regular(stat: &Stat) -> bool {
-    FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile && stat.st_nlink == 1
-}
-
 pub fn read_file(
     parent: &OwnedFd,
     name: &str,
     limit: usize,
 ) -> Result<(String, Stat), CodingError> {
-    let (bytes, stat) = read_bytes(parent, name, limit)?;
-    let content = String::from_utf8(bytes)
-        .map_err(|error| error.utf8_error())
-        .context(FileEncodingSnafu)?;
-    Ok((content, stat))
-}
-
-pub fn read_bytes(
-    parent: &OwnedFd,
-    name: &str,
-    limit: usize,
-) -> Result<(Vec<u8>, Stat), CodingError> {
     fn check_regular(stat: &Stat) -> Result<(), CodingError> {
         ensure!(
-            is_regular(stat),
+            FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile && stat.st_nlink == 1,
             InvalidInputSnafu {
                 field: "path",
                 requirement: "a regular file with exactly one hard link"
@@ -158,7 +121,10 @@ pub fn read_bytes(
             operation: "read workspace file",
         })?;
     ensure!(bytes.len() <= limit, FileTooLargeSnafu { limit });
-    Ok((bytes, stat))
+    let content = String::from_utf8(bytes)
+        .map_err(|error| error.utf8_error())
+        .context(FileEncodingSnafu)?;
+    Ok((content, stat))
 }
 
 fn root_path(value: &ValueRef) -> Result<&str, CodingError> {

@@ -3,10 +3,7 @@
 use mf_runtime::{
     ExecutionContext, NodeExecutionError, NodeRegistry, NodeResult, NodeValues, PreparedNode,
 };
-use mfn_coding::{
-    BASH_KIND, CodingError, EDIT_KIND, FIND_KIND, GREP_KIND, LS_KIND, MKDIR_KIND, READ_KIND,
-    WRITE_KIND,
-};
+use mfn_coding::{BASH_KIND, CodingError, EDIT_KIND, READ_KIND, WRITE_KIND};
 use rustix::{
     fs::{FlockOperation, flock},
     io::Errno,
@@ -14,6 +11,7 @@ use rustix::{
 };
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeSet,
     fs,
     os::unix::fs::{PermissionsExt, symlink},
     thread,
@@ -62,191 +60,20 @@ fn business(
 #[test]
 fn registers_coding_tools_by_their_public_flow_kinds() {
     let registry = NodeRegistry::from_inventory().unwrap();
-    for kind in [
-        "builtin.coding.mkdir",
-        "builtin.coding.ls",
-        "builtin.coding.find",
-        "builtin.coding.grep",
-        "builtin.coding.read",
-        "builtin.coding.edit",
-        "builtin.coding.write",
-        "builtin.coding.bash",
-    ] {
-        assert!(registry.get(kind).is_some(), "missing node kind {kind}");
-    }
-    assert!(registry.get("builtin.coding.run").is_none());
-}
-
-#[test]
-fn ls_lists_one_level_including_dotfiles_without_following_or_exposing_aliases() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    fs::create_dir_all(root.join("src/sub")).unwrap();
-    fs::write(root.join(".gitignore"), "ignored\n").unwrap();
-    fs::write(root.join("src/sub/.gitignore"), [0xff]).unwrap();
-    for name in [".hidden", "a", "ignored"] {
-        fs::write(root.join("src").join(name), "ok").unwrap();
-    }
-    symlink(root, root.join("src/link")).unwrap();
-    let node = prepare(LS_KIND, json!({"workspace_root":root}));
-    let list = call(&node, json!({"path":"src"})).unwrap();
-    assert!(list["entries"].is_secret());
+    let kinds: BTreeSet<_> = registry
+        .iter()
+        .map(|node| node.kind)
+        .filter(|kind| kind.starts_with("builtin.coding."))
+        .collect();
     assert_eq!(
-        list["entries"],
-        json!([{"path":"src/.hidden","kind":"file"}, {"path":"src/a","kind":"file"}, {"path":"src/sub","kind":"directory"}])
-    );
-    assert_eq!(list["truncated"], json!(false));
-    assert_eq!(
-        call(&node, json!({"limit": 1})).unwrap()["truncated"],
-        json!(true)
-    );
-    for path in ["src/.hidden", "src/link", "src/../", "src/sub"] {
-        business(call(&node, json!({"path":path})));
-    }
-}
-
-#[test]
-fn find_matches_relative_globs_basenames_kind_and_depth_without_reading_files() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    fs::create_dir_all(root.join("src/sub/mod.rs")).unwrap();
-    fs::write(root.join(".gitignore"), "ignored.rs\n").unwrap();
-    for name in ["a.rs", "src/b.rs", "src/ignored.rs", "src/sub/c.rs"] {
-        fs::write(root.join(name), [0xff]).unwrap();
-    }
-    symlink(root.join("src"), root.join("alias")).unwrap();
-    let node = prepare(FIND_KIND, json!({"workspace_root":root}));
-    let search = |input| call(&node, input).unwrap();
-    let result = search(json!({"pattern":"*.rs", "kind":"file"}));
-    assert!(result["entries"].is_secret());
-    assert_eq!(
-        result["entries"],
-        json!([{"path":"a.rs","kind":"file"}, {"path":"src/b.rs","kind":"file"}, {"path":"src/sub/c.rs","kind":"file"}])
-    );
-    let partial = search(json!({"path":"src", "pattern":"sub/*.rs", "limit":1}));
-    assert_eq!(
-        partial["entries"],
-        json!([{"path":"src/sub/c.rs","kind":"file"}])
-    );
-    assert_eq!(partial["truncated"], json!(true));
-    let shallow = search(json!({"path":"src", "pattern":"**/*.rs", "max_depth":1}));
-    assert_eq!(
-        shallow["entries"],
-        json!([{"path":"src/b.rs","kind":"file"}])
-    );
-    assert_eq!(shallow["truncated"], json!(false));
-    assert_eq!(
-        search(json!({"pattern":"src/**/*.rs", "kind":"directory"}))["entries"],
-        json!([{"path":"src/sub/mod.rs","kind":"directory"}])
-    );
-    for input in [
-        json!({"pattern":"["}),
-        json!({"pattern":"/a"}),
-        json!({"pattern":"*","kind":"link"}),
-        json!({"pattern":"*","max_depth":0}),
-        json!({"pattern":"*","max_depth":65}),
-        json!({"pattern":"*","path":"a.rs"}),
-        json!({"pattern":"*","path":"alias"}),
-    ] {
-        business(call(&node, input));
-    }
-}
-
-#[test]
-fn grep_observes_nested_ignores_and_returns_private_one_based_lines() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    fs::create_dir_all(root.join("src/build")).unwrap();
-    fs::write(root.join(".gitignore"), "*.log\nbuild/\n/root-only\n").unwrap();
-    fs::write(root.join("src/.gitignore"), "!kept.log\n").unwrap();
-    for path in [
-        "root-only",
-        "src/ignored.log",
-        "src/build/a",
-        "src/root-only",
-        "src/kept.log",
-    ] {
-        fs::write(root.join(path), "first\r\nNeedle[1]\r\nNeedleX\n").unwrap();
-    }
-    let grep = prepare(GREP_KIND, json!({"workspace_root":root}));
-    let result = call(
-        &grep,
-        json!({"pattern":"needle[1]", "ignore_case":true, "literal":true}),
-    )
-    .unwrap();
-    assert!(result["matches"].is_secret());
-    assert_eq!(
-        result["matches"],
-        json!([
-            {"path":"src/kept.log", "line":2, "text":"Needle[1]"},
-            {"path":"src/root-only", "line":2, "text":"Needle[1]"}
+        kinds,
+        BTreeSet::from([
+            "builtin.coding.bash",
+            "builtin.coding.edit",
+            "builtin.coding.read",
+            "builtin.coding.write",
         ])
     );
-    assert_eq!(result["truncated"], json!(false));
-    let limited = call(
-        &grep,
-        json!({"path":"src", "pattern":"Needle.$", "limit":1}),
-    )
-    .unwrap();
-    assert_eq!(
-        limited["matches"],
-        json!([{"path":"src/kept.log", "line":3, "text":"NeedleX"}])
-    );
-    assert_eq!(limited["truncated"], json!(true));
-    let exact = call(
-        &grep,
-        json!({"path":"src/kept.log", "pattern":"Needle.$", "limit":1}),
-    )
-    .unwrap();
-    assert_eq!(exact["truncated"], json!(false));
-    for path in ["src/build", "src/ignored.log"] {
-        assert_eq!(
-            call(&grep, json!({"path":path, "pattern":"Needle"})).unwrap()["matches"],
-            json!([])
-        );
-    }
-}
-
-#[test]
-fn grep_skips_binary_large_and_unsafe_entries_without_reading_external_rules() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().join("workspace");
-    fs::create_dir_all(root.join(".git")).unwrap();
-    let outside = dir.path().join("outside");
-    fs::write(&outside, "*\nsecret").unwrap();
-    symlink(&outside, root.join(".gitignore")).unwrap();
-    symlink(dir.path(), root.join("alias")).unwrap();
-    fs::hard_link(&outside, root.join("hard")).unwrap();
-    for path in [".git/config", ".mfn-coding-private", "ok"] {
-        fs::write(root.join(path), "secret").unwrap();
-    }
-    fs::write(root.join("binary"), b"secret\n\x00").unwrap();
-    fs::write(root.join("invalid"), b"secret\n\xff").unwrap();
-    fs::write(
-        root.join("large"),
-        format!("secret{}", "x".repeat(1024 * 1024)),
-    )
-    .unwrap();
-    let grep = prepare(GREP_KIND, json!({"workspace_root":root}));
-    assert_eq!(
-        call(&grep, json!({"pattern":"secret"})).unwrap()["matches"],
-        json!([{"path":"ok", "line":1, "text":"secret"}])
-    );
-    for path in ["..", ".git", "alias", "hard", "alias/outside", "/"] {
-        business(call(&grep, json!({"path":path, "pattern":"."})));
-    }
-    for input in [
-        json!({"pattern":"["}),
-        json!({"pattern":""}),
-        json!({"pattern":"x", "limit":0}),
-        json!({"pattern":"x", "limit":1001}),
-    ] {
-        business(call(&grep, input));
-    }
-    fs::write(root.join("ok"), "\t".repeat(30_000)).unwrap();
-    let escaped = call(&grep, json!({"path":"ok", "pattern":"."})).unwrap();
-    assert_eq!(escaped["matches"], json!([]));
-    assert_eq!(escaped["truncated"], json!(true));
 }
 
 #[test]
@@ -406,53 +233,17 @@ fn file_tools_reject_workspace_escapes_aliases_and_git_metadata() {
         &write,
         json!({"path":"file-link", "content":"clobber"}),
     ));
+    for path in [".GiT/config", ".mfn-coding-private"] {
+        assert!(matches!(
+            business(call(&write, json!({"path":path, "content":"new"})))
+                .downcast_ref::<CodingError>(),
+            Some(CodingError::InvalidInput { field: "path", .. })
+        ));
+    }
+    business(call(&write, json!({"path":"missing/new", "content":"new"})));
+    assert!(!workspace.join("missing").exists());
     assert!(!dir.path().join("new").exists());
     assert_eq!(fs::read_to_string(outside).unwrap(), "outside");
-}
-
-#[test]
-fn mkdir_creates_only_the_leaf_under_a_locked_verified_parent() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().join("workspace");
-    fs::create_dir(&root).unwrap();
-    let node = prepare(MKDIR_KIND, json!({"workspace_root":root}));
-    assert_eq!(
-        call(&node, json!({"path":"notes"})).unwrap()["created"],
-        json!(true)
-    );
-    assert_eq!(
-        root.join("notes").metadata().unwrap().permissions().mode() & 0o077,
-        0
-    );
-    symlink(dir.path(), root.join("alias")).unwrap();
-    fs::write(root.join("file"), "original").unwrap();
-    for path in [
-        "notes",
-        "file",
-        "file/sub",
-        "missing/nested",
-        "alias/new",
-        "alias",
-        "../new",
-        ".GiT",
-        "notes/.mfn-coding-hidden",
-        ".",
-    ] {
-        business(call(&node, json!({"path":path})));
-    }
-    let lock = fs::File::open(root.join("notes")).unwrap();
-    flock(&lock, FlockOperation::NonBlockingLockExclusive).unwrap();
-    assert!(matches!(
-        business(call(&node, json!({"path":"notes/new"}))).downcast_ref::<CodingError>(),
-        Some(CodingError::DirectoryBusy)
-    ));
-    flock(&lock, FlockOperation::Unlock).unwrap();
-    assert!(!root.join("notes/new").exists());
-    call(&node, json!({"path":"notes/new"})).unwrap();
-    assert!(root.join("notes/new").is_dir());
-    assert!(!root.join("missing").exists());
-    assert!(!dir.path().join("new").exists());
-    assert_eq!(fs::read_to_string(root.join("file")).unwrap(), "original");
 }
 
 #[test]

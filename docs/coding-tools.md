@@ -16,7 +16,6 @@ host-supplied parameter rather than allowing the model to choose the root.
 | `builtin.coding.read` | `path`, optional `start_line` and `limit` | `content`, optional `next_line` |
 | `builtin.coding.edit` | `path`, `edits`: list of `{old_text, new_text}` objects | `replacements`, `bytes_written` |
 | `builtin.coding.write` | `path`, `content` | `bytes_written` |
-| `builtin.coding.mkdir` | `path` | `created` |
 
 Paths are relative to the configured root or its trusted alias. Empty, `.` and
 `..` components, `.git` metadata and internal staging names are rejected. The
@@ -41,45 +40,11 @@ original nine Unix permission bits. It does not preserve other inode metadata.
 `write` atomically creates a file (mode at most `0600`) and fails if any entry
 with that name already exists; it never truncates an existing file.
 
-`mkdir` creates one directory under an existing parent (permission bits at most `0700`) and
-returns `created: true`. An existing directory, file or symlink is a recoverable error. For a
-nested layout, create each missing level before calling `write`.
-
 Mutations use a nonblocking advisory lock on the parent directory for cooperating
 `mfn-coding` processes. An edit checks the original file's metadata again before
 publication. This is not a compare-and-swap against arbitrary external writers.
 An atomic rename is not a durability or rollback guarantee. Cancellation can
 prevent publication but cannot undo a completed rename.
-
-## Workspace discovery
-
-`builtin.coding.grep` searches UTF-8 text one line at a time. Supply a Rust regex `pattern`
-(1 to 4,096 bytes), or set `literal: true` to search for exact text. `ignore_case` defaults to
-false. `path` can name a file or directory and defaults to `.` (the workspace root).
-`matches` contains `{path, line, text}` records with workspace-relative paths and one-based line
-numbers. Binary files (invalid UTF-8 or NUL), and files larger than 1 MiB, are not candidates.
-
-`builtin.coding.find` returns `entries` of `{path, kind}` without opening candidate files. A glob
-`pattern` without `/` matches basenames at any depth (e.g. `*.rs`). With `/`, it matches relative to
-the starting directory (e.g. `src/**/*.rs`); `*` never crosses a separator. `path` defaults to `.`,
-`kind` to `any` (`file` and `directory` are also valid), and `limit` to 1,000. `max_depth` selects
-1 to 64 levels below `path` (default 64); entries beyond this scope are not matches. Returned
-paths are always relative to the workspace root, so they can be passed straight to `read`.
-
-`builtin.coding.ls` lists the immediate children of a directory, with the same `entries` and
-`truncated` outputs as `find`. `path` defaults to `.`, `limit` to 500. Nonignored dotfiles are
-included. Child directories are not opened and their ignore files do not affect a listing.
-
-Discovery visits names in sorted, depth-first order. It follows no symlinks and skips Git metadata,
-staging files, non-UTF-8 names, special files, and multiply linked files. It applies `.gitignore`
-files from the bound root down, including ancestor rules for scoped searches and nested negations.
-It does not consult global Git configuration or read ignore files through links. Invalid or oversized
-(above 64 KiB) regular ignore files fail the search instead of silently dropping their rules.
-
-`limit` is 1 to 1,000 hits (default 100 for grep). The result array also has a 50 KiB serialized
-JSON budget. `truncated: true` means more results may exist: narrow the path or pattern. The
-walk stops at 50,000 directory entries or 64 directory levels; grep scans at most 64 MiB of file
-contents per call. No matches is an empty array, not an error.
 
 ## Shell commands
 
@@ -155,12 +120,15 @@ nix develop --command target/coding-read --params.workspace_root "$PWD" \
 
 ## Run the coding Agent
 
-The [coding chat Flow](../examples/chat-coding-flow.json) gives `mfn-llm.agent` the
-standalone `read` Flow above, plus [ls](../examples/agent-coding/ls.json), [find](../examples/agent-coding/find.json),
-[grep](../examples/agent-coding/grep.json), [edit](../examples/agent-coding/edit.json),
-[mkdir](../examples/agent-coding/mkdir.json), [write](../examples/agent-coding/write.json), and [bash](../examples/agent-coding/bash.json).
-Each Flow constant binds the same required `params.workspace_root`. For `bash`, this fixes only
-the initial working directory, not the files or programs the shell can reach.
+The [coding chat Flow](../examples/chat-coding-flow.json) builds the [model request](../examples/agent-coding/request.json),
+passes it and the workspace tools to `mfn-llm.agent`, then [settles the turn](../examples/agent-coding/finish.json).
+The [`workspace_tools` Flow](../examples/agent-coding/tools.json) binds `read`, `edit`, `write`, and `bash`
+to the same `params.workspace_root`. Its `tools` output carries the executable Flows; `tool_properties`
+pairs their prepared interfaces with the text in `descriptions` for the model.
+Use `bash` for discovery and directory creation: for example, `git ls-files` lists tracked files,
+`git grep -n` searches them, and `mkdir -p docs` creates a parent directory before `write`.
+Search behavior follows the command you choose. The workspace binding sets the shell's initial
+directory, not the files or programs it can reach.
 The streaming runner sets `execution.limits.workers` to one: even if a model batches an edit and
 a test in one reply, the test observes the preceding edit. This orders calls within one runner,
 not concurrent sessions or external editors.

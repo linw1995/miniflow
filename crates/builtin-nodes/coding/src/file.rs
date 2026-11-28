@@ -16,7 +16,6 @@ use uuid::Uuid;
 
 pub const READ_KIND: &str = "builtin.coding.read";
 pub const EDIT_KIND: &str = "builtin.coding.edit";
-pub const MKDIR_KIND: &str = "builtin.coding.mkdir";
 pub const WRITE_KIND: &str = "builtin.coding.write";
 
 const MAX_FILE_BYTES: usize = 16 * 1024 * 1024;
@@ -33,7 +32,7 @@ struct Config {
 }
 
 const fn default_file_bytes() -> usize {
-    DEFAULT_FILE_BYTES
+    1024 * 1024
 }
 
 struct WorkspaceFiles {
@@ -238,37 +237,6 @@ impl TypedTaskNode for ReadNode {
 }
 
 #[derive(NodeValue)]
-struct MkdirInputs {
-    path: Shared<String>,
-}
-
-#[derive(NodeValue)]
-struct MkdirOutputs {
-    created: bool,
-}
-
-struct MkdirNode(WorkspaceRoot);
-
-impl TypedTaskNode for MkdirNode {
-    type Input = MkdirInputs;
-    type Output = MkdirOutputs;
-
-    fn execute(
-        &self,
-        input: MkdirInputs,
-        context: &mut ExecutionContext,
-    ) -> Result<TypedNodeResult<MkdirOutputs>, NodeExecutionError> {
-        let target = Target::resolve(&self.0, text(&input.path), context)?;
-        target.lock_mutation()?;
-        check_cancelled(context)?;
-        fs::mkdirat(&target.parent, target.name, Mode::RWXU).context(ResolvePathSnafu {
-            operation: "create workspace directory",
-        })?;
-        Ok(MkdirOutputs { created: true }.into())
-    }
-}
-
-#[derive(NodeValue)]
 struct WriteInputs {
     path: Shared<String>,
     content: Shared<String>,
@@ -437,9 +405,6 @@ inventory::submit! {
 }
 inventory::submit! {
     NodeRegistration { kind: EDIT_KIND, factory: NodeFactory::Plain(|value| prepare(value, EditNode)) }
-}
-inventory::submit! {
-    NodeRegistration { kind: MKDIR_KIND, factory: NodeFactory::Plain(|value| prepare_root_node(value, MkdirNode)) }
 }
 inventory::submit! {
     NodeRegistration { kind: WRITE_KIND, factory: NodeFactory::Plain(|value| prepare(value, WriteNode)) }

@@ -344,12 +344,10 @@ fn coding_agent_repairs_a_failing_workspace_and_reopens_its_tool_transcript() {
     let server = Server::start(vec![
         streamed_tool_calls(json!([
             call(
-                "grep",
-                "grep",
-                json!({"pattern":"Hello, world!", "literal":true})
+                "inspect",
+                "bash",
+                json!({"command":"git ls-files -- '*.sh' && grep -F 'Hello, world!' greet.sh"})
             ),
-            call("scripts", "find", json!({"pattern":"*.sh", "kind":"file"})),
-            call("listing", "ls", json!({})),
             call("read", "read", json!({"path":"greet.sh"})),
             call(
                 "override",
@@ -369,7 +367,7 @@ fn coding_agent_repairs_a_failing_workspace_and_reopens_its_tool_transcript() {
                 "bash",
                 json!({"command":"/bin/sh -n ./greet.sh && /bin/sh ./test.sh", "timeout":10})
             ),
-            call("docs", "mkdir", json!({"path":"docs"})),
+            call("docs", "bash", json!({"command":"mkdir docs"})),
             call(
                 "note",
                 "write",
@@ -453,18 +451,8 @@ fn coding_agent_repairs_a_failing_workspace_and_reopens_its_tool_transcript() {
     assert_eq!(requests.len(), 3);
     assert_eq!(requests[0].body["messages"][0]["role"], "system");
     let tools = requests[0].body["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 8);
+    assert_eq!(tools.len(), 4);
     for (name, keys) in [
-        ("mkdir", &["path"][..]),
-        ("ls", &["path", "limit"][..]),
-        (
-            "find",
-            &["pattern", "path", "kind", "max_depth", "limit"][..],
-        ),
-        (
-            "grep",
-            &["path", "pattern", "literal", "ignore_case", "limit"][..],
-        ),
         ("read", &["path", "start_line", "limit"][..]),
         ("edit", &["path", "edits"]),
         ("write", &["path", "content"]),
@@ -503,23 +491,9 @@ fn coding_agent_repairs_a_failing_workspace_and_reopens_its_tool_transcript() {
         );
         assert!(!body.contains("synthetic-coding-key"));
     }
-    assert_eq!(
-        tool_result(&requests[1], "scripts")["entries"],
-        json!([{"path":"greet.sh", "kind":"file"}, {"path":"test.sh", "kind":"file"}])
-    );
-    assert_eq!(
-        tool_result(&requests[1], "listing"),
-        tool_result(&requests[1], "scripts")
-    );
-    let hits = tool_result(&requests[1], "grep");
-    assert_eq!(hits["truncated"], false);
-    assert!(
-        hits["matches"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|hit| hit["path"] == "greet.sh" && hit["text"] == OLD)
-    );
+    let inspection = tool_result(&requests[1], "inspect");
+    assert_eq!(inspection["exit_code"], 0);
+    assert_eq!(inspection["stdout"], format!("greet.sh\ntest.sh\n{OLD}\n"));
     assert_eq!(tool_result(&requests[1], "read")["content"], original);
     assert_eq!(
         tool_result(&requests[1], "override")["error"],
@@ -535,7 +509,7 @@ fn coding_agent_repairs_a_failing_workspace_and_reopens_its_tool_transcript() {
     let after = tool_result(&requests[2], "after");
     assert_eq!(after["exit_code"], 0);
     assert_eq!(after["stdout"], "2 checks passed\n");
-    assert_eq!(tool_result(&requests[2], "docs")["created"], true);
+    assert_eq!(tool_result(&requests[2], "docs")["exit_code"], 0);
     assert_eq!(
         tool_result(&requests[2], "note")["bytes_written"],
         NOTE.len()

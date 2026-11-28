@@ -30,12 +30,6 @@ pub enum CodingError {
         operation: &'static str,
         source: Errno,
     },
-    #[snafu(display("invalid .gitignore rules: {source}"))]
-    IgnoreRules { source: ignore::Error },
-    #[snafu(display("invalid search glob: {source}"))]
-    Glob { source: globset::Error },
-    #[snafu(display("invalid search expression: {source}"))]
-    Regex { source: regex::Error },
     #[snafu(display("file exceeds the {limit}-byte limit"))]
     FileTooLarge { limit: usize },
     #[snafu(display("file is not UTF-8: {source}"))]
@@ -85,9 +79,6 @@ impl From<CodingError> for NodeExecutionError {
                     | Errno::ROFS
             ),
             CodingError::InvalidInput { .. }
-            | CodingError::IgnoreRules { .. }
-            | CodingError::Glob { .. }
-            | CodingError::Regex { .. }
             | CodingError::FileTooLarge { .. }
             | CodingError::FileEncoding { .. }
             | CodingError::LineTooLong { .. }

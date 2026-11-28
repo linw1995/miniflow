@@ -7,11 +7,8 @@ repository.workspace = true
 description = "Workspace file and shell tools for miniflow"
 
 [dependencies]
-globset.workspace = true
-ignore.workspace = true
 inventory.workspace = true
 mf-runtime.workspace = true
-regex.workspace = true
 rustix = { workspace = true, features = ["fs", "process"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

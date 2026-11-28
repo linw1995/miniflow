@@ -33,6 +33,16 @@
       }
     },
     {
+      "id": "system_message",
+      "kind": "builtin.constant",
+      "config": {
+        "value": {
+          "role": "system",
+          "content": "You are a coding assistant. Workspace notices identify the root for subsequent relative paths. Earlier unmarked history has no known workspace. Follow the supplied instructions in order; more local instructions take precedence. Inspect relevant files and check for more specific instructions in subdirectories before editing. Make the smallest change that solves the request. Use bash to run the relevant project checks; read their exit codes and output, fix failures, and report what you actually verified. Wait for tool results before making decisions that depend on them."
+        }
+      }
+    },
+    {
       "id": "turns",
       "kind": "builtin.code",
       "config": {
@@ -82,6 +92,7 @@
       "config": {
         "language": "cel",
         "inputs": {
+          "system_message": "object",
           "messages": {
             "list": "object"
           },
@@ -93,10 +104,13 @@
           }
         },
         "code": {
-          "messages": "[dyn({'role':'system','content':'You are a coding assistant. Workspace notices identify the root for subsequent relative paths. Earlier unmarked history has no known workspace. Follow the supplied instructions in order; more local instructions take precedence. Inspect relevant files and check for more specific instructions in subdirectories before editing. Make the smallest change that solves the request. Use bash to run the relevant project checks; read their exit codes and output, fix failures, and report what you actually verified. Wait for tool results before making decisions that depend on them.'})] +\nmessages.slice(0, int(changes[0].at)) + changes.transformList(i, c,\n  [dyn({'role':'system','content':c.notice})] + (i+1 == size(changes) ? instructions : []) +\n  messages.slice(int(c.at), i+1 < size(changes) ? int(changes[i+1].at) : size(messages))\n).flatten()"
+          "messages": "[system_message] +\nmessages.slice(0, int(changes[0].at)) + changes.transformList(i, c,\n  [dyn({'role':'system','content':c.notice})] + (i+1 == size(changes) ? instructions : []) +\n  messages.slice(int(c.at), i+1 < size(changes) ? int(changes[i+1].at) : size(messages))\n).flatten()"
         }
       },
       "inputs": {
+        "system_message": {
+          "$ref": "system_message.value"
+        },
         "messages": {
           "$ref": "params.messages"
         },

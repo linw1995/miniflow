@@ -84,11 +84,6 @@ syntect = { version = "5.3.0", default-features = false }
 image = { version = "0.25.8", default-features = false }
 ratatui-image = { version = "11.1.0", default-features = false }
 
-# Workspace content search and ignore rules.
-globset = "0.4.22"
-ignore = "0.4.35"
-regex = "1.13.1"
-
 # Process control, signals, and terminal I/O.
 libc = "0.2.189"
 nix = "0.31.3"

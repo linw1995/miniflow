@@ -1,0 +1,219 @@
+{
+  "version": "2026-11-28",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../../crates/builtin-nodes/core"
+    },
+    "code": {
+      "package": "mfn-code",
+      "path": "../../crates/builtin-nodes/code"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "workspace_root": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "id": "bash",
+      "kind": "builtin.constant",
+      "config": {
+        "type": "flow",
+        "value": {
+          "path": "bash.json"
+        },
+        "inputs": {
+          "workspace_root": {
+            "$ref": "params.workspace_root"
+          }
+        }
+      }
+    },
+    {
+      "id": "edit",
+      "kind": "builtin.constant",
+      "config": {
+        "type": "flow",
+        "value": {
+          "path": "edit.json"
+        },
+        "inputs": {
+          "workspace_root": {
+            "$ref": "params.workspace_root"
+          }
+        }
+      }
+    },
+    {
+      "id": "read",
+      "kind": "builtin.constant",
+      "config": {
+        "type": "flow",
+        "value": {
+          "path": "../coding-read.json"
+        },
+        "inputs": {
+          "workspace_root": {
+            "$ref": "params.workspace_root"
+          }
+        }
+      }
+    },
+    {
+      "id": "write",
+      "kind": "builtin.constant",
+      "config": {
+        "type": "flow",
+        "value": {
+          "path": "write.json"
+        },
+        "inputs": {
+          "workspace_root": {
+            "$ref": "params.workspace_root"
+          }
+        }
+      }
+    },
+    {
+      "id": "tools",
+      "kind": "builtin.object",
+      "config": {
+        "fields": {
+          "bash": "flow",
+          "edit": "flow",
+          "read": "flow",
+          "write": "flow"
+        }
+      },
+      "inputs": {
+        "bash": {
+          "$ref": "bash.value"
+        },
+        "edit": {
+          "$ref": "edit.value"
+        },
+        "read": {
+          "$ref": "read.value"
+        },
+        "write": {
+          "$ref": "write.value"
+        }
+      }
+    },
+    {
+      "id": "interfaces",
+      "kind": "builtin.object",
+      "config": {
+        "fields": {
+          "bash": "object",
+          "edit": "object",
+          "read": "object",
+          "write": "object"
+        }
+      },
+      "inputs": {
+        "bash": {
+          "$ref": "bash.properties"
+        },
+        "edit": {
+          "$ref": "edit.properties"
+        },
+        "read": {
+          "$ref": "read.properties"
+        },
+        "write": {
+          "$ref": "write.properties"
+        }
+      }
+    },
+    {
+      "id": "descriptions",
+      "kind": "builtin.constant",
+      "config": {
+        "value": {
+          "bash": "Run shell commands from the workspace to list or search files, create directories, or run project checks. Each call starts a new non-interactive shell. Pipes, redirections, and multiple commands are supported. Optional timeout is in seconds. stdout and stderr contain diagnostic tails (up to 50 KiB or 2000 lines each). When truncated, stdout_path or stderr_path names the complete private log; inspect selected ranges with another shell command without rerunning the original.",
+          "edit": "Edit an existing file by relative path. Supply edits as a list of objects with string fields old_text and new_text. Each old_text must match exactly once in the original file; matches may not overlap. All replacements apply together.",
+          "read": "Read a UTF-8 file by relative path. start_line is one-based; limit is at most 2000 lines. Continue at next_line if present.",
+          "write": "Create a new UTF-8 file at a relative path with the supplied content. The parent directory must exist. Does not overwrite; use edit for existing files."
+        }
+      }
+    },
+    {
+      "id": "tool_properties",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "interfaces": {
+            "map": "object"
+          },
+          "descriptions": {
+            "map": "string"
+          }
+        },
+        "code": {
+          "value": "interfaces.transformMap(name, iface, {'interface': iface, 'description': descriptions[name]})"
+        }
+      },
+      "inputs": {
+        "interfaces": {
+          "$ref": "interfaces.value"
+        },
+        "descriptions": {
+          "$ref": "descriptions.value"
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "params",
+      "to_node": "bash"
+    },
+    {
+      "from_node": "params",
+      "to_node": "edit"
+    },
+    {
+      "from_node": "params",
+      "to_node": "read"
+    },
+    {
+      "from_node": "params",
+      "to_node": "write"
+    }
+  ],
+  "clusters": [
+    {
+      "label": "Bind workspace tools",
+      "annotation": "Bind the workspace root before deriving the model-visible interfaces.",
+      "collapsed": true,
+      "nodes": [
+        "bash",
+        "edit",
+        "read",
+        "write"
+      ]
+    }
+  ],
+  "outputs": [
+    {
+      "name": "tools",
+      "node": "tools",
+      "port": "value"
+    },
+    {
+      "name": "tool_properties",
+      "node": "tool_properties",
+      "port": "value"
+    }
+  ]
+}

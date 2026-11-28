@@ -163,7 +163,10 @@ fn check_audit(database: &ChatDatabase, id: &str, work: &Path, length: usize, id
 fn checkpoint_precedes_the_next_model_request_without_replaying_or_replacing_tool_audit() {
     let f = Fixture::new([
         Reply::text(SUMMARY),
-        streamed_tool_calls_with_usage(json!([call("list", "ls", json!({}))]), 13000),
+        streamed_tool_calls_with_usage(
+            json!([call("list", "bash", json!({"command":"ls -1"}))]),
+            13000,
+        ),
         Reply::stream_text("Checked both files."),
         Reply::stream_text("Reopened."),
     ]);

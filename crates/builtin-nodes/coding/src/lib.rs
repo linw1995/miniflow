@@ -2,20 +2,13 @@
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
 mod bash;
-mod discovery;
 mod error;
 mod file;
-mod find;
-mod grep;
-mod ls;
 mod workspace;
 
 pub use bash::BASH_KIND;
 pub use error::CodingError;
-pub use file::{EDIT_KIND, MKDIR_KIND, READ_KIND, WRITE_KIND};
-pub use find::FIND_KIND;
-pub use grep::GREP_KIND;
-pub use ls::LS_KIND;
+pub use file::{EDIT_KIND, READ_KIND, WRITE_KIND};
 
 use mf_runtime::{ExecutionContext, Shared, ValueRef};
 

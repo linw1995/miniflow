@@ -550,12 +550,7 @@ fn documented_examples_compile_and_produce_expected_outputs() {
             } else if name == "chat-deepseek-flow.json" {
                 assert_agent_layouts(&executable, &["search", "fetch"]);
             } else if name == CODING_AGENT {
-                assert_agent_layouts(
-                    &executable,
-                    &[
-                        "ls", "find", "grep", "read", "edit", "mkdir", "write", "bash",
-                    ],
-                );
+                assert_agent_layouts(&executable, &["bash", "edit", "read", "write"]);
             } else {
                 assert_agent_layouts(&executable, &["calculator"]);
             }
