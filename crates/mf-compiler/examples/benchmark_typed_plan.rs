@@ -17,7 +17,7 @@ pub fn definition(count: usize, control_reads: bool) -> WorkflowDefinition {
             let mut node = json!({"id": id(index), "kind": "builtin.identity"});
             if index > 0 {
                 node["inputs"] =
-                    json!({"input": {"from": {"node": id(index - 1), "port": "value"}}});
+                    json!({"input": {"$ref": mf_runtime::output_id(&id(index - 1), "value")}});
             }
             node
         })

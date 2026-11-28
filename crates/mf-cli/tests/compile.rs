@@ -10,11 +10,8 @@ const DEFINITION: &str = r#"{
     "version": "2026-09-26", "dependencies": {},
     "nodes":[
         {"id":"source","kind":"builtin.constant","config":{"value":41}},
-        {"id":"echo","kind":"builtin.identity"},
+        {"id":"echo","kind":"builtin.identity", "inputs":{"input":{"$ref":"source.value"}}},
         {"id":"status","kind":"builtin.constant","config":{"value":"done"}}
-    ],
-    "edges":[
-        {"from_node":"source","from_output":"value","to_node":"echo","to_input":"input"}
     ],
     "outputs":[
         {"name":"answer","node":"echo","port":"value"},
@@ -385,12 +382,8 @@ fn cyclic_workflow_reports_the_cycle_path() {
         json!({
             "version": "2026-09-26", "dependencies": {},
             "nodes": [
-                {"id": "a", "kind": "builtin.identity"},
-                {"id": "b", "kind": "builtin.identity"}
-            ],
-            "edges": [
-                {"from_node": "a", "from_output": "value", "to_node": "b", "to_input": "input"},
-                {"from_node": "b", "from_output": "value", "to_node": "a", "to_input": "input"}
+                {"id": "a", "kind": "builtin.identity", "inputs":{"input":{"$ref":"b.value"}}},
+                {"id": "b", "kind": "builtin.identity", "inputs":{"input":{"$ref":"a.value"}}}
             ]
         }),
         &["cycle", "a -> b -> a"],
@@ -404,10 +397,7 @@ fn invalid_output_port_reports_both_edge_endpoints() {
             "version": "2026-09-26", "dependencies": {},
             "nodes": [
                 {"id": "source", "kind": "builtin.constant", "config": {"value": 1}},
-                {"id": "echo", "kind": "builtin.identity"}
-            ],
-            "edges": [
-                {"from_node": "source", "from_output": "missing", "to_node": "echo", "to_input": "input"}
+                {"id": "echo", "kind": "builtin.identity", "inputs":{"input":{"$ref":"source.missing"}}}
             ]
         }),
         &["source", "missing", "echo", "input", "missing output port"],
@@ -421,10 +411,7 @@ fn invalid_input_port_reports_both_edge_endpoints() {
             "version": "2026-09-26", "dependencies": {},
             "nodes": [
                 {"id": "source", "kind": "builtin.constant", "config": {"value": 1}},
-                {"id": "echo", "kind": "builtin.identity"}
-            ],
-            "edges": [
-                {"from_node": "source", "from_output": "value", "to_node": "echo", "to_input": "missing"}
+                {"id": "echo", "kind": "builtin.identity", "inputs":{"missing":{"$ref":"source.value"}}}
             ]
         }),
         &["source", "value", "echo", "missing", "missing input port"],

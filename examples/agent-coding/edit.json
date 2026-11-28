@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-13",
+  "version": "2026-11-28",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -42,16 +42,10 @@
       },
       "inputs": {
         "path": {
-          "from": {
-            "node": "params",
-            "port": "path"
-          }
+          "$ref": "params.path"
         },
         "edits": {
-          "from": {
-            "node": "params",
-            "port": "edits"
-          }
+          "$ref": "params.edits"
         }
       }
     }

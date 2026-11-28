@@ -87,8 +87,7 @@ fn prepare(mut value: Value) -> mf_runtime::PreparedStream {
 fn autonomous_source_uses_startup_arguments_and_drains_beyond_capacity() {
     let prepared = prepare(
         json!({"execution":{"limits":{"max_pending_messages":2,"workers":1}},
-        "nodes":[{"id":"%input", "kind":"test.autonomous_source", "config":{"count":2000}}, {"id":"copy", "kind":"builtin.identity"}],
-        "edges":[{"from_node":"%input", "from_output":"item", "to_node":"copy", "to_input":"input"}],
+        "nodes":[{"id":"%input", "kind":"test.autonomous_source", "config":{"count":2000}}, {"id":"copy", "kind":"builtin.identity", "inputs":{"input":{"$ref":"%input.item"}}}],
         "outputs":[{"name":"value", "node":"copy", "port":"value"}]}),
     );
     let instance = prepared
@@ -119,21 +118,18 @@ fn independent_startup_producers_progress_directly_and_after_tasks() {
             json!({"id":"a", "kind":"test.autonomous_source", "config":{"gate":gate, "check_future":after_tasks}}),
             json!({"id":"zzz", "kind":"test.autonomous_source", "config":{"gate":gate, "signal":true}}),
         ];
-        let mut edges = vec![];
         let arguments = if after_tasks {
             nodes.push(json!({"id":"0", "kind":"builtin.constant", "config":{"value":1}}));
             nodes.push(json!({"id":"zz", "kind":"builtin.constant", "config":{"value":2}}));
-            edges.push(
-                json!({"from_node":"0", "from_output":"value", "to_node":"a", "to_input":"start"}),
-            );
-            edges.push(json!({"from_node":"zz", "from_output":"value", "to_node":"zzz", "to_input":"start"}));
+            nodes[0]["inputs"]["start"] = json!({"$ref":"0.value"});
+            nodes[1]["inputs"]["start"] = json!({"$ref":"zz.value"});
             WorkflowArguments::default()
         } else {
             WorkflowArguments::try_from(json!({"a.start":1, "zzz.start":2})).unwrap()
         };
         let prepared = prepare(
             json!({"execution":{"limits":{"max_pending_messages":3,"workers":1}},
-            "nodes":nodes, "edges":edges, "outputs":[{"name":"value", "node":"a", "port":"item"}]}),
+            "nodes":nodes, "outputs":[{"name":"value", "node":"a", "port":"item"}]}),
         );
         let instance = prepared
             .start_with_options(StreamOptions {

@@ -27,7 +27,7 @@ fn child() -> WorkflowDefinition {
     graph(
         json!([
             {"id":"input","kind":"builtin.parameters","config":{"parameters":{"value":{"type":"string","default":"fallback","secret":true}}}},
-            {"id":"echo","kind":"builtin.identity","inputs":{"input":{"from":{"node":"input","port":"value"}}}}
+            {"id":"echo","kind":"builtin.identity","inputs":{"input":{"$ref":"input.value"}}}
         ]),
         json!([{"name":"value","node":"echo","port":"value"}]),
     )
@@ -39,14 +39,13 @@ fn call(id: &str, body: &WorkflowDefinition) -> Value {
 
 fn iteration_call_graph(body: &WorkflowDefinition, mode: &str) -> WorkflowDefinition {
     let mut invocation = call("invoke", body);
-    invocation["inputs"] =
-        json!({"inner.input.value":{"from":{"node":"%iteration","port":"item"}}});
+    invocation["inputs"] = json!({"inner.input.value":{"$ref":"%iteration.item"}});
     graph(
         json!([
             {"id":"items","kind":"builtin.constant","config":{"value":["first","second"]}},
             {"id":"each","kind":"builtin.iteration","config":{"mode":mode,"body":{"version":"2026-10-25", "dependencies":{},
                 "nodes":[invocation],"outputs": [{"name":"result", "node":"invoke","port":"value"}]
-            }},"inputs":{"items":{"from":{"node":"items","port":"value"}}}}
+            }},"inputs":{"items":{"$ref":"items.value"}}}
         ]),
         json!([{"name":"results","node":"each","port":"results"}]),
     )
@@ -471,12 +470,12 @@ fn compilation_cannot_replace_referenced_sources_with_outputs_or_locks() {
 fn calls_isolate_bindings_and_preserve_shared_secret_values() {
     let body = child();
     let mut first = call("first", &body);
-    first["inputs"] = json!({"input.value":{"from":{"node":"input","port":"value"}}});
+    first["inputs"] = json!({"input.value":{"$ref":"input.value"}});
     let definition = graph(
         json!([
             {"id":"input","kind":"builtin.parameters","config":{"parameters":{"value":{"type":"string","secret":false}}}},
             first, call("second", &body),
-            {"id":"after","kind":"builtin.identity","inputs":{"input":{"from":{"node":"input","port":"value"}}}}
+            {"id":"after","kind":"builtin.identity","inputs":{"input":{"$ref":"input.value"}}}
         ]),
         json!([
             {"name":"first","node":"first","port":"value"},
@@ -552,7 +551,8 @@ fn child_secret_contract_redacts_the_call_boundary_before_observation() {
 #[test]
 fn exclusive_call_inputs_retain_child_sensitivity_after_branch_convergence() {
     let mut invocation = call("invoke", &child());
-    invocation["inputs"] = json!({"input.value":{"exclusive":[{"node":"left","port":"value"},{"node":"right","port":"value"}]}});
+    invocation["inputs"] =
+        json!({"input.value":{"exclusive":[{"$ref":"left.value"},{"$ref":"right.value"}]}});
     let mut definition = graph(
         json!([
             {"id":"which","kind":"builtin.constant","config":{"value":true}},
@@ -768,7 +768,7 @@ fn missing_inputs_unknown_aliases_and_incompatible_ports_fail_early() {
     let definition = graph(
         json!([
             {"id":"source","kind":"builtin.constant","config":{"value":1}},
-            {"id":"call","kind":"workflow.call","config":{"flow":"child","body":body},"inputs":{"input.value":{"from":{"node":"source","port":"value"}}}}
+            {"id":"call","kind":"workflow.call","config":{"flow":"child","body":body},"inputs":{"input.value":{"$ref":"source.value"}}}
         ]),
         json!([]),
     );
@@ -1091,7 +1091,7 @@ fn stream_messages_invoke_terminal_children_with_correlated_lifecycle() {
     let mut body = child();
     body.nodes[0].config["parameters"]["value"]["secret"] = json!(false);
     let mut invocation = call("call", &body);
-    invocation["inputs"] = json!({"input.value":{"from":{"node":"feed","port":"item"}}});
+    invocation["inputs"] = json!({"input.value":{"$ref":"feed.item"}});
     let definition = graph(
         json!([controlled::source(json!("string")), invocation]),
         json!([{"name":"value","node":"call","port":"value"}]),

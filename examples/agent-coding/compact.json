@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-13",
+  "version": "2026-11-28",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -82,28 +82,16 @@
       },
       "inputs": {
         "params.history": {
-          "from": {
-            "node": "params",
-            "port": "history"
-          }
+          "$ref": "params.history"
         },
         "params.generated": {
-          "from": {
-            "node": "params",
-            "port": "generated"
-          }
+          "$ref": "params.generated"
         },
         "params.workspace_root": {
-          "from": {
-            "node": "params",
-            "port": "workspace_root"
-          }
+          "$ref": "params.workspace_root"
         },
         "params.checkpoint": {
-          "from": {
-            "node": "params",
-            "port": "checkpoint"
-          }
+          "$ref": "params.checkpoint"
         }
       }
     },
@@ -121,10 +109,7 @@
       },
       "inputs": {
         "context": {
-          "from": {
-            "node": "params",
-            "port": "context"
-          }
+          "$ref": "params.context"
         }
       }
     },
@@ -136,40 +121,22 @@
       },
       "inputs": {
         "params.messages": {
-          "from": {
-            "node": "candidate",
-            "port": "messages"
-          }
+          "$ref": "candidate.messages"
         },
         "params.usages": {
-          "from": {
-            "node": "params",
-            "port": "usages"
-          }
+          "$ref": "params.usages"
         },
         "params.context": {
-          "from": {
-            "node": "policy",
-            "port": "context"
-          }
+          "$ref": "policy.context"
         },
         "params.model": {
-          "from": {
-            "node": "params",
-            "port": "model"
-          }
+          "$ref": "params.model"
         },
         "params.base_url": {
-          "from": {
-            "node": "params",
-            "port": "base_url"
-          }
+          "$ref": "params.base_url"
         },
         "params.api_key": {
-          "from": {
-            "node": "params",
-            "port": "api_key"
-          }
+          "$ref": "params.api_key"
         }
       }
     },
@@ -200,22 +167,13 @@
       },
       "inputs": {
         "params.messages": {
-          "from": {
-            "node": "compact",
-            "port": "messages"
-          }
+          "$ref": "compact.messages"
         },
         "params.workspace_root": {
-          "from": {
-            "node": "params",
-            "port": "workspace_root"
-          }
+          "$ref": "params.workspace_root"
         },
         "params.instructions": {
-          "from": {
-            "node": "params",
-            "port": "instructions"
-          }
+          "$ref": "params.instructions"
         }
       }
     },
@@ -234,16 +192,10 @@
       },
       "inputs": {
         "request": {
-          "from": {
-            "node": "request",
-            "port": "messages"
-          }
+          "$ref": "request.messages"
         },
         "context": {
-          "from": {
-            "node": "compact",
-            "port": "messages"
-          }
+          "$ref": "compact.messages"
         }
       }
     },
@@ -272,26 +224,18 @@
         "replacement": {
           "exclusive": [
             {
-              "node": "checkpoint",
-              "port": "value"
+              "$ref": "checkpoint.value"
             },
             {
-              "node": "unchanged",
-              "port": "value"
+              "$ref": "unchanged.value"
             }
           ]
         },
         "error": {
-          "from": {
-            "node": "compact",
-            "port": "error"
-          }
+          "$ref": "compact.error"
         },
         "usages": {
-          "from": {
-            "node": "compact",
-            "port": "usages"
-          }
+          "$ref": "compact.usages"
         }
       }
     }

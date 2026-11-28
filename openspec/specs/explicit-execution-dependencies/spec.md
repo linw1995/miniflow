@@ -8,10 +8,10 @@ Express output gates and same-frame Task-success prerequisites without transferr
 
 ### Requirement: Declare unified execution edges
 
-Version `2026-10-19` SHALL use `edges` only for execution dependencies with `from_node`, `to_node`, and optional
-`from_output`. Omitted output SHALL mean node success; a present nonempty string SHALL mean output availability. Null
+Workflow definitions SHALL use `edges` only for execution dependencies with `from_node`, `to_node`, and optional
+`from_output`. Omitted output SHALL require version `2026-10-19` or later and mean node success; a present nonempty string SHALL mean output availability. Null
 outputs, unknown fields, self edges, and duplicate identical edges MUST fail. Data-binding fields and `control_edges`
-MUST be rejected in this version, including in bodies.
+MUST be rejected in all versions, including in bodies.
 
 #### Scenario: Order side effects without passing data
 

@@ -92,22 +92,19 @@ fn valid_definition() -> Value {
         "version": "2026-09-26", "dependencies": {},
         "nodes": [
             {"id": "source", "kind": "source.number"},
-            {"id": "sink", "kind": "sink.number"}
+            {"id": "sink", "kind": "sink.number", "inputs":{"input":{"$ref":"source.value"}}}
         ],
-        "edges": [{
-            "from_node": "source",
-            "from_output": "value",
-            "to_node": "sink",
-            "to_input": "input"
-        }],
         "outputs": [{"name": "final", "node": "sink", "port": "result"}]
     })
 }
 
 fn validation_error(value: Value) -> WorkflowCompileError {
     let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
-    let registry = NodeRegistry::from_inventory().unwrap();
-    validate_definition(&definition, &registry).unwrap_err()
+    invalid_graph(&definition)
+}
+
+fn invalid_graph(definition: &WorkflowDefinition) -> WorkflowCompileError {
+    validate_definition(definition, &NodeRegistry::from_inventory().unwrap()).unwrap_err()
 }
 
 #[test]
@@ -124,9 +121,9 @@ fn accepts_valid_connections_and_specific_values_into_any_inputs() {
 
 #[test]
 fn rejects_blank_and_duplicate_node_ids() {
-    let mut value = valid_definition();
-    value["nodes"][0]["id"] = json!("   ");
-    let error = validation_error(value);
+    let mut graph: WorkflowDefinition = serde_json::from_value(valid_definition()).unwrap();
+    graph.nodes[0].id = "   ".into();
+    let error = invalid_graph(&graph);
     assert!(matches!(
         &error,
         WorkflowCompileError::InvalidNodeId { position: 1 }
@@ -143,24 +140,25 @@ fn rejects_blank_and_duplicate_node_ids() {
 
 #[test]
 fn rejects_unknown_edge_endpoints_and_ports() {
-    let mut value = valid_definition();
-    value["edges"][0]["from_node"] = json!("missing-source");
-    let error = validation_error(value);
+    let graph: WorkflowDefinition = serde_json::from_value(valid_definition()).unwrap();
+    let mut invalid = graph.clone();
+    invalid.edges[0].from_node = "missing-source".into();
+    let error = invalid_graph(&invalid);
     assert!(matches!(
         &error,
         WorkflowCompileError::UnknownEdgeSource { .. }
     ));
     assert!(error.to_string().contains("missing-source"));
 
-    let mut value = valid_definition();
-    value["edges"][0]["to_node"] = json!("missing-target");
+    let mut invalid = graph;
+    invalid.edges[0].to_node = "missing-target".into();
     assert!(matches!(
-        validation_error(value),
+        invalid_graph(&invalid),
         WorkflowCompileError::UnknownEdgeTarget { .. }
     ));
 
     let mut value = valid_definition();
-    value["edges"][0]["from_output"] = json!("absent");
+    value["nodes"][1]["inputs"]["input"] = json!({"$ref":"source.absent"});
     let error = validation_error(value);
     assert!(matches!(
         &error,
@@ -170,7 +168,7 @@ fn rejects_unknown_edge_endpoints_and_ports() {
     assert!(error.to_string().contains("`sink`.`input`"));
 
     let mut value = valid_definition();
-    value["edges"][0]["to_input"] = json!("absent");
+    value["nodes"][1]["inputs"] = json!({"absent":{"$ref":"source.value"}});
     assert!(matches!(
         validation_error(value),
         WorkflowCompileError::UnknownInputPort { .. }
@@ -191,16 +189,15 @@ fn rejects_incompatible_or_ambiguous_inputs() {
     let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
     validate_definition(&definition, &NodeRegistry::from_inventory().unwrap()).unwrap();
 
-    let mut value = valid_definition();
-    let duplicate = value["edges"][0].clone();
-    value["edges"].as_array_mut().unwrap().push(duplicate);
+    let mut graph: WorkflowDefinition = serde_json::from_value(valid_definition()).unwrap();
+    graph.edges.push(graph.edges[0].clone());
     assert!(matches!(
-        validation_error(value),
+        invalid_graph(&graph),
         WorkflowCompileError::DuplicateInputConnection { .. }
     ));
 
     let mut value = valid_definition();
-    value["edges"] = json!([]);
+    value["nodes"][1].as_object_mut().unwrap().remove("inputs");
     assert!(matches!(
         validation_error(value),
         WorkflowCompileError::MissingRequiredInput { .. }
@@ -260,15 +257,13 @@ fn exclusive_definition() -> Value {
         json!({"id":"condition", "kind":"builtin.constant", "config":{"value":true}}),
         json!({"id":"route", "kind":"builtin.if_else", "config":{"branches":[{"id":"first", "condition":{"source":{"output":"condition.value", "path":""}, "operator":"eq", "value":true}}]}})
     ]);
-    value["control_edges"] = json!([
+    value["edges"] = json!([
         {"from_node":"condition", "from_output":"value", "to_node":"route"},
         {"from_node":"route", "from_output":"first", "to_node":"source"},
         {"from_node":"route", "from_output":"else", "to_node":"alternative"}
     ]);
-    value["edges"] = json!([
-        {"from_node":"source", "from_output":"value", "to_node":"sink", "to_input":"input", "exclusive":true},
-        {"from_node":"alternative", "from_output":"value", "to_node":"sink", "to_input":"input", "exclusive":true}
-    ]);
+    value["nodes"][1]["inputs"]["input"] =
+        json!({"exclusive":[{"$ref":"source.value"}, {"$ref":"alternative.value"}]});
     value
 }
 
@@ -324,36 +319,35 @@ fn exclusive_bindings_reject_conflicts_and_invalid_candidates() {
         "type",
         "cycle",
     ] {
-        let mut value = exclusive_definition();
+        let mut definition = valid.clone();
         match case {
             "single" => {
-                value["edges"].as_array_mut().unwrap().pop();
+                definition.edges.pop();
             }
-            "duplicate" => value["edges"][1] = value["edges"][0].clone(),
+            "duplicate" => definition.edges[1] = definition.edges[0].clone(),
             "mixed" | "mixed_reverse" => {
-                let ordinary = valid_definition()["edges"][0].clone();
-                let edges = value["edges"].as_array_mut().unwrap();
+                let mut ordinary = definition.edges[0].clone();
+                ordinary.exclusive = false;
                 if case == "mixed_reverse" {
-                    edges.insert(0, ordinary);
+                    definition.edges.insert(0, ordinary);
                 } else {
-                    edges.push(ordinary);
+                    definition.edges.push(ordinary);
                 }
             }
-            "source" => value["edges"][1]["from_node"] = json!("missing"),
+            "source" => definition.edges[1].from_node = "missing".into(),
             "target" => {
-                for edge in value["edges"].as_array_mut().unwrap() {
-                    edge["to_node"] = json!("missing");
+                for edge in &mut definition.edges {
+                    edge.to_node = "missing".into();
                 }
             }
-            "port" => value["edges"][1]["from_output"] = json!("missing"),
-            "type" => value["nodes"][2]["kind"] = json!("source.string"),
+            "port" => definition.edges[1].from_output = "missing".into(),
+            "type" => definition.nodes[2].kind = "source.string".into(),
             "cycle" => {
-                value["edges"][1]["from_node"] = json!("sink");
-                value["edges"][1]["from_output"] = json!("result");
+                definition.edges[1].from_node = "sink".into();
+                definition.edges[1].from_output = "result".into();
             }
             _ => unreachable!(),
         }
-        let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
         if !matches!(case, "port" | "type") {
             assert!(
                 mf_compiler::plan_definition(&definition).is_err(),
@@ -381,33 +375,25 @@ fn exclusive_bindings_reject_conflicts_and_invalid_candidates() {
 }
 
 #[test]
-fn exclusive_edge_syntax_is_strict_and_defaults_to_ordinary() {
+fn input_bindings_round_trip_and_reject_invalid_exclusive_forms() {
     let ordinary: WorkflowDefinition = serde_json::from_value(valid_definition()).unwrap();
     assert!(!ordinary.edges[0].exclusive);
-    assert!(
-        serde_json::to_value(&ordinary).unwrap()["edges"][0]
-            .get("exclusive")
-            .is_none()
-    );
-    let mut explicit = valid_definition();
-    explicit["edges"][0]["exclusive"] = json!(false);
     assert_eq!(
-        serde_json::from_value::<WorkflowDefinition>(explicit).unwrap(),
-        ordinary
+        json!(ordinary)["nodes"][1]["inputs"]["input"],
+        json!({"$ref":"source.value"})
     );
-    let definition: WorkflowDefinition = serde_json::from_value(exclusive_definition()).unwrap();
-    assert_eq!(
-        definition,
-        serde_json::from_value(serde_json::to_value(&definition).unwrap()).unwrap()
-    );
-    for value in [json!(null), json!("true"), json!(1)] {
+    let group: WorkflowDefinition = serde_json::from_value(exclusive_definition()).unwrap();
+    assert_eq!(group, serde_json::from_value(json!(group)).unwrap());
+    for binding in [
+        json!({"exclusive":false}),
+        json!({"exclusive":null}),
+        json!({"exclusive":"true"}),
+        json!({"$ref":"source.value", "policy":"first"}),
+    ] {
         let mut invalid = exclusive_definition();
-        invalid["edges"][0]["exclusive"] = value;
+        invalid["nodes"][1]["inputs"]["input"] = binding;
         assert!(serde_json::from_value::<WorkflowDefinition>(invalid).is_err());
     }
-    let mut invalid = exclusive_definition();
-    invalid["edges"][0]["policy"] = json!("first");
-    assert!(serde_json::from_value::<WorkflowDefinition>(invalid).is_err());
 }
 
 #[test]
@@ -417,13 +403,8 @@ fn exclusive_candidates_cannot_cross_message_domains() {
         "version":"2026-10-03", "dependencies":{}, "execution":{},
         "nodes":[
             {"id":"source", "kind":"source.number"},
-            {"id":"batch", "kind":"builtin.batch", "config":{"max_items":2, "max_wait_ms":100}},
-            {"id":"sink", "kind":"sink.any"}
-        ],
-        "edges":[
-            {"from_node":"source", "from_output":"value", "to_node":"batch", "to_input":"item"},
-            {"from_node":"source", "from_output":"value", "to_node":"sink", "to_input":"input", "exclusive":true},
-            {"from_node":"batch", "from_output":"items", "to_node":"sink", "to_input":"input", "exclusive":true}
+            {"id":"batch", "kind":"builtin.batch", "config":{"max_items":2, "max_wait_ms":100}, "inputs":{"item":{"$ref":"source.value"}}},
+            {"id":"sink", "kind":"sink.any", "inputs":{"input":{"exclusive":[{"$ref":"source.value"}, {"$ref":"batch.items"}]}}}
         ]
     });
     let error = validation_error(value).to_string();

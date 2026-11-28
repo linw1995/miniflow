@@ -262,8 +262,7 @@ fn run_case(mode: &str) {
         "version":"2026-10-03", "execution":{}, "dependencies":{},
         "nodes":[
             feed,
-            {"id":"event", "kind":"test.cancel_event", "config":{"mode":mode}}],
-        "edges":[{"from_node":"feed", "from_output":if mode == "span_timer" {"item"} else {"value"}, "to_node":"event", "to_input":"item"}],
+            {"id":"event", "kind":"test.cancel_event", "config":{"mode":mode}, "inputs":{"item":{"$ref":if mode == "span_timer" { "feed.item" } else { "feed.value" }}}}],
         "outputs":[{"name":"item", "node":"event", "port":"item"}]
     }))
     .unwrap();

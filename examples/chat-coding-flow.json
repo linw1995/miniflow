@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-13",
+  "version": "2026-11-28",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -88,28 +88,16 @@
       },
       "inputs": {
         "params.workspace_root": {
-          "from": {
-            "node": "params",
-            "port": "workspace_root"
-          }
+          "$ref": "params.workspace_root"
         },
         "params.enabled": {
-          "from": {
-            "node": "params",
-            "port": "load_instructions"
-          }
+          "$ref": "params.load_instructions"
         },
         "params.user_dir": {
-          "from": {
-            "node": "params",
-            "port": "user_instruction_dir"
-          }
+          "$ref": "params.user_instruction_dir"
         },
         "params.boundary": {
-          "from": {
-            "node": "params",
-            "port": "instruction_boundary"
-          }
+          "$ref": "params.instruction_boundary"
         }
       }
     },
@@ -121,22 +109,13 @@
       },
       "inputs": {
         "params.instructions": {
-          "from": {
-            "node": "instructions",
-            "port": "messages"
-          }
+          "$ref": "instructions.messages"
         },
         "params.workspace_root": {
-          "from": {
-            "node": "params",
-            "port": "workspace_root"
-          }
+          "$ref": "params.workspace_root"
         },
         "params.messages": {
-          "from": {
-            "node": "params",
-            "port": "messages"
-          }
+          "$ref": "params.messages"
         }
       }
     },
@@ -281,52 +260,28 @@
       },
       "inputs": {
         "mkdir_interface": {
-          "from": {
-            "node": "mkdir",
-            "port": "properties"
-          }
+          "$ref": "mkdir.properties"
         },
         "ls_interface": {
-          "from": {
-            "node": "ls",
-            "port": "properties"
-          }
+          "$ref": "ls.properties"
         },
         "find_interface": {
-          "from": {
-            "node": "find",
-            "port": "properties"
-          }
+          "$ref": "find.properties"
         },
         "grep_interface": {
-          "from": {
-            "node": "grep",
-            "port": "properties"
-          }
+          "$ref": "grep.properties"
         },
         "read_interface": {
-          "from": {
-            "node": "read",
-            "port": "properties"
-          }
+          "$ref": "read.properties"
         },
         "edit_interface": {
-          "from": {
-            "node": "edit",
-            "port": "properties"
-          }
+          "$ref": "edit.properties"
         },
         "write_interface": {
-          "from": {
-            "node": "write",
-            "port": "properties"
-          }
+          "$ref": "write.properties"
         },
         "bash_interface": {
-          "from": {
-            "node": "bash",
-            "port": "properties"
-          }
+          "$ref": "bash.properties"
         }
       }
     },
@@ -347,52 +302,28 @@
       },
       "inputs": {
         "mkdir": {
-          "from": {
-            "node": "mkdir",
-            "port": "value"
-          }
+          "$ref": "mkdir.value"
         },
         "ls": {
-          "from": {
-            "node": "ls",
-            "port": "value"
-          }
+          "$ref": "ls.value"
         },
         "find": {
-          "from": {
-            "node": "find",
-            "port": "value"
-          }
+          "$ref": "find.value"
         },
         "grep": {
-          "from": {
-            "node": "grep",
-            "port": "value"
-          }
+          "$ref": "grep.value"
         },
         "read": {
-          "from": {
-            "node": "read",
-            "port": "value"
-          }
+          "$ref": "read.value"
         },
         "edit": {
-          "from": {
-            "node": "edit",
-            "port": "value"
-          }
+          "$ref": "edit.value"
         },
         "write": {
-          "from": {
-            "node": "write",
-            "port": "value"
-          }
+          "$ref": "write.value"
         },
         "bash": {
-          "from": {
-            "node": "bash",
-            "port": "value"
-          }
+          "$ref": "bash.value"
         }
       }
     },
@@ -437,46 +368,25 @@
       },
       "inputs": {
         "params.compact": {
-          "from": {
-            "node": "compact_policy",
-            "port": "value"
-          }
+          "$ref": "compact_policy.value"
         },
         "params.tools": {
-          "from": {
-            "node": "tools",
-            "port": "value"
-          }
+          "$ref": "tools.value"
         },
         "params.tool_properties": {
-          "from": {
-            "node": "tool_properties",
-            "port": "value"
-          }
+          "$ref": "tool_properties.value"
         },
         "params.messages": {
-          "from": {
-            "node": "request",
-            "port": "messages"
-          }
+          "$ref": "request.messages"
         },
         "params.model": {
-          "from": {
-            "node": "params",
-            "port": "model"
-          }
+          "$ref": "params.model"
         },
         "params.base_url": {
-          "from": {
-            "node": "params",
-            "port": "base_url"
-          }
+          "$ref": "params.base_url"
         },
         "params.api_key": {
-          "from": {
-            "node": "params",
-            "port": "api_key"
-          }
+          "$ref": "params.api_key"
         }
       }
     },
@@ -488,70 +398,37 @@
       },
       "inputs": {
         "params.history": {
-          "from": {
-            "node": "params",
-            "port": "messages"
-          }
+          "$ref": "params.messages"
         },
         "params.context": {
-          "from": {
-            "node": "params",
-            "port": "context"
-          }
+          "$ref": "params.context"
         },
         "params.workspace_root": {
-          "from": {
-            "node": "params",
-            "port": "workspace_root"
-          }
+          "$ref": "params.workspace_root"
         },
         "params.model": {
-          "from": {
-            "node": "params",
-            "port": "model"
-          }
+          "$ref": "params.model"
         },
         "params.base_url": {
-          "from": {
-            "node": "params",
-            "port": "base_url"
-          }
+          "$ref": "params.base_url"
         },
         "params.api_key": {
-          "from": {
-            "node": "params",
-            "port": "api_key"
-          }
+          "$ref": "params.api_key"
         },
         "params.generated": {
-          "from": {
-            "node": "agent",
-            "port": "messages"
-          }
+          "$ref": "agent.messages"
         },
         "params.checkpoint": {
-          "from": {
-            "node": "agent",
-            "port": "checkpoint"
-          }
+          "$ref": "agent.checkpoint"
         },
         "params.status": {
-          "from": {
-            "node": "agent",
-            "port": "status"
-          }
+          "$ref": "agent.status"
         },
         "params.usages": {
-          "from": {
-            "node": "agent",
-            "port": "usages"
-          }
+          "$ref": "agent.usages"
         },
         "params.error": {
-          "from": {
-            "node": "agent",
-            "port": "error"
-          }
+          "$ref": "agent.error"
         }
       }
     }

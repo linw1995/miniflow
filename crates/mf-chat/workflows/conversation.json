@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-13",
+  "version": "2026-11-28",
   "execution": {},
   "dependencies": {
     "chat": {
@@ -29,22 +29,13 @@
       },
       "inputs": {
         "params.database_path": {
-          "from": {
-            "node": "begin",
-            "port": "database_path"
-          }
+          "$ref": "begin.database_path"
         },
         "params.invocation": {
-          "from": {
-            "node": "begin",
-            "port": "invocation"
-          }
+          "$ref": "begin.invocation"
         },
         "params.request": {
-          "from": {
-            "node": "begin",
-            "port": "request"
-          }
+          "$ref": "begin.request"
         }
       }
     },
@@ -63,10 +54,7 @@
       },
       "inputs": {
         "facts": {
-          "from": {
-            "node": "workflow",
-            "port": "auxiliary"
-          }
+          "$ref": "workflow.auxiliary"
         }
       }
     },
@@ -97,46 +85,25 @@
       },
       "inputs": {
         "params.prompt": {
-          "from": {
-            "node": "workflow",
-            "port": "title_prompt"
-          }
+          "$ref": "workflow.title_prompt"
         },
         "params.text": {
-          "from": {
-            "node": "workflow",
-            "port": "title_text"
-          }
+          "$ref": "workflow.title_text"
         },
         "params.status": {
-          "from": {
-            "node": "prepare_title",
-            "port": "status"
-          }
+          "$ref": "prepare_title.status"
         },
         "params.context": {
-          "from": {
-            "node": "workflow",
-            "port": "title_context"
-          }
+          "$ref": "workflow.title_context"
         },
         "params.model": {
-          "from": {
-            "node": "workflow",
-            "port": "title_model"
-          }
+          "$ref": "workflow.title_model"
         },
         "params.base_url": {
-          "from": {
-            "node": "workflow",
-            "port": "title_base_url"
-          }
+          "$ref": "workflow.title_base_url"
         },
         "params.api_key": {
-          "from": {
-            "node": "workflow",
-            "port": "title_api_key"
-          }
+          "$ref": "workflow.title_api_key"
         }
       }
     },
@@ -163,10 +130,7 @@
       "kind": "builtin.identity",
       "inputs": {
         "input": {
-          "from": {
-            "node": "title",
-            "port": "title"
-          }
+          "$ref": "title.title"
         }
       }
     },
@@ -198,12 +162,10 @@
         "input": {
           "exclusive": [
             {
-              "node": "title",
-              "port": "usages"
+              "$ref": "title.usages"
             },
             {
-              "node": "no_title_usages",
-              "port": "value"
+              "$ref": "no_title_usages.value"
             }
           ]
         }
@@ -223,10 +185,7 @@
       },
       "inputs": {
         "facts": {
-          "from": {
-            "node": "workflow",
-            "port": "auxiliary"
-          }
+          "$ref": "workflow.auxiliary"
         }
       }
     },
@@ -257,46 +216,25 @@
       },
       "inputs": {
         "params.messages": {
-          "from": {
-            "node": "workflow",
-            "port": "compact_messages"
-          }
+          "$ref": "workflow.compact_messages"
         },
         "params.append_messages": {
-          "from": {
-            "node": "workflow",
-            "port": "compact_append_messages"
-          }
+          "$ref": "workflow.compact_append_messages"
         },
         "params.usages": {
-          "from": {
-            "node": "workflow",
-            "port": "compact_usages"
-          }
+          "$ref": "workflow.compact_usages"
         },
         "params.context": {
-          "from": {
-            "node": "workflow",
-            "port": "compact_context"
-          }
+          "$ref": "workflow.compact_context"
         },
         "params.model": {
-          "from": {
-            "node": "workflow",
-            "port": "compact_model"
-          }
+          "$ref": "workflow.compact_model"
         },
         "params.base_url": {
-          "from": {
-            "node": "workflow",
-            "port": "compact_base_url"
-          }
+          "$ref": "workflow.compact_base_url"
         },
         "params.api_key": {
-          "from": {
-            "node": "workflow",
-            "port": "compact_api_key"
-          }
+          "$ref": "workflow.compact_api_key"
         }
       }
     },
@@ -324,10 +262,7 @@
       "kind": "builtin.identity",
       "inputs": {
         "input": {
-          "from": {
-            "node": "compact",
-            "port": "messages"
-          }
+          "$ref": "compact.messages"
         }
       }
     },
@@ -365,58 +300,44 @@
         "params.title": {
           "exclusive": [
             {
-              "node": "selected_title",
-              "port": "value"
+              "$ref": "selected_title.value"
             },
             {
-              "node": "missing_title",
-              "port": "value"
+              "$ref": "missing_title.value"
             },
             {
-              "node": "no_title",
-              "port": "value"
+              "$ref": "no_title.value"
             }
           ]
         },
         "params.title_usages": {
-          "from": {
-            "node": "resolved_title_usages",
-            "port": "value"
-          }
+          "$ref": "resolved_title_usages.value"
         },
         "params.compacted_messages": {
           "exclusive": [
             {
-              "node": "compacted_messages",
-              "port": "value"
+              "$ref": "compacted_messages.value"
             },
             {
-              "node": "unchanged_context",
-              "port": "value"
+              "$ref": "unchanged_context.value"
             },
             {
-              "node": "no_compact_messages",
-              "port": "value"
+              "$ref": "no_compact_messages.value"
             }
           ]
         },
         "params.compaction_usages": {
           "exclusive": [
             {
-              "node": "compact",
-              "port": "usages"
+              "$ref": "compact.usages"
             },
             {
-              "node": "no_compact_usages",
-              "port": "value"
+              "$ref": "no_compact_usages.value"
             }
           ]
         },
         "params.completed": {
-          "from": {
-            "node": "workflow",
-            "port": "completed"
-          }
+          "$ref": "workflow.completed"
         }
       }
     }

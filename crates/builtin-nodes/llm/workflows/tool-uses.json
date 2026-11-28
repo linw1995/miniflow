@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-11",
+  "version": "2026-11-28",
   "dependencies": {
     "core": {
       "package": "mfn-core"
@@ -59,10 +59,7 @@
       },
       "inputs": {
         "calls": {
-          "from": {
-            "node": "params",
-            "port": "calls"
-          }
+          "$ref": "params.calls"
         }
       }
     },
@@ -86,10 +83,7 @@
       "kind": "builtin.identity",
       "inputs": {
         "input": {
-          "from": {
-            "node": "params",
-            "port": "calls"
-          }
+          "$ref": "params.calls"
         }
       }
     },
@@ -115,7 +109,7 @@
           }
         },
         "body": {
-          "version": "2026-11-11",
+          "version": "2026-11-28",
           "nodes": [
             {
               "id": "classify",
@@ -138,22 +132,13 @@
               },
               "inputs": {
                 "model_call_id": {
-                  "from": {
-                    "node": "%iteration",
-                    "port": "model_call_id"
-                  }
+                  "$ref": "%iteration.model_call_id"
                 },
                 "call": {
-                  "from": {
-                    "node": "%iteration",
-                    "port": "item"
-                  }
+                  "$ref": "%iteration.item"
                 },
                 "tools": {
-                  "from": {
-                    "node": "%iteration",
-                    "port": "tools"
-                  }
+                  "$ref": "%iteration.tools"
                 }
               }
             },
@@ -185,28 +170,16 @@
               },
               "inputs": {
                 "stream_context": {
-                  "from": {
-                    "node": "classify",
-                    "port": "stream_context"
-                  }
+                  "$ref": "classify.stream_context"
                 },
                 "flows": {
-                  "from": {
-                    "node": "%iteration",
-                    "port": "flows"
-                  }
+                  "$ref": "%iteration.flows"
                 },
                 "route": {
-                  "from": {
-                    "node": "classify",
-                    "port": "name"
-                  }
+                  "$ref": "classify.name"
                 },
                 "arguments": {
-                  "from": {
-                    "node": "classify",
-                    "port": "arguments"
-                  }
+                  "$ref": "classify.arguments"
                 }
               }
             },
@@ -224,10 +197,7 @@
               },
               "inputs": {
                 "error": {
-                  "from": {
-                    "node": "classify",
-                    "port": "error"
-                  }
+                  "$ref": "classify.error"
                 }
               }
             },
@@ -236,26 +206,18 @@
               "kind": "llm.tool_result",
               "inputs": {
                 "call": {
-                  "from": {
-                    "node": "%iteration",
-                    "port": "item"
-                  }
+                  "$ref": "%iteration.item"
                 },
                 "plain_content": {
-                  "from": {
-                    "node": "classify",
-                    "port": "plain"
-                  }
+                  "$ref": "classify.plain"
                 },
                 "result": {
                   "exclusive": [
                     {
-                      "node": "fail",
-                      "port": "value"
+                      "$ref": "fail.value"
                     },
                     {
-                      "node": "execute",
-                      "port": "result"
+                      "$ref": "execute.result"
                     }
                   ]
                 }
@@ -309,28 +271,16 @@
       },
       "inputs": {
         "model_call_id": {
-          "from": {
-            "node": "params",
-            "port": "model_call_id"
-          }
+          "$ref": "params.model_call_id"
         },
         "items": {
-          "from": {
-            "node": "validated_calls",
-            "port": "value"
-          }
+          "$ref": "validated_calls.value"
         },
         "tools": {
-          "from": {
-            "node": "params",
-            "port": "tool_properties"
-          }
+          "$ref": "params.tool_properties"
         },
         "flows": {
-          "from": {
-            "node": "params",
-            "port": "tools"
-          }
+          "$ref": "params.tools"
         }
       }
     }

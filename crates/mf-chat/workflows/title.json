@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-25",
+  "version": "2026-11-28",
   "dependencies": {
     "core": {
       "package": "mfn-core"
@@ -71,16 +71,10 @@
       },
       "inputs": {
         "context": {
-          "from": {
-            "node": "params",
-            "port": "context"
-          }
+          "$ref": "params.context"
         },
         "status": {
-          "from": {
-            "node": "params",
-            "port": "status"
-          }
+          "$ref": "params.status"
         }
       }
     },
@@ -118,16 +112,10 @@
       },
       "inputs": {
         "prompt": {
-          "from": {
-            "node": "params",
-            "port": "prompt"
-          }
+          "$ref": "params.prompt"
         },
         "text": {
-          "from": {
-            "node": "params",
-            "port": "text"
-          }
+          "$ref": "params.text"
         }
       }
     },
@@ -158,10 +146,7 @@
       },
       "inputs": {
         "messages": {
-          "from": {
-            "node": "title_model_messages",
-            "port": "messages"
-          }
+          "$ref": "title_model_messages.messages"
         }
       }
     },
@@ -189,10 +174,7 @@
       "kind": "builtin.identity",
       "inputs": {
         "input": {
-          "from": {
-            "node": "title_model",
-            "port": "text"
-          }
+          "$ref": "title_model.text"
         }
       }
     },
@@ -210,12 +192,10 @@
         "input": {
           "exclusive": [
             {
-              "node": "title_model",
-              "port": "usages"
+              "$ref": "title_model.usages"
             },
             {
-              "node": "no_usages",
-              "port": "value"
+              "$ref": "no_usages.value"
             }
           ]
         }
@@ -236,16 +216,10 @@
       },
       "inputs": {
         "prompt": {
-          "from": {
-            "node": "title_prompt",
-            "port": "value"
-          }
+          "$ref": "title_prompt.value"
         },
         "system": {
-          "from": {
-            "node": "title_system",
-            "port": "value"
-          }
+          "$ref": "title_system.value"
         }
       }
     }

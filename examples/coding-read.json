@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-13",
+  "version": "2026-11-28",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -46,22 +46,13 @@
       },
       "inputs": {
         "path": {
-          "from": {
-            "node": "params",
-            "port": "path"
-          }
+          "$ref": "params.path"
         },
         "start_line": {
-          "from": {
-            "node": "params",
-            "port": "start_line"
-          }
+          "$ref": "params.start_line"
         },
         "limit": {
-          "from": {
-            "node": "params",
-            "port": "limit"
-          }
+          "$ref": "params.limit"
         }
       }
     }

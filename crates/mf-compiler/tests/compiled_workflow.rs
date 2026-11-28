@@ -84,13 +84,9 @@ fn definition() -> WorkflowDefinition {
         r#"{
             "version": "2026-09-26", "dependencies": {},
             "nodes":[
-                {"id":"increment-two","kind":"example.increment"},
-                {"id":"increment","kind":"example.increment"},
+                {"id":"increment-two","kind":"example.increment", "inputs":{"input":{"$ref":"source.value"}}},
+                {"id":"increment","kind":"example.increment", "inputs":{"input":{"$ref":"source.value"}}},
                 {"id":"source","kind":"example.constant","config":{"value":41}}
-            ],
-            "edges":[
-                {"from_node":"source","from_output":"value","to_node":"increment-two","to_input":"input"},
-                {"from_node":"source","from_output":"value","to_node":"increment","to_input":"input"}
             ],
             "outputs":[
                 {"name":"other","node":"increment-two","port":"value"},

@@ -392,7 +392,7 @@ fn saved_loop_preparation_and_codegen_use_the_compiled_child_not_its_raw_copy() 
     let definition: WorkflowDefinition = serde_json::from_value(json!({
         "version": "2026-10-28", "dependencies": {}, "nodes": [
             {"id":"seed", "kind":"builtin.constant", "config":{"value":0}}, {
-            "id": "repeat", "kind": "loop.run", "inputs":{"count":{"from":{"node":"seed","port":"value"}}}, "config": {
+            "id": "repeat", "kind": "loop.run", "inputs":{"count":{"$ref":"seed.value"}}, "config": {
                 "max_iterations": 1, "variables": [{"name":"count","type":"int"}], "body": {
                     "version": "2026-10-28", "dependencies": {}, "nodes": [{
                         "id": "step", "kind": "builtin.constant", "config": {"value": 42}

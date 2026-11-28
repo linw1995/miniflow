@@ -60,15 +60,10 @@ fn external_line_producer_matches_memory_and_drains_after_its_source_closes() {
             "core":{"package":"mfn-core", "path":common::crates_dir().join("builtin-nodes/core")}
         },
         "nodes":[
-            {"id":"read", "kind":"fixture.read_lines"},
-            {"id":"batch", "kind":"builtin.batch", "config":{"max_items":3, "max_wait_ms":3_600_000}},
-            {"id":"copy", "kind":"builtin.identity"},
+            {"id":"read", "kind":"fixture.read_lines", "inputs":{"path":{"$ref":"feed.line"}}},
+            {"id":"batch", "kind":"builtin.batch", "config":{"max_items":3, "max_wait_ms":3_600_000}, "inputs":{"item":{"$ref":"read.line"}}},
+            {"id":"copy", "kind":"builtin.identity", "inputs":{"input":{"$ref":"batch.items"}}},
             {"id":"feed", "kind":"builtin.readline"}
-        ],
-        "edges":[
-            {"from_node":"feed", "from_output":"line", "to_node":"read", "to_input":"path"},
-            {"from_node":"read", "from_output":"line", "to_node":"batch", "to_input":"item"},
-            {"from_node":"batch", "from_output":"items", "to_node":"copy", "to_input":"input"}
         ],
         "outputs":[{"name":"lines", "node":"copy", "port":"value"}]
     });

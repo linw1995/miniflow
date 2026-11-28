@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-13",
+  "version": "2026-11-28",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -46,10 +46,7 @@
       },
       "inputs": {
         "command": {
-          "from": {
-            "node": "names",
-            "port": "value"
-          }
+          "$ref": "names.value"
         }
       }
     },
@@ -129,16 +126,10 @@
               },
               "inputs": {
                 "path": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "path"
-                  }
+                  "$ref": "%loop.path"
                 },
                 "start_line": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "line"
-                  }
+                  "$ref": "%loop.line"
                 }
               }
             },
@@ -157,16 +148,10 @@
               },
               "inputs": {
                 "text": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "text"
-                  }
+                  "$ref": "%loop.text"
                 },
                 "page": {
-                  "from": {
-                    "node": "read",
-                    "port": "content"
-                  }
+                  "$ref": "read.content"
                 }
               }
             },
@@ -218,16 +203,10 @@
       },
       "inputs": {
         "root": {
-          "from": {
-            "node": "params",
-            "port": "directory"
-          }
+          "$ref": "params.directory"
         },
         "path": {
-          "from": {
-            "node": "choose",
-            "port": "stdout"
-          }
+          "$ref": "choose.stdout"
         }
       }
     },
@@ -247,22 +226,13 @@
       },
       "inputs": {
         "dir": {
-          "from": {
-            "node": "params",
-            "port": "directory"
-          }
+          "$ref": "params.directory"
         },
         "name": {
-          "from": {
-            "node": "choose",
-            "port": "stdout"
-          }
+          "$ref": "choose.stdout"
         },
         "text": {
-          "from": {
-            "node": "pages",
-            "port": "text"
-          }
+          "$ref": "pages.text"
         }
       }
     },
@@ -283,12 +253,10 @@
         "input": {
           "exclusive": [
             {
-              "node": "none",
-              "port": "value"
+              "$ref": "none.value"
             },
             {
-              "node": "prompt",
-              "port": "messages"
+              "$ref": "prompt.messages"
             }
           ]
         }

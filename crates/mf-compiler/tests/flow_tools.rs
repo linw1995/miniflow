@@ -632,8 +632,8 @@ fn context_configured_flow_inputs_stay_out_of_model_arguments_and_unrelated_call
                     "language":"cel", "inputs":{"token":"string", "content":"string"},
                     "code":{"content":format!("token == '{TOKEN}' ? content : 'wrong credential'")}
                 }, "inputs":{
-                    "token":{"from":{"node":"params", "port":"token"}},
-                    "content":{"from":{"node":"params", "port":"content"}}
+                    "token":{"$ref":"params.token"},
+                    "content":{"$ref":"params.content"}
                 }}
             ], "outputs":[{"name":"content", "node":"check", "port":"content"}]
         })),
@@ -736,7 +736,7 @@ fn configured_runtime_only_inputs_are_native_capabilities_not_model_arguments() 
             {"id":"params","kind":"builtin.parameters","config":{"parameters":{"callback":{"type":"flow","secret":false}}}},
             {"id":"invoke","kind":"workflow.call","config":{
                 "inputs":[],"outputs":[{"name":"content","value_type":"string","required":true}]
-            },"inputs":{"flow":{"from":{"node":"params","port":"callback"}}}}
+            },"inputs":{"flow":{"$ref":"params.callback"}}}
         ],"outputs":[{"name":"content","node":"invoke","port":"content"}]})),
     };
     let mut definition = configured_tools(BTreeMap::from([("invoke".into(), tool)]));

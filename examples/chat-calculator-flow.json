@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-28",
+  "version": "2026-11-28",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -71,10 +71,7 @@
       },
       "inputs": {
         "calculator_interface": {
-          "from": {
-            "node": "calculator",
-            "port": "properties"
-          }
+          "$ref": "calculator.properties"
         }
       }
     },
@@ -88,10 +85,7 @@
       },
       "inputs": {
         "calculator": {
-          "from": {
-            "node": "calculator",
-            "port": "value"
-          }
+          "$ref": "calculator.value"
         }
       }
     },
@@ -103,40 +97,22 @@
       },
       "inputs": {
         "params.tools": {
-          "from": {
-            "node": "tools",
-            "port": "value"
-          }
+          "$ref": "tools.value"
         },
         "params.messages": {
-          "from": {
-            "node": "params",
-            "port": "messages"
-          }
+          "$ref": "params.messages"
         },
         "params.model": {
-          "from": {
-            "node": "params",
-            "port": "model"
-          }
+          "$ref": "params.model"
         },
         "params.base_url": {
-          "from": {
-            "node": "params",
-            "port": "base_url"
-          }
+          "$ref": "params.base_url"
         },
         "params.api_key": {
-          "from": {
-            "node": "params",
-            "port": "api_key"
-          }
+          "$ref": "params.api_key"
         },
         "params.tool_properties": {
-          "from": {
-            "node": "tool_properties",
-            "port": "value"
-          }
+          "$ref": "tool_properties.value"
         }
       }
     },
@@ -157,28 +133,16 @@
       },
       "inputs": {
         "status": {
-          "from": {
-            "node": "agent",
-            "port": "status"
-          }
+          "$ref": "agent.status"
         },
         "messages": {
-          "from": {
-            "node": "agent",
-            "port": "messages"
-          }
+          "$ref": "agent.messages"
         },
         "usages": {
-          "from": {
-            "node": "agent",
-            "port": "usages"
-          }
+          "$ref": "agent.usages"
         },
         "error": {
-          "from": {
-            "node": "agent",
-            "port": "error"
-          }
+          "$ref": "agent.error"
         }
       }
     }

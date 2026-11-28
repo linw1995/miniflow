@@ -139,15 +139,12 @@ fn definition() -> Value {
             {
               "id": "collect",
               "kind": "test.accumulate",
-              "config": { "max_items": 3, "max_wait_ms": 250 }
+              "config": { "max_items": 3, "max_wait_ms": 250 },
+              "inputs":{"item":{"$ref":"feed.item"}}
             },
-            { "id": "consume", "kind": "builtin.identity" }
+            { "id": "consume", "kind": "builtin.identity", "inputs":{"input":{"$ref":"collect.items"}} }
           , controlled::source(json!("int"))
     ],
-          "edges": [
-            { "from_node": "feed", "from_output": "item", "to_node": "collect", "to_input": "item" },
-            { "from_node": "collect", "from_output": "items", "to_node": "consume", "to_input": "input" }
-          ],
           "outputs": [{ "name": "batch", "node": "consume", "port": "value" }]
         })
 }
@@ -201,12 +198,8 @@ fn upstream_close_waits_for_work_already_running_before_flushing_the_tail() {
         .insert("close-upstream".into(), Arc::clone(&probe));
     let mut value = definition();
     value["nodes"][0]["config"]["max_items"] = json!(100);
-    value["nodes"].as_array_mut().unwrap().push(json!({"id":"slow", "kind":"test.capacity_sink", "config":{"key":"close-upstream", "block":true}}));
-    value["edges"][0]["from_node"] = json!("slow");
-    value["edges"][0]["from_output"] = json!("value");
-    value["edges"].as_array_mut().unwrap().push(
-        json!({"from_node":"feed", "from_output":"item", "to_node":"slow", "to_input":"input"}),
-    );
+    value["nodes"].as_array_mut().unwrap().push(json!({"id":"slow", "kind":"test.capacity_sink", "config":{"key":"close-upstream", "block":true}, "inputs":{"input":{"$ref":"feed.item"}}}));
+    value["nodes"][0]["inputs"]["item"] = json!({"$ref":"slow.value"});
     let instance = start(value, Arc::new(Clock::default()));
     let _release = Release(Arc::clone(&probe));
     instance.source.clone().send(json!(1)).unwrap();
@@ -234,7 +227,7 @@ fn chained_collectors_seal_all_tails_before_output_is_consumed() {
     let mut value = definition();
     value["nodes"][0]["config"]["max_items"] = json!(2);
     value["nodes"][1] = json!({"id":"consume", "kind":"test.accumulate", "config":{"max_items":2, "max_wait_ms":100}});
-    value["edges"][1]["to_input"] = json!("item");
+    value["nodes"][1]["inputs"]["item"] = json!({"$ref":"collect.items"});
     value["outputs"][0]["port"] = json!("items");
     let instance = start(value, Arc::new(Clock::default()));
     for value in 1..=5 {
@@ -265,7 +258,7 @@ fn a_later_failure_preserves_the_delivered_prefix_and_never_retries() {
         .insert("fail-prefix".into(), Arc::clone(&probe));
     let mut value = definition();
     value["nodes"][0]["config"]["max_items"] = json!(1);
-    value["nodes"][1] = json!({"id":"consume", "kind":"test.capacity_sink", "config":{"key":"fail-prefix", "fail_at":2}});
+    value["nodes"][1] = json!({"id":"consume", "kind":"test.capacity_sink", "config":{"key":"fail-prefix", "fail_at":2}, "inputs":{"input":{"$ref":"collect.items"}}});
     let instance = start(value, Arc::new(Clock::default()));
     for value in 1..=3 {
         instance.source.clone().send(json!(value)).unwrap();
@@ -323,11 +316,10 @@ fn cancellation_suppresses_followup_work_after_a_running_call_returns() {
         .insert("late-following".into(), Arc::clone(&following));
     let mut value = definition();
     value["nodes"][0]["config"]["max_items"] = json!(1);
-    value["nodes"][1] = json!({"id":"consume", "kind":"test.capacity_sink", "config":{"key":"late-running", "block":true}});
+    value["nodes"][1] = json!({"id":"consume", "kind":"test.capacity_sink", "config":{"key":"late-running", "block":true}, "inputs":{"input":{"$ref":"collect.items"}}});
     value["nodes"].as_array_mut().unwrap().push(
-        json!({"id":"following", "kind":"test.capacity_sink", "config":{"key":"late-following"}}),
+        json!({"id":"following", "kind":"test.capacity_sink", "config":{"key":"late-following"}, "inputs":{"input":{"$ref":"consume.value"}}}),
     );
-    value["edges"].as_array_mut().unwrap().push(json!({"from_node":"consume", "from_output":"value", "to_node":"following", "to_input":"input"}));
     value["outputs"][0]["node"] = json!("following");
     let instance = start(value, Arc::new(Clock::default()));
     let _release = Release(Arc::clone(&running));

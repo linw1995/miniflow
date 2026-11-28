@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-13",
+  "version": "2026-11-28",
   "dependencies": {
     "core": {
       "package": "mfn-core"
@@ -82,22 +82,13 @@
       },
       "inputs": {
         "messages": {
-          "from": {
-            "node": "params",
-            "port": "messages"
-          }
+          "$ref": "params.messages"
         },
         "state": {
-          "from": {
-            "node": "params",
-            "port": "state"
-          }
+          "$ref": "params.state"
         },
         "keep_recent_tokens": {
-          "from": {
-            "node": "params",
-            "port": "keep_recent_tokens"
-          }
+          "$ref": "params.keep_recent_tokens"
         }
       }
     },
@@ -124,16 +115,10 @@
       },
       "inputs": {
         "messages": {
-          "from": {
-            "node": "params",
-            "port": "messages"
-          }
+          "$ref": "params.messages"
         },
         "meta": {
-          "from": {
-            "node": "cut_point",
-            "port": "meta"
-          }
+          "$ref": "cut_point.meta"
         }
       }
     },
@@ -156,16 +141,10 @@
       },
       "inputs": {
         "history_messages": {
-          "from": {
-            "node": "slices",
-            "port": "history_messages"
-          }
+          "$ref": "slices.history_messages"
         },
         "turn_prefix_messages": {
-          "from": {
-            "node": "slices",
-            "port": "turn_prefix_messages"
-          }
+          "$ref": "slices.turn_prefix_messages"
         }
       }
     },
@@ -187,10 +166,7 @@
       },
       "inputs": {
         "flags": {
-          "from": {
-            "node": "detect_content",
-            "port": "flags"
-          }
+          "$ref": "detect_content.flags"
         }
       }
     },
@@ -211,16 +187,10 @@
       },
       "inputs": {
         "messages": {
-          "from": {
-            "node": "params",
-            "port": "messages"
-          }
+          "$ref": "params.messages"
         },
         "previous_index": {
-          "from": {
-            "node": "slices",
-            "port": "previous_index"
-          }
+          "$ref": "slices.previous_index"
         }
       }
     },
@@ -244,22 +214,13 @@
       },
       "inputs": {
         "messages": {
-          "from": {
-            "node": "params",
-            "port": "messages"
-          }
+          "$ref": "params.messages"
         },
         "previous_index": {
-          "from": {
-            "node": "slices",
-            "port": "previous_index"
-          }
+          "$ref": "slices.previous_index"
         },
         "summarized_messages": {
-          "from": {
-            "node": "slices",
-            "port": "summarized_messages"
-          }
+          "$ref": "slices.summarized_messages"
         }
       }
     },
@@ -286,28 +247,16 @@
       },
       "inputs": {
         "messages": {
-          "from": {
-            "node": "params",
-            "port": "messages"
-          }
+          "$ref": "params.messages"
         },
         "previous_index": {
-          "from": {
-            "node": "slices",
-            "port": "previous_index"
-          }
+          "$ref": "slices.previous_index"
         },
         "summarized_messages": {
-          "from": {
-            "node": "slices",
-            "port": "summarized_messages"
-          }
+          "$ref": "slices.summarized_messages"
         },
         "modified_files": {
-          "from": {
-            "node": "modified_files",
-            "port": "value"
-          }
+          "$ref": "modified_files.value"
         }
       }
     },
@@ -332,28 +281,16 @@
       },
       "inputs": {
         "history_messages": {
-          "from": {
-            "node": "slices",
-            "port": "history_messages"
-          }
+          "$ref": "slices.history_messages"
         },
         "turn_prefix_messages": {
-          "from": {
-            "node": "slices",
-            "port": "turn_prefix_messages"
-          }
+          "$ref": "slices.turn_prefix_messages"
         },
         "has_history": {
-          "from": {
-            "node": "plan_flags",
-            "port": "has_history"
-          }
+          "$ref": "plan_flags.has_history"
         },
         "has_turn_prefix": {
-          "from": {
-            "node": "plan_flags",
-            "port": "has_turn_prefix"
-          }
+          "$ref": "plan_flags.has_turn_prefix"
         }
       }
     },
@@ -382,58 +319,31 @@
       },
       "inputs": {
         "texts": {
-          "from": {
-            "node": "format_transcripts",
-            "port": "texts"
-          }
+          "$ref": "format_transcripts.texts"
         },
         "has_history": {
-          "from": {
-            "node": "plan_flags",
-            "port": "has_history"
-          }
+          "$ref": "plan_flags.has_history"
         },
         "has_turn_prefix": {
-          "from": {
-            "node": "plan_flags",
-            "port": "has_turn_prefix"
-          }
+          "$ref": "plan_flags.has_turn_prefix"
         },
         "previous_summary": {
-          "from": {
-            "node": "previous_summary",
-            "port": "value"
-          }
+          "$ref": "previous_summary.value"
         },
         "custom_instructions": {
-          "from": {
-            "node": "params",
-            "port": "custom_instructions"
-          }
+          "$ref": "params.custom_instructions"
         },
         "system_prompt": {
-          "from": {
-            "node": "system_prompt",
-            "port": "value"
-          }
+          "$ref": "system_prompt.value"
         },
         "summarization_prompt": {
-          "from": {
-            "node": "summarization_prompt",
-            "port": "value"
-          }
+          "$ref": "summarization_prompt.value"
         },
         "update_summarization_prompt": {
-          "from": {
-            "node": "update_summarization_prompt",
-            "port": "value"
-          }
+          "$ref": "update_summarization_prompt.value"
         },
         "turn_prefix_prompt": {
-          "from": {
-            "node": "turn_prefix_prompt",
-            "port": "value"
-          }
+          "$ref": "turn_prefix_prompt.value"
         }
       }
     }

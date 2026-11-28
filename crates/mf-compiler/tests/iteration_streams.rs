@@ -14,7 +14,7 @@ fn definition(mode: &str, config: Value) -> Value {
         "nodes":[{"id":"each","kind":"builtin.iteration","config":{
             "mode":mode,"stream_outputs":{"increment":{"node":"step","port":"delta"}},
             "body":{"version":"2026-10-28", "dependencies":{}, "nodes":[{"id":"step","kind":"fixture.iteration_stream","config":config,
-                "inputs":{"count":{"from":{"node":"%iteration","port":"item"}}}}],
+                "inputs":{"count":{"$ref":"%iteration.item"}}}],
                 "outputs": [{"name":"result", "node":"step","port":"total"}]}
         }}],
         "outputs":[{"name":"increment","node":"each","port":"increment"},
@@ -262,7 +262,7 @@ fn parallel_iterations_forward_called_flow_streams_with_item_observation() {
         json!({"increment":{"node":"invoke","port":"delta"}});
     value["nodes"][0]["config"]["body"] = json!({"version":"2026-10-28", "dependencies":{},
         "nodes":[{"id":"invoke","kind":"workflow.call","config":{"flow":"child","body":child},
-            "inputs":{"step.count":{"from":{"node":"%iteration","port":"item"}}}}],
+            "inputs":{"step.count":{"$ref":"%iteration.item"}}}],
         "outputs": [{"name":"result", "node":"invoke","port":"count"}]
     });
     value["execution"] = json!({"limits":{"workers":2,"max_pending_messages":2}});

@@ -153,7 +153,7 @@ fn calls_export_loop_streams_without_exposing_loop_state() {
         "nodes":[{"id":"repeat","kind":"loop.run","config":{
             "max_iterations":2,"variables":[{"name":"count","type":"usize"}],
             "stream_outputs":{"delta":{"node":"step","port":"delta"}},
-            "body":{"version":"2026-10-28", "dependencies":{}, "nodes":[{"id":"step","kind":"fixture.task_stream","inputs":{"count":{"from":{"node":"%loop","port":"count"}}}}]}
+            "body":{"version":"2026-10-28", "dependencies":{}, "nodes":[{"id":"step","kind":"fixture.task_stream","inputs":{"count":{"$ref":"%loop.count"}}}]}
         }}],
         "outputs":[{"name":"increment","node":"repeat","port":"delta"}, {"name":"count","node":"repeat","port":"count"}]
     });
@@ -225,7 +225,7 @@ fn public_stream_requiredness_is_preserved_independently_of_the_source_port() {
             if multiple_sources {
                 leaf["nodes"].as_array_mut().unwrap().push(json!({
                     "id":"other","kind":"fixture.task_stream",
-                    "inputs":{"count":{"from":{"node":"step","port":"total"}}}
+                    "inputs":{"count":{"$ref":"step.total"}}
                 }));
                 leaf["outputs"].as_array_mut().unwrap().push(json!({
                     "name":"other","node":"other","port":"delta","optional":true
@@ -254,8 +254,8 @@ fn wired_child(config: Value) -> Value {
     json!({"version":"2026-10-28", "nodes":[
         {"id":"step","kind":"fixture.task_stream","config":config},
         {"id":"buffer","kind":"builtin.batch","config":{"max_items":2,"max_wait_ms":60000},
-         "inputs":{"item":{"from":{"node":"step","port":"delta"}}}},
-        {"id":"copy","kind":"builtin.identity","inputs":{"input":{"from":{"node":"buffer","port":"items"}}}}
+         "inputs":{"item":{"$ref":"step.delta"}}},
+        {"id":"copy","kind":"builtin.identity","inputs":{"input":{"$ref":"buffer.items"}}}
     ], "outputs":[{"name":"increment","node":"copy","port":"value"},{"name":"count","node":"step","port":"total"}]})
 }
 
@@ -397,7 +397,9 @@ fn a_task_stream_edge_alone_schedules_a_callable_body_and_preserves_cancellation
     let root = tempfile::tempdir().unwrap();
     let mut leaf = child(json!({"wait_path":root.path().join("unreleased")}));
     leaf["version"] = json!("2026-10-28");
-    leaf["nodes"].as_array_mut().unwrap().push(json!({"id":"copy","kind":"builtin.identity","inputs":{"input":{"from":{"node":"step","port":"delta"}}}}));
+    leaf["nodes"].as_array_mut().unwrap().push(
+        json!({"id":"copy","kind":"builtin.identity","inputs":{"input":{"$ref":"step.delta"}}}),
+    );
     leaf["outputs"][0] = json!({"name":"increment","node":"copy","port":"value"});
     let flow = callable(leaf);
     let mut ctx = mf_runtime::ExecutionContext::default();
@@ -464,7 +466,7 @@ fn reconstructed_operators_must_still_match_their_prepared_contract() {
 fn pure_producer_runs_inside_a_call_and_a_rejected_delivery_cancels_its_receiver() {
     let flow = callable(json!({"version":"2026-10-28","nodes":[
         {"id":"feed","kind":"fixture.task_stream_feed","config":{"counts":[1,2,3]}},
-        {"id":"copy","kind":"builtin.identity","inputs":{"input":{"from":{"node":"feed","port":"count"}}}},
+        {"id":"copy","kind":"builtin.identity","inputs":{"input":{"$ref":"feed.count"}}},
         {"id":"startup","kind":"builtin.constant","config":{"value":42}}
     ],"outputs":[{"name":"increment","node":"copy","port":"value"},{"name":"count","node":"startup","port":"value"}]}));
     let mut ctx = mf_runtime::ExecutionContext::default();
@@ -501,15 +503,17 @@ fn pure_producer_runs_inside_a_call_and_a_rejected_delivery_cancels_its_receiver
 fn child_streams_reject_cross_domain_joins_and_fail_before_returning_the_startup_frame() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let mut invalid = wired_child(json!({}));
-    invalid["nodes"].as_array_mut().unwrap().push(json!({"id":"join","kind":"fixture.task_stream_join", "inputs":{
-        "delta":{"from":{"node":"step","port":"delta"}}, "total":{"from":{"node":"step","port":"total"}}}}));
+    invalid["nodes"].as_array_mut().unwrap().push(
+        json!({"id":"join","kind":"fixture.task_stream_join", "inputs":{
+        "delta":{"$ref":"step.delta"}, "total":{"$ref":"step.total"}}}),
+    );
     let error = compile_definition(&serde_json::from_value(caller(invalid)).unwrap(), &registry)
         .unwrap_err();
     assert!(error.to_string().contains("one message domain"), "{error}");
 
     let mut leaf = wired_child(json!({}));
     // A downstream failure must suppress even an independently selected startup result.
-    leaf["nodes"].as_array_mut().unwrap().push(json!({"id":"fail","kind":"fixture.iteration_stream", "config":{"fail_count":0}, "inputs":{"count":{"from":{"node":"step","port":"delta"}}}}));
+    leaf["nodes"].as_array_mut().unwrap().push(json!({"id":"fail","kind":"fixture.iteration_stream", "config":{"fail_count":0}, "inputs":{"count":{"$ref":"step.delta"}}}));
     let mut parent = caller(leaf);
     parent["outputs"]
         .as_array_mut()
@@ -625,9 +629,9 @@ fn calls_forward_parallel_iteration_streams_and_keep_collected_results() {
     let body = json!({"version":"2026-10-28","dependencies":{},
         "nodes":[
             {"id":"items","kind":"builtin.constant","config":{"value":[1,2]}},
-            {"id":"each","kind":"builtin.iteration","inputs":{"items":{"from":{"node":"items","port":"value"}}},
+            {"id":"each","kind":"builtin.iteration","inputs":{"items":{"$ref":"items.value"}},
              "config":{"mode":"parallel","stream_outputs":{"result":{"node":"step","port":"delta"}},
-                "body":{"version":"2026-10-28", "dependencies":{}, "nodes":[{"id":"step","kind":"fixture.iteration_stream","inputs":{"count":{"from":{"node":"%iteration","port":"item"}}}}],
+                "body":{"version":"2026-10-28", "dependencies":{}, "nodes":[{"id":"step","kind":"fixture.iteration_stream","inputs":{"count":{"$ref":"%iteration.item"}}}],
                         "outputs": [{"name":"result", "node":"step","port":"total"}]}}}
         ],
         "outputs":[{"name":"increment","node":"each","port":"result"},{"name":"count","node":"each","port":"results"}]

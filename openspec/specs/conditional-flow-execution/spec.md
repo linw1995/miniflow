@@ -38,8 +38,7 @@ derived as `N + 1 >= 2`.
 
 ### Requirement: Separate incoming activation from condition data access
 
-Legacy definitions SHALL retain data `edges` and output-based `control_edges`. Version `2026-10-19` SHALL use node-local
-inputs and unified execution edges, rejecting `control_edges`. Output gates SHALL activate on produced values including
+Definitions SHALL use node-local `$ref` inputs and unified execution edges, rejecting `control_edges`. Output gates SHALL activate on produced values including
 false/null; success edges SHALL require same-frame Task success. Skipped prerequisites SHALL skip the target. All
 logical inputs and execution prerequisites SHALL be conjunctive. Condition references SHALL NOT create dependencies.
 
@@ -58,9 +57,9 @@ logical inputs and execution prerequisites SHALL be conjunctive. Condition refer
 - **WHEN** a control source produces JSON false or null and every other dependency is available
 - **THEN** the target becomes active because control edges check output availability rather than truthiness
 
-#### Scenario: Preserve existing data-only definitions
+#### Scenario: Order a data-only definition
 
-- **WHEN** a legacy definition omits `control_edges`
+- **WHEN** a definition has input bindings and no execution edges
 - **THEN** its existing data bindings and dependency order retain their previous semantics
 
 #### Scenario: Keep a separate gate mandatory after selection

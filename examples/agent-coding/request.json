@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-13",
+  "version": "2026-11-28",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -49,16 +49,10 @@
       },
       "inputs": {
         "messages": {
-          "from": {
-            "node": "params",
-            "port": "messages"
-          }
+          "$ref": "params.messages"
         },
         "root": {
-          "from": {
-            "node": "params",
-            "port": "workspace_root"
-          }
+          "$ref": "params.workspace_root"
         }
       }
     },
@@ -78,10 +72,7 @@
       },
       "inputs": {
         "turns": {
-          "from": {
-            "node": "turns",
-            "port": "starts"
-          }
+          "$ref": "turns.starts"
         }
       }
     },
@@ -107,22 +98,13 @@
       },
       "inputs": {
         "messages": {
-          "from": {
-            "node": "params",
-            "port": "messages"
-          }
+          "$ref": "params.messages"
         },
         "instructions": {
-          "from": {
-            "node": "params",
-            "port": "instructions"
-          }
+          "$ref": "params.instructions"
         },
         "changes": {
-          "from": {
-            "node": "workspaces",
-            "port": "changes"
-          }
+          "$ref": "workspaces.changes"
         }
       }
     }

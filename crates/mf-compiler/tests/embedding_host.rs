@@ -256,7 +256,7 @@ fn embedded_host_preserves_execution_and_build_contracts() {
         match mutation {
             "kind" => invalid["nodes"][0]["kind"] = json!("missing.kind"),
             "config" => invalid["nodes"][0]["config"] = json!({}),
-            "port" => invalid["edges"][0]["from_output"] = json!("missing"),
+            "port" => invalid["nodes"][1]["inputs"]["input"] = json!({"$ref":"source.missing"}),
             _ => unreachable!(),
         }
         fs::write(&answer, invalid.to_string()).unwrap();
@@ -275,7 +275,7 @@ fn embedded_host_preserves_execution_and_build_contracts() {
     fs::write(&answer, definition.to_string()).unwrap();
     assert_build_success(root.path());
     let mut invalid = definition.clone();
-    invalid["edges"][0]["to_node"] = json!("source");
+    invalid["nodes"][0]["inputs"]["input"] = json!({"$ref":"source.value"});
     fs::write(&answer, invalid.to_string()).unwrap();
     let output = build(root.path());
     assert!(!output.status.success());

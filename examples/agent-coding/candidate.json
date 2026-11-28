@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-13",
+  "version": "2026-11-28",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -52,16 +52,10 @@
       },
       "inputs": {
         "messages": {
-          "from": {
-            "node": "params",
-            "port": "generated"
-          }
+          "$ref": "params.generated"
         },
         "root": {
-          "from": {
-            "node": "params",
-            "port": "workspace_root"
-          }
+          "$ref": "params.workspace_root"
         }
       }
     },
@@ -85,22 +79,13 @@
       },
       "inputs": {
         "history": {
-          "from": {
-            "node": "params",
-            "port": "history"
-          }
+          "$ref": "params.history"
         },
         "generated": {
-          "from": {
-            "node": "stamp_workspace",
-            "port": "messages"
-          }
+          "$ref": "stamp_workspace.messages"
         },
         "checkpoint": {
-          "from": {
-            "node": "params",
-            "port": "checkpoint"
-          }
+          "$ref": "params.checkpoint"
         }
       }
     }

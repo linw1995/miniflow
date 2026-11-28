@@ -8,7 +8,9 @@ Bind one node input to explicitly declared alternative outputs while preserving 
 
 ### Requirement: Declare an exclusive input group
 
-Data edges SHALL accept an optional boolean `exclusive`, defaulting to false. Marked edges sharing `to_node` and `to_input` SHALL form one exclusive group with at least two distinct source outputs. All edges binding that input MUST be marked; mixed ordinary and exclusive edges MUST be rejected. The same edge syntax SHALL apply in workflow, loop, and iteration bodies.
+An authored exclusive input SHALL list at least two distinct whole-output references. Each candidate SHALL normalize
+to a data edge marked `exclusive` for the same target port. An ordinary binding normalizes to an unmarked edge;
+mixed bindings MUST be rejected. The same syntax applies in every supported scope.
 
 #### Scenario: Bind alternative requests
 

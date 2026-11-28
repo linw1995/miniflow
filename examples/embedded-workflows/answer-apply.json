@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-28",
+  "version": "2026-11-28",
   "dependencies": {},
   "nodes": [
     {
@@ -39,16 +39,10 @@
       },
       "inputs": {
         "flow": {
-          "from": {
-            "node": "params",
-            "port": "policy"
-          }
+          "$ref": "params.policy"
         },
         "echo.input": {
-          "from": {
-            "node": "params",
-            "port": "value"
-          }
+          "$ref": "params.value"
         }
       }
     }

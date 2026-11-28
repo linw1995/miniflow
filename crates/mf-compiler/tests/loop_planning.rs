@@ -143,21 +143,18 @@ fn definition() -> Value {
                     "until": {"variable": "count", "operator": "gte", "value": 3},
                     "body": {"version":"2026-09-29", "dependencies":{},
                         "nodes": [
-                            {"id": "assign", "kind": "workflow.assign", "config": {"variable": "count"}},
+                            {"id": "assign", "kind": "workflow.assign", "config": {"variable": "count"}, "inputs":{"value":{"$ref":"increment.next"}}},
                             {"id": "increment", "kind": "builtin.code", "config": {
                                 "language": "cel", "inputs": {"count": "int"},
                                 "code": {"next": "count + 1"}
-                            }}
-                        ],
-                        "edges": [
-                            {"from_node": "%loop", "from_output": "count", "to_node": "increment", "to_input": "count"},
-                            {"from_node": "increment", "from_output": "next", "to_node": "assign", "to_input": "value"}
+                            },
+                            "inputs":{"count":{"$ref":"%loop.count"}}}
                         ]
                     }
-                }
+                },
+                "inputs":{"count":{"$ref":"seed.value"}}
             }
         ],
-        "edges": [{"from_node": "seed", "from_output": "value", "to_node": "repeat", "to_input": "count"}],
         "outputs": [{"name": "count", "node": "repeat", "port": "count"}]
     })
 }
@@ -229,7 +226,7 @@ fn plans_and_type_checks_nested_loop_body() {
 fn loop_requires_a_registered_declaration() {
     let mut value = definition();
     value["nodes"].as_array_mut().unwrap().remove(0);
-    value["edges"] = json!([]);
+    value["nodes"][0].as_object_mut().unwrap().remove("inputs");
     let error = compile_definition(&parse(value), &NodeRegistry::default())
         .unwrap_err()
         .to_string();
@@ -270,16 +267,17 @@ fn rejects_old_schema_and_invalid_loop_structure() {
     );
 
     let mut value = definition();
-    value["nodes"][1]["config"]["body"]["edges"][0]["from_node"] = json!("seed");
+    value["nodes"][1]["config"]["body"]["nodes"][0]["inputs"]["count"] =
+        json!({"$ref":"seed.value"});
     assert!(
         plan_definition(&parse(value))
             .unwrap_err()
             .to_string()
-            .contains("unknown source")
+            .contains("expected a source node in this scope")
     );
 
     let mut value = definition();
-    value["nodes"][1]["config"]["body"]["control_edges"] = json!([{
+    value["nodes"][1]["config"]["body"]["edges"] = json!([{
         "from_node": "assign", "from_output": "done", "to_node": "increment"
     }]);
     assert!(
@@ -402,7 +400,7 @@ fn validates_body_plugins_and_loop_port_types() {
         .as_array_mut()
         .unwrap()
         .push(json!({"id": "invalid_inactive", "kind": "missing.plugin"}));
-    inactive["nodes"][1]["config"]["body"]["control_edges"]
+    inactive["nodes"][1]["config"]["body"]["edges"]
         .as_array_mut()
         .unwrap()
         .push(json!({"from_node": "route", "from_output": "stop", "to_node": "invalid_inactive"}));
@@ -658,25 +656,25 @@ fn defaults_and_inputs_definition() -> Value {
                             "language": "cel", "inputs": {"count": "int", "step": "int"},
                             "code": {"next": "count + step"}
                         }, "inputs": {
-                            "count": {"from": {"node": "%loop", "port": "count"}},
-                            "step": {"from": {"node": "%loop", "port": "step"}}
+                            "count": {"$ref":"%loop.count"},
+                            "step": {"$ref":"%loop.step"}
                         }},
                         {"id": "assign_count", "kind": "workflow.assign",
                          "config": {"variable": "count"},
-                         "inputs": {"value": {"from": {"node": "increment", "port": "next"}}}},
+                         "inputs": {"value": {"$ref":"increment.next"}}},
                         {"id": "sum", "kind": "builtin.code", "config": {
                             "language": "cel", "inputs": {"total": "int", "step": "int"},
                             "code": {"next": "total + step"}
                         }, "inputs": {
-                            "total": {"from": {"node": "%loop", "port": "total"}},
-                            "step": {"from": {"node": "%loop", "port": "step"}}
+                            "total": {"$ref":"%loop.total"},
+                            "step": {"$ref":"%loop.step"}
                         }},
                         {"id": "assign_total", "kind": "workflow.assign",
                          "config": {"variable": "total"},
-                         "inputs": {"value": {"from": {"node": "sum", "port": "next"}}}}
+                         "inputs": {"value": {"$ref":"sum.next"}}}
                     ]
                 }
-            }, "inputs": {"step": {"from": {"node": "seed", "port": "value"}}}}
+            }, "inputs": {"step": {"$ref":"seed.value"}}}
         ],
         "outputs": [
             {"name": "count", "node": "repeat", "port": "count"},
@@ -694,7 +692,7 @@ fn loop_defaults_and_shared_inputs_are_optional_and_read_only() {
 
     // An explicit Loop input overrides the variable default.
     let mut bound = defaults_and_inputs_definition();
-    bound["nodes"][1]["inputs"]["count"] = json!({"from": {"node": "seed", "port": "value"}});
+    bound["nodes"][1]["inputs"]["count"] = json!({"$ref":"seed.value"});
     assert_eq!(
         run_in_memory(bound).unwrap(),
         json!({"count": 4, "total": 2})
@@ -746,7 +744,7 @@ fn output_updates_definition() -> Value {
             "body":{"nodes":[
                 {"id":"increment", "kind":"builtin.code", "config":{
                     "language":"cel", "inputs":{"count":"int"}, "code":{"next":"count + 1"}
-                }, "inputs":{"count":{"from":{"node":"%loop", "port":"count"}}}}
+                }, "inputs":{"count":{"$ref":"%loop.count"}}}
             ], "outputs":[
                 {"name":"count", "node":"increment", "port":"next"},
                 {"name":"previous", "node":"%loop", "port":"count"}
@@ -784,10 +782,10 @@ fn exited_output_updates_definition() -> Value {
     let body = &mut value["nodes"][0]["config"]["body"];
     body["nodes"].as_array_mut().unwrap().extend([
         json!({"id":"mark", "kind":"workflow.assign", "config":{"variable":"previous"},
-            "inputs":{"value":{"from":{"node":"increment", "port":"next"}}}}),
+            "inputs":{"value":{"$ref":"increment.next"}}}),
         json!({"id":"exit", "kind":"loop.exit"}),
         json!({"id":"unvisited", "kind":"builtin.identity", "inputs":{
-            "input":{"from":{"node":"increment", "port":"next"}}
+            "input":{"$ref":"increment.next"}
         }}),
     ]);
     // Both wait for the immediate write; the canonical order puts exit first.
@@ -805,7 +803,7 @@ fn nested_output_updates_definition() -> Value {
     inner["id"] = json!("inner");
     inner["config"]["max_iterations"] = json!(1);
     inner["config"].as_object_mut().unwrap().remove("until");
-    inner["inputs"] = json!({"count":{"from":{"node":"%loop", "port":"count"}}});
+    inner["inputs"] = json!({"count":{"$ref":"%loop.count"}});
     let body = &mut value["nodes"][0]["config"]["body"];
     body["nodes"] = json!([inner]);
     body["outputs"][0] = json!({"name":"count", "node":"inner", "port":"count"});
@@ -825,12 +823,12 @@ fn body_outputs_preserve_native_capabilities_and_secret_labels() {
             "variables":[{"name":"function", "type":"flow"}],
             "body":{"nodes":[
                 {"id":"pick", "kind":"builtin.identity", "inputs":{
-                    "input":{"from":{"node":"%loop", "port":"replacement"}}
+                    "input":{"$ref":"%loop.replacement"}
                 }}
             ], "outputs":[{"name":"function", "node":"pick", "port":"value"}]}
         }, "inputs":{
-            "function":{"from":{"node":"params", "port":"function"}},
-            "replacement":{"from":{"node":"params", "port":"function"}}
+            "function":{"$ref":"params.function"},
+            "replacement":{"$ref":"params.function"}
         }}
     ], "outputs":[{"name":"function", "node":"repeat", "port":"function"}]}));
     let capability = ValueRef::from(
@@ -977,7 +975,7 @@ fn required_skips_and_missing_producers_are_not_silent_state_retention() {
     let mut value = output_updates_definition();
     value["nodes"][0]["config"]["body"]["nodes"][0] = json!({
         "id":"increment", "kind":"test.omit_on_second",
-        "inputs":{"index":{"from":{"node":"%loop", "port":"index"}}}
+        "inputs":{"index":{"$ref":"%loop.index"}}
     });
     value["nodes"][0]["config"]["body"]["outputs"][0] = json!({
         "name":"count", "node":"increment", "port":"value", "optional":true
@@ -1064,12 +1062,9 @@ fn exit_definition() -> Value {
         }]}}),
         json!({"id": "exit", "kind": "loop.exit"}),
         json!({"id": "override", "kind": "builtin.constant", "config": {"value": 999}}),
-        json!({"id": "zz_after", "kind": "workflow.assign", "config": {"variable": "count"}}),
+        json!({"id": "zz_after", "kind": "workflow.assign", "config": {"variable": "count"}, "inputs":{"value":{"$ref":"override.value"}}}),
     ]);
-    body["edges"].as_array_mut().unwrap().push(json!({
-        "from_node": "override", "from_output": "value", "to_node": "zz_after", "to_input": "value"
-    }));
-    body["control_edges"] = json!([
+    body["edges"] = json!([
         {"from_node": "assign", "from_output": "done", "to_node": "route"},
         {"from_node": "route", "from_output": "stop", "to_node": "exit"},
         {"from_node": "route", "from_output": "stop", "to_node": "zz_after"}
@@ -1085,30 +1080,21 @@ fn compiled_scope_relationships_execute_independently_of_instruction_labels() {
         .as_array_mut()
         .unwrap()
         .push(json!({"name": "observed", "type": "int"}));
-    authored["edges"].as_array_mut().unwrap().push(json!({
-        "from_node": "seed", "from_output": "value", "to_node": "repeat", "to_input": "observed"
-    }));
+    authored["nodes"][1]["inputs"]["observed"] = json!({"$ref":"seed.value"});
     authored["outputs"].as_array_mut().unwrap().push(json!({
         "name": "observed", "node": "repeat", "port": "observed"
     }));
     let authored_body = &mut authored["nodes"][1]["config"]["body"];
     authored_body["nodes"].as_array_mut().unwrap().extend([
-        json!({"id": "read_updated", "kind": "builtin.identity"}),
-        json!({"id": "capture_updated", "kind": "workflow.assign", "config": {"variable": "observed"}}),
+        json!({"id": "read_updated", "kind": "builtin.identity", "inputs":{"input":{"$ref":"%loop.count"}}}),
+        json!({"id": "capture_updated", "kind": "workflow.assign", "inputs":{"value":{"$ref":"read_updated.value"}}, "config": {"variable": "observed"}}),
     ]);
-    authored_body["edges"].as_array_mut().unwrap().extend([
-        json!({"from_node": "%loop", "from_output": "count", "to_node": "read_updated", "to_input": "input"}),
-        json!({"from_node": "read_updated", "from_output": "value", "to_node": "capture_updated", "to_input": "value"}),
-    ]);
-    authored_body["control_edges"][0] = json!({
+    authored_body["edges"][0] = json!({
         "from_node": "capture_updated", "from_output": "done", "to_node": "route"
     });
-    authored_body["control_edges"]
-        .as_array_mut()
-        .unwrap()
-        .push(json!({
-            "from_node": "assign", "from_output": "done", "to_node": "read_updated"
-        }));
+    authored_body["edges"].as_array_mut().unwrap().push(json!({
+        "from_node": "assign", "from_output": "done", "to_node": "read_updated"
+    }));
     let mut plan = compile_definition(&parse(authored), &registry).unwrap();
     let expected = instantiate_compiled(&plan, &registry)
         .unwrap()
@@ -1211,7 +1197,7 @@ fn skipped_assignment_preserves_previous_value() {
             "operator": "eq", "value": 0}
         }]}
     }));
-    body["control_edges"] = json!([
+    body["edges"] = json!([
         {"from_node": "%loop", "from_output": "index", "to_node": "route"},
         {"from_node": "route", "from_output": "else", "to_node": "assign"}
     ]);
@@ -1228,12 +1214,8 @@ fn nested_definition() -> Value {
     inner["max_iterations"] = json!(1);
     value["nodes"][1]["config"]["body"] = json!({"version":"2026-09-29", "dependencies":{},
         "nodes": [
-            {"id": "inner", "kind": "loop.run", "config": inner},
-            {"id": "assign_outer", "kind": "workflow.assign", "config": {"variable": "count"}}
-        ],
-        "edges": [
-            {"from_node": "%loop", "from_output": "count", "to_node": "inner", "to_input": "count"},
-            {"from_node": "inner", "from_output": "count", "to_node": "assign_outer", "to_input": "value"}
+            {"id": "inner", "kind": "loop.run", "config": inner, "inputs":{"count":{"$ref":"%loop.count"}}},
+            {"id": "assign_outer", "kind": "workflow.assign", "config": {"variable": "count"}, "inputs":{"value":{"$ref":"inner.count"}}}
         ]
     });
     value
@@ -1275,12 +1257,8 @@ fn later_pass_cannot_read_an_omitted_prior_output() {
     value["nodes"][1]["config"]["max_iterations"] = json!(2);
     value["nodes"][1]["config"]["body"] = json!({"version":"2026-09-29", "dependencies":{},
         "nodes": [
-            {"id": "probe", "kind": "test.omit_on_second"},
-            {"id": "sink", "kind": "builtin.identity"}
-        ],
-        "edges": [
-            {"from_node": "%loop", "from_output": "index", "to_node": "probe", "to_input": "index"},
-            {"from_node": "probe", "from_output": "value", "to_node": "sink", "to_input": "input"}
+            {"id": "probe", "kind": "test.omit_on_second", "inputs":{"index":{"$ref":"%loop.index"}}},
+            {"id": "sink", "kind": "builtin.identity", "inputs":{"input":{"$ref":"probe.value"}}}
         ]
     });
     let error = run_in_memory(value).unwrap_err();
@@ -1303,7 +1281,7 @@ fn skipped_definition() -> Value {
             "operator": "eq", "value": 1}
         }]}
     }));
-    value["control_edges"] = json!([
+    value["edges"] = json!([
         {"from_node": "seed", "from_output": "value", "to_node": "route"},
         {"from_node": "route", "from_output": "run", "to_node": "repeat"}
     ]);
@@ -1317,9 +1295,8 @@ fn invalid_assignment_does_not_publish_partial_loop_output() {
     value["nodes"][1]["config"]["body"] = json!({"version":"2026-09-29", "dependencies":{},
         "nodes": [
             {"id": "wrong", "kind": "test.wrong_type"},
-            {"id": "assign", "kind": "workflow.assign", "config": {"variable": "count"}}
-        ],
-        "edges": [{"from_node": "wrong", "from_output": "value", "to_node": "assign", "to_input": "value"}]
+            {"id": "assign", "kind": "workflow.assign", "config": {"variable": "count"}, "inputs":{"value":{"$ref":"wrong.value"}}}
+        ]
     });
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&parse(value), &registry).unwrap();
@@ -1590,9 +1567,8 @@ fn failed_body_emits_a_failed_pass_and_no_loop_success() {
     value["nodes"][1]["config"]["body"] = json!({"version":"2026-09-29", "dependencies":{},
         "nodes": [
             {"id": "wrong", "kind": "test.wrong_type"},
-            {"id": "assign", "kind": "workflow.assign", "config": {"variable": "count"}}
-        ],
-        "edges": [{"from_node": "wrong", "from_output": "value", "to_node": "assign", "to_input": "value"}]
+            {"id": "assign", "kind": "workflow.assign", "config": {"variable": "count"}, "inputs":{"value":{"$ref":"wrong.value"}}}
+        ]
     });
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&parse(value), &registry).unwrap();

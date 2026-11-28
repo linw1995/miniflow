@@ -16,8 +16,7 @@ pub fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let definition: WorkflowDefinition = serde_json::from_value(json!({
         "version":"2026-10-03", "dependencies":{},
-        "nodes":[{"id":"read", "kind":"builtin.readline"},{"id":"copy", "kind":"builtin.identity"}],
-        "edges":[{"from_node":"read", "from_output":"line", "to_node":"copy", "to_input":"input"}],
+        "nodes":[{"id":"read", "kind":"builtin.readline"},{"id":"copy", "kind":"builtin.identity", "inputs":{"input":{"$ref":"read.line"}}}],
         "outputs":[{"name":"value", "node":"copy", "port":"value"}]
     }))?;
     let registry = NodeRegistry::from_inventory()?;

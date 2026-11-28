@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-13",
+  "version": "2026-11-28",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -91,7 +91,7 @@
           "value": "failed"
         },
         "body": {
-          "version": "2026-11-13",
+          "version": "2026-11-28",
           "dependencies": {},
           "nodes": [
             {
@@ -111,10 +111,7 @@
               },
               "inputs": {
                 "messages": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "messages"
-                  }
+                  "$ref": "%loop.messages"
                 }
               }
             },
@@ -150,40 +147,22 @@
               },
               "inputs": {
                 "request": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "messages"
-                  }
+                  "$ref": "%loop.messages"
                 },
                 "generated": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "generated"
-                  }
+                  "$ref": "%loop.generated"
                 },
                 "additions": {
-                  "from": {
-                    "node": "chat",
-                    "port": "messages"
-                  }
+                  "$ref": "chat.messages"
                 },
                 "left": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "usages"
-                  }
+                  "$ref": "%loop.usages"
                 },
                 "right": {
-                  "from": {
-                    "node": "chat",
-                    "port": "usages"
-                  }
+                  "$ref": "chat.usages"
                 },
                 "status": {
-                  "from": {
-                    "node": "chat",
-                    "port": "status"
-                  }
+                  "$ref": "chat.status"
                 }
               }
             }
@@ -235,28 +214,16 @@
       },
       "inputs": {
         "messages": {
-          "from": {
-            "node": "params",
-            "port": "messages"
-          }
+          "$ref": "params.messages"
         },
         "model": {
-          "from": {
-            "node": "params",
-            "port": "model"
-          }
+          "$ref": "params.model"
         },
         "base_url": {
-          "from": {
-            "node": "params",
-            "port": "base_url"
-          }
+          "$ref": "params.base_url"
         },
         "api_key": {
-          "from": {
-            "node": "params",
-            "port": "api_key"
-          }
+          "$ref": "params.api_key"
         }
       }
     },
@@ -277,28 +244,16 @@
       },
       "inputs": {
         "status": {
-          "from": {
-            "node": "repeat",
-            "port": "status"
-          }
+          "$ref": "repeat.status"
         },
         "messages": {
-          "from": {
-            "node": "repeat",
-            "port": "generated"
-          }
+          "$ref": "repeat.generated"
         },
         "usages": {
-          "from": {
-            "node": "repeat",
-            "port": "usages"
-          }
+          "$ref": "repeat.usages"
         },
         "error": {
-          "from": {
-            "node": "repeat",
-            "port": "error"
-          }
+          "$ref": "repeat.error"
         }
       }
     }

@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-28",
+  "version": "2026-11-28",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -43,16 +43,10 @@
       },
       "inputs": {
         "params.policy": {
-          "from": {
-            "node": "policy",
-            "port": "value"
-          }
+          "$ref": "policy.value"
         },
         "params.value": {
-          "from": {
-            "node": "params",
-            "port": "value"
-          }
+          "$ref": "params.value"
         }
       }
     }

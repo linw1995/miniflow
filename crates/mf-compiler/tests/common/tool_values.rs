@@ -14,7 +14,7 @@ pub struct FlowTool {
 }
 
 fn edge(node: &str, port: &str) -> Value {
-    json!({"from":{"node":node,"port":port}})
+    json!({"$ref":format!("{node}.{port}")})
 }
 
 fn local_dependencies() -> Value {

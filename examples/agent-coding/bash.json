@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-13",
+  "version": "2026-11-28",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -43,16 +43,10 @@
       },
       "inputs": {
         "command": {
-          "from": {
-            "node": "params",
-            "port": "command"
-          }
+          "$ref": "params.command"
         },
         "timeout": {
-          "from": {
-            "node": "params",
-            "port": "timeout"
-          }
+          "$ref": "params.timeout"
         }
       }
     }

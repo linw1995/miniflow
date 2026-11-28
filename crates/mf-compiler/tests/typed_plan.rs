@@ -90,8 +90,7 @@ inventory::submit! { mf_runtime::NodeRegistration { kind: "test.generated_plan",
 
 fn chain() -> Value {
     json!({ "version": "2026-10-03", "dependencies": {},
-        "nodes": [{"id":"a", "kind":"test.generated_plan"}, {"id":"b", "kind":"test.generated_plan"}, {"id":"c", "kind":"test.generated_plan"}],
-        "edges": [{"from_node":"a", "from_output":"value", "to_node":"b", "to_input":"value"}, {"from_node":"b", "from_output":"value", "to_node":"c", "to_input":"value"}],
+        "nodes": [{"id":"a", "kind":"test.generated_plan"}, {"id":"b", "kind":"test.generated_plan", "inputs":{"value":{"$ref":"a.value"}}}, {"id":"c", "kind":"test.generated_plan", "inputs":{"value":{"$ref":"b.value"}}}],
         "outputs": [{"name":"result", "node":"c", "port":"value"}]
     })
 }
@@ -190,16 +189,12 @@ fn exclusive_inputs_apply_boundary_sensitivity_before_snapshots() {
                 }]}},
                 {"id":"left", "kind":"builtin.constant", "config":{"value":"left-credential"}},
                 {"id":"right", "kind":"builtin.constant", "config":{"value":"right-credential"}},
-                {"id":"consume", "kind":"test.generated_plan", "config":{"type":"shared", "binding":{"secret":true}}}
+                {"id":"consume", "kind":"test.generated_plan", "config":{"type":"shared", "binding":{"secret":true}}, "inputs":{"value":{"exclusive":[{"$ref":"left.value"}, {"$ref":"right.value"}]}}}
             ],
-            "control_edges":[
+            "edges":[
                 {"from_node":"condition", "from_output":"value", "to_node":"route"},
                 {"from_node":"route", "from_output":"left", "to_node":"left"},
                 {"from_node":"route", "from_output":"else", "to_node":"right"}
-            ],
-            "edges":[
-                {"from_node":"left", "from_output":"value", "to_node":"consume", "to_input":"value", "exclusive":true},
-                {"from_node":"right", "from_output":"value", "to_node":"consume", "to_input":"value", "exclusive":true}
             ],
             "outputs":[{"name":"result", "node":"consume", "port":"value"}]
         })).unwrap();
@@ -292,12 +287,11 @@ fn optional_representation_and_refinement_evidence_remain_dynamic() {
 #[test]
 fn fan_out_and_control_readers_prevent_moves() {
     let mut value = chain();
-    value["edges"][1] =
-        json!({"from_node":"a", "from_output":"value", "to_node":"c", "to_input":"value"});
+    value["nodes"][2]["inputs"]["value"] = json!({"$ref":"a.value"});
     let (_, plan) = planned(value);
     assert!(plan.segments.is_empty());
     let mut value = chain();
-    value["control_edges"] = json!([{"from_node":"a", "from_output":"value", "to_node":"b"}]);
+    value["edges"] = json!([{"from_node":"a", "from_output":"value", "to_node":"b"}]);
     let (_, plan) = planned(value);
     assert_eq!(
         plan.connections[0].fallback,
@@ -310,7 +304,6 @@ fn dynamic_providers_and_declaration_order_have_stable_reports() {
     let (_, expected) = planned(chain());
     let mut reordered = chain();
     reordered["nodes"].as_array_mut().unwrap().reverse();
-    reordered["edges"].as_array_mut().unwrap().reverse();
     assert_eq!(planned(reordered).1, expected);
     let mut dynamic = chain();
     dynamic["nodes"][1]["config"] = json!({"dynamic":true});

@@ -101,7 +101,8 @@ required flags, and runtime resource declarations. Inspection reads the embedded
 Description version `2026-10-19` adds `order_edges` to root and body graphs. Each entry contains only `from_node` and
 `to_node`, identifying a Task-success prerequisite. These edges participate in identity, ordering, initial-node
 interface validation, and skip-cause validation. Output gates remain in the inspection model's `control_edges`; these
-inspection fields are distinct from the authoring format.
+inspection fields are distinct from the authoring format. A node-local `$ref` appears in `data_edges`, with
+`exclusive: true` for each candidate of an exclusive input. A configuration `$ref` alone creates no edge.
 
 Earlier supported descriptions use finite event schema `7` or streaming schema `8`. Description
 `2026-11-09` adds definition-origin-aware Flow scopes and uses finite schema `9` or streaming schema `10`.
@@ -127,7 +128,7 @@ Graph-relative event validation checks workflow/node identity, position, sequenc
 
 ## Embedded manifest format
 
-Manifest payload version `2026-11-27` separates original definition resources from a public inspection projection.
+Manifest payload version `2026-11-28` separates original definition resources from a public inspection projection.
 `definition` retains the root declaration; `entry` and `sources` identify the captured UTF-8 definition resources.
 The `descriptor` contains the validated observation `description` and prepared `input_schema`, including workflow identity,
 actual execution mode, child observation scopes, provider-declared types, bindings, and conditional stdin ownership.

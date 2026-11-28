@@ -5,11 +5,11 @@ use mf_runtime::{PreparedStream, StreamOptions, TextInput, WorkflowArguments};
 use serde_json::{Value, json};
 use std::{fs, fs::File};
 
-fn prepare(nodes: Value, edges: Value) -> PreparedStream {
+fn prepare(nodes: Value) -> PreparedStream {
     let definition = WorkflowDefinition::from_json(
         &json!({
             "version":"2026-10-03", "execution":{}, "dependencies":{},
-            "nodes":nodes, "edges":edges,
+            "nodes":nodes,
             "outputs":[{"name":"text", "node":"read", "port":"line"}]
         })
         .to_string(),
@@ -37,7 +37,6 @@ fn readline_uses_initial_or_upstream_paths_and_stdin_as_text() {
     let modes = modes.chain(["symlink"]);
     for mode in modes {
         let mut nodes = json!([{"id":"read", "kind":"builtin.readline"}]);
-        let mut edges = json!([]);
         let mut options = StreamOptions::default();
         match mode {
             "initial" => options.arguments = arguments(json!({"read.path":path})),
@@ -52,11 +51,11 @@ fn readline_uses_initial_or_upstream_paths_and_stdin_as_text() {
                     .as_array_mut()
                     .unwrap()
                     .push(json!({"id":"path", "kind":"builtin.constant", "config":{"value":path}}));
-                edges = json!([{"from_node":"path", "from_output":"value", "to_node":"read", "to_input":"path"}]);
+                nodes[0]["inputs"]["path"] = json!({"$ref":"path.value"});
             }
             _ => options.stdin = Some(TextInput::new(File::open(&path).unwrap())),
         }
-        let prepared = prepare(nodes, edges);
+        let prepared = prepare(nodes);
         assert_eq!(
             prepared
                 .plan()
@@ -83,12 +82,9 @@ fn readline_validates_conditional_ownership_and_reports_read_failures() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("lines.txt");
     fs::write(&path, "").unwrap();
-    let prepared = prepare(
-        json!([
-            {"id":"read", "kind":"builtin.readline"}, {"id":"other", "kind":"builtin.readline"}
-        ]),
-        json!([]),
-    );
+    let prepared = prepare(json!([
+        {"id":"read", "kind":"builtin.readline"}, {"id":"other", "kind":"builtin.readline"}
+    ]));
     let schema = prepared.plan().input_schema();
     assert!(schema.stdin_owner(&WorkflowArguments::default()).is_err());
     let files = arguments(json!({"read.path":path, "other.path":path}));
@@ -108,7 +104,7 @@ fn readline_validates_conditional_ownership_and_reports_read_failures() {
     assert!(instance.recv().unwrap().is_none());
     instance.join().unwrap();
 
-    let single = || prepare(json!([{"id":"read", "kind":"builtin.readline"}]), json!([]));
+    let single = || prepare(json!([{"id":"read", "kind":"builtin.readline"}]));
     for values in [
         json!({}),
         json!({"read.path":null}),
@@ -164,7 +160,7 @@ fn readline_rejects_fifos_without_waiting_for_a_writer() {
     };
     if let Some(path) = std::env::var_os("MF_TEST_READLINE_PATH") {
         let path = PathBuf::from(path);
-        let instance = prepare(json!([{"id":"read", "kind":"builtin.readline"}]), json!([]))
+        let instance = prepare(json!([{"id":"read", "kind":"builtin.readline"}]))
             .start_with_options(StreamOptions {
                 arguments: arguments(json!({"read.path":path})),
                 ..Default::default()

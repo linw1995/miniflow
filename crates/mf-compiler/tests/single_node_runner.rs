@@ -85,11 +85,10 @@ fn finite_runner_isolates_noisy_plugins_and_survives_without_build_inputs() {
     let trace = root.path().join("execution.trace");
     let plugin = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/multi-nodes");
     fs::write(&definition, json!({"version":"2026-09-26", "dependencies":{"fixture":{"package":"fixture-multi-nodes", "path":plugin, "features":["fail-execution"]}},
-        "nodes":[{"id":"source", "kind":"fixture.source", "config":{"print":true}}, {"id":"copy.part", "kind":"fixture.echo"},
+        "nodes":[{"id":"source", "kind":"fixture.source", "config":{"print":true}}, {"id":"copy.part", "kind":"fixture.echo", "inputs":{"input":{"$ref":"source.value"}}},
         {"id":"after", "kind":"fixture.context", "config":{"ports":["value"], "required":"value", "outputs":{"value":null}, "trace":trace, "name":"after", "fail":true}},
         {"id":"context", "kind":"fixture.context", "config":{"ports":["value"], "read":"source.value"}}],
-        "edges":[{"from_node":"source", "from_output":"value", "to_node":"copy.part", "to_input":"input"}],
-        "control_edges":[{"from_node":"copy.part", "from_output":"value", "to_node":"after"}, {"from_node":"source", "from_output":"value", "to_node":"context"}],
+        "edges":[{"from_node":"copy.part", "from_output":"value", "to_node":"after"}, {"from_node":"source", "from_output":"value", "to_node":"context"}],
         "outputs":[{"name":"alias", "node":"after", "port":"value"}]
     }).to_string()).unwrap();
     for telemetry in [false, true] {
@@ -217,8 +216,7 @@ fn streaming_binary_selects_finite_typed_tasks_and_rejects_producers_and_events(
     let build = root.path().join("build");
     let core = common::crates_dir().join("builtin-nodes/core");
     fs::write(&definition, json!({"version":"2026-10-03", "execution":{}, "dependencies":{"core":{"package":"mfn-core", "path":core}},
-        "nodes":[{"id":"read", "kind":"builtin.readline"}, {"id":"copy", "kind":"builtin.identity"}, {"id":"batch", "kind":"builtin.batch", "config":{"max_items":2, "max_wait_ms":10}}],
-        "edges":[{"from_node":"read", "from_output":"line", "to_node":"copy", "to_input":"input"}, {"from_node":"read", "from_output":"line", "to_node":"batch", "to_input":"item"}],
+        "nodes":[{"id":"read", "kind":"builtin.readline"}, {"id":"copy", "kind":"builtin.identity", "inputs":{"input":{"$ref":"read.line"}}}, {"id":"batch", "kind":"builtin.batch", "config":{"max_items":2, "max_wait_ms":10}, "inputs":{"item":{"$ref":"read.line"}}}],
         "outputs":[{"name":"line", "node":"copy", "port":"value"}]
     }).to_string()).unwrap();
     for telemetry in [false, true] {
@@ -271,8 +269,7 @@ fn finite_typed_segments_keep_normal_execution_and_isolated_publication_contract
     let binary = root.path().join("flow");
     let build = root.path().join("build");
     let mut value = json!({"version":"2026-10-03", "dependencies":{"core":{"package":"mfn-core", "path":common::crates_dir().join("builtin-nodes/core")}},
-        "nodes":[{"id":"a", "kind":"builtin.identity"}, {"id":"b", "kind":"builtin.identity"}, {"id":"c", "kind":"builtin.identity"}],
-        "edges":[{"from_node":"a", "from_output":"value", "to_node":"b", "to_input":"input"}, {"from_node":"b", "from_output":"value", "to_node":"c", "to_input":"input"}],
+        "nodes":[{"id":"a", "kind":"builtin.identity"}, {"id":"b", "kind":"builtin.identity", "inputs":{"input":{"$ref":"a.value"}}}, {"id":"c", "kind":"builtin.identity", "inputs":{"input":{"$ref":"b.value"}}}],
         "outputs":[{"name":"alias", "node":"c", "port":"value"}]
     });
     fs::write(&definition, value.to_string()).unwrap();

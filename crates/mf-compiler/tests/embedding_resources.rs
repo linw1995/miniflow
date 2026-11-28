@@ -83,7 +83,7 @@ fn host(root: &Path) {
                     "variables":[{"name":"count","type":"int"}],
                     "until":{"variable":"count","operator":"gte","value":3},
                     "body":{"path":"flows/loop-body.json"}
-                },"inputs":{"count":{"from":{"node":"seed","port":"value"}}}}
+                },"inputs":{"count":{"$ref":"seed.value"}}}
             ]),
             json!([{"name":"count","node":"repeat","port":"count"}]),
         ),
@@ -95,7 +95,7 @@ fn host(root: &Path) {
             json!([
                 {"id":"next","kind":"builtin.constant","config":{"value":3}},
                 {"id":"assign","kind":"workflow.assign","config":{"variable":"count"},
-                 "inputs":{"value":{"from":{"node":"next","port":"value"}}}}
+                 "inputs":{"value":{"$ref":"next.value"}}}
             ]),
             json!([]),
         ),
@@ -108,7 +108,7 @@ fn host(root: &Path) {
                 {"id":"source","kind":"builtin.constant","config":{"value":[2,5,8]}},
                 {"id":"each","kind":"builtin.iteration","config":{
                     "mode":"sequential", "body":{"path":"flows/iteration-body.json"}
-                },"inputs":{"items":{"from":{"node":"source","port":"value"}}}}
+                },"inputs":{"items":{"$ref":"source.value"}}}
             ]),
             json!([{"name":"results","node":"each","port":"results"}]),
         ),
@@ -118,7 +118,7 @@ fn host(root: &Path) {
         "flows/iteration-body.json",
         graph(
             json!([{"id":"echo","kind":"builtin.identity",
-                "inputs":{"input":{"from":{"node":"%iteration","port":"item"}}}}]),
+                "inputs":{"input":{"$ref":"%iteration.item"}}}]),
             json!([{"name":"result","node":"echo","port":"value"}]),
         ),
     );

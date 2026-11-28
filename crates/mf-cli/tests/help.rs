@@ -13,9 +13,8 @@ fn manifest() -> WorkflowManifest {
                 "version": "2026-10-03", "dependencies": {},
                 "nodes": [
                     {"id": "source", "kind": "fixture.source"},
-                    {"id": "transform", "kind": "fixture.transform"}
-                ],
-                "edges": [{"from_node": "source", "from_output": "value", "to_node": "transform", "to_input": "amount"}]
+                    {"id": "transform", "kind": "fixture.transform", "inputs":{"amount":{"$ref":"source.value"}}}
+                ]
             },
             "execution_order": ["source", "transform"]
         },
@@ -169,8 +168,8 @@ fn missing_or_invalid_manifests_fail_without_executing_the_file() {
             "invalid" => write_runner(&runner, Some(b"invalid manifest")),
             "obsolete" => {
                 let mut bytes = manifest().to_bytes().unwrap();
-                let pos = bytes.windows(10).position(|w| w == b"2026-11-27").unwrap();
-                bytes[pos..pos + 10].copy_from_slice(b"2026-11-25");
+                let pos = bytes.windows(10).position(|w| w == b"2026-11-28").unwrap();
+                bytes[pos..pos + 10].copy_from_slice(b"2026-11-27");
                 write_runner(&runner, Some(&bytes));
             }
             _ => unreachable!(),

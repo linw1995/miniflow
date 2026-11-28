@@ -60,16 +60,13 @@ inventory::submit! {
     }
 }
 
-fn edge(source: &str, port: &str, target: &str, input: &str) -> Value {
-    json!({"from_node":source, "from_output":port, "to_node":target, "to_input":input})
-}
-fn graph(mut nodes: Value, edges: Vec<Value>) -> Value {
+fn graph(mut nodes: Value) -> Value {
     nodes
         .as_array_mut()
         .unwrap()
         .push(controlled::source(json!("int")));
     json!({"version":"2026-10-03", "execution":{},
-        "dependencies":{}, "nodes":nodes, "edges":edges})
+        "dependencies":{}, "nodes":nodes})
 }
 fn prepare(value: Value) -> Result<mf_runtime::PreparedStream, mf_compiler::WorkflowCompileError> {
     let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
@@ -96,11 +93,7 @@ fn output_channels(plan: &mf_runtime::StreamPlan) -> Vec<usize> {
 
 fn collect_graph() -> Value {
     graph(
-        json!([{"id":"collect", "kind":"test.collect"}, {"id":"copy", "kind":"builtin.identity"}]),
-        vec![
-            edge("feed", "item", "collect", "item"),
-            edge("collect", "items", "copy", "input"),
-        ],
+        json!([{"id":"collect", "inputs":{"item":{"$ref":"feed.item"}}, "kind":"test.collect"}, {"id":"copy", "inputs":{"input":{"$ref":"collect.items"}}, "kind":"builtin.identity"}]),
     )
 }
 
@@ -179,7 +172,7 @@ fn prepares_typed_input_and_new_message_domains_without_execution() {
         ["feed", "collect", "copy"]
     );
     assert_eq!(
-        prepare(graph(json!([]), vec![]))
+        prepare(graph(json!([])))
             .unwrap()
             .plan()
             .message_sources()
@@ -190,18 +183,10 @@ fn prepares_typed_input_and_new_message_domains_without_execution() {
 
 #[test]
 fn validates_fanout_rejoins_chained_batches_and_selected_domains() {
-    let value = graph(
-        json!([
-            {"id":"left", "kind":"builtin.identity"}, {"id":"right", "kind":"builtin.identity"},
-            {"id":"join", "kind":"test.join"}
-        ]),
-        vec![
-            edge("feed", "item", "left", "input"),
-            edge("feed", "item", "right", "input"),
-            edge("left", "value", "join", "left"),
-            edge("right", "value", "join", "right"),
-        ],
-    );
+    let value = graph(json!([
+        {"id":"left", "inputs":{"input":{"$ref":"feed.item"}}, "kind":"builtin.identity"}, {"id":"right", "inputs":{"input":{"$ref":"feed.item"}}, "kind":"builtin.identity"},
+        {"id":"join", "inputs":{"left":{"$ref":"left.value"}, "right":{"$ref":"right.value"}}, "kind":"test.join"}
+    ]));
     let prepared = prepare(value).unwrap();
     assert_eq!(prepared.plan().message_sources().len(), 2);
     assert!(
@@ -211,11 +196,7 @@ fn validates_fanout_rejoins_chained_batches_and_selected_domains() {
     );
 
     let chained = graph(
-        json!([{"id":"first", "kind":"test.collect"}, {"id":"second", "kind":"test.collect"}]),
-        vec![
-            edge("feed", "item", "first", "item"),
-            edge("first", "items", "second", "item"),
-        ],
+        json!([{"id":"first", "inputs":{"item":{"$ref":"feed.item"}}, "kind":"test.collect"}, {"id":"second", "inputs":{"item":{"$ref":"first.items"}}, "kind":"test.collect"}]),
     );
     let prepared = prepare(chained).unwrap();
     assert_eq!(
@@ -224,17 +205,9 @@ fn validates_fanout_rejoins_chained_batches_and_selected_domains() {
     );
     assert_eq!(output_channels(prepared.plan()), [1, 2, 3]);
 
-    let mut independent = graph(
-        json!([
-            {"id":"first", "kind":"test.collect"}, {"id":"second", "kind":"test.collect"}, {"id":"join", "kind":"test.join"}
-        ]),
-        vec![
-            edge("feed", "item", "first", "item"),
-            edge("feed", "item", "second", "item"),
-            edge("first", "items", "join", "left"),
-            edge("second", "items", "join", "right"),
-        ],
-    );
+    let mut independent = graph(json!([
+        {"id":"first", "inputs":{"item":{"$ref":"feed.item"}}, "kind":"test.collect"}, {"id":"second", "inputs":{"item":{"$ref":"feed.item"}}, "kind":"test.collect"}, {"id":"join", "inputs":{"left":{"$ref":"first.items"}, "right":{"$ref":"second.items"}}, "kind":"test.join"}
+    ]));
     let error = prepare(independent.clone()).unwrap_err().to_string();
     assert!(
         error.contains("message domain")
@@ -242,7 +215,7 @@ fn validates_fanout_rejoins_chained_batches_and_selected_domains() {
             && error.contains("second.items"),
         "{error}"
     );
-    independent["edges"][3] = edge("feed", "item", "join", "right");
+    independent["nodes"][2]["inputs"]["right"] = json!({"$ref":"feed.item"});
     assert!(
         prepare(independent)
             .unwrap_err()
@@ -265,7 +238,7 @@ fn validates_fanout_rejoins_chained_batches_and_selected_domains() {
 #[test]
 fn controls_and_context_references_obey_the_message_boundary() {
     let mut value = collect_graph();
-    value["control_edges"] = json!([{"from_node":"feed", "from_output":"item", "to_node":"copy"}]);
+    value["edges"] = json!([{"from_node":"feed", "from_output":"item", "to_node":"copy"}]);
     assert!(
         prepare(value)
             .unwrap_err()
@@ -276,8 +249,7 @@ fn controls_and_context_references_obey_the_message_boundary() {
     value["nodes"].as_array_mut().unwrap().push(json!({"id":"route", "kind":"builtin.if_else", "config":{"branches":[{
         "id":"yes", "condition":{"source":{"output":"feed.item", "path":""}, "operator":"eq", "value":1}
     }]}}));
-    value["control_edges"] =
-        json!([{"from_node":"copy", "from_output":"value", "to_node":"route"}]);
+    value["edges"] = json!([{"from_node":"copy", "from_output":"value", "to_node":"route"}]);
     let error = prepare(value.clone()).unwrap_err().to_string();
     assert!(
         error.contains("context reference") && error.contains("feed.item"),
@@ -303,10 +275,8 @@ fn controls_and_context_references_obey_the_message_boundary() {
 
 #[test]
 fn sources_are_explicit_and_independent_initial_tasks_need_no_trigger() {
-    let mut value = graph(
-        json!([{"id":"constant", "kind":"builtin.constant", "config":{"value":42}}]),
-        vec![],
-    );
+    let mut value =
+        graph(json!([{"id":"constant", "kind":"builtin.constant", "config":{"value":42}}]));
     let prepared = prepare(value.clone()).unwrap();
     assert!(
         prepared
@@ -315,8 +285,7 @@ fn sources_are_explicit_and_independent_initial_tasks_need_no_trigger() {
             .inputs
             .contains_key("constant")
     );
-    value["control_edges"] =
-        json!([{"from_node":"feed", "from_output":"item", "to_node":"constant"}]);
+    value["edges"] = json!([{"from_node":"feed", "from_output":"item", "to_node":"constant"}]);
     let prepared = prepare(value).unwrap();
     assert!(
         !prepared
@@ -326,19 +295,16 @@ fn sources_are_explicit_and_independent_initial_tasks_need_no_trigger() {
             .contains_key("constant")
     );
     let mut value = collect_graph();
-    value["edges"][0]["from_output"] = json!("unknown");
+    value["nodes"][0]["inputs"]["item"] = json!({"$ref":"feed.unknown"});
     assert!(prepare(value).unwrap_err().to_string().contains("unknown"));
 }
 
 #[test]
 fn infers_streaming_at_the_root_and_rejects_events_in_synchronous_bodies() {
-    let mut value = graph(
-        json!([
-            {"id":"source", "kind":"builtin.constant", "config":{"value":1}},
-            {"id":"collect", "kind":"test.collect"}
-        ]),
-        vec![edge("source", "value", "collect", "item")],
-    );
+    let mut value = graph(json!([
+        {"id":"source", "kind":"builtin.constant", "config":{"value":1}},
+        {"id":"collect", "inputs":{"item":{"$ref":"source.value"}}, "kind":"test.collect"}
+    ]));
     value.as_object_mut().unwrap().remove("execution");
     let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
     assert!(
@@ -350,15 +316,11 @@ fn infers_streaming_at_the_root_and_rejects_events_in_synchronous_bodies() {
             .is_some()
     );
 
-    let iteration = json!({"id":"iterate", "kind":"builtin.iteration", "config":{"body":{"version":"2026-10-03", "dependencies":{},
-        "nodes":[{"id":"collect", "kind":"test.collect"}],
-        "edges":[edge("%iteration", "item", "collect", "item")],
+    let iteration = json!({"id":"iterate", "inputs":{"items":{"$ref":"feed.item"}}, "kind":"builtin.iteration", "config":{"body":{"version":"2026-10-03", "dependencies":{},
+        "nodes":[{"id":"collect", "kind":"test.collect", "inputs":{"item":{"$ref":"%iteration.item"}}}],
         "outputs": [{"name":"result", "node":"collect", "port":"items"}]
     }}});
-    let mut value = graph(
-        json!([iteration]),
-        vec![edge("feed", "item", "iterate", "items")],
-    );
+    let mut value = graph(json!([iteration]));
     value["nodes"].as_array_mut().unwrap().last_mut().unwrap()["config"]["item_type"] =
         json!("array");
     let error = prepare(value).unwrap_err().to_string();
@@ -367,17 +329,12 @@ fn infers_streaming_at_the_root_and_rejects_events_in_synchronous_bodies() {
         "{error}"
     );
 
-    let repeat = json!({"id":"repeat", "kind":"loop.run", "config":{
+    let repeat = json!({"id":"repeat", "inputs":{"x":{"$ref":"feed.item"}}, "kind":"loop.run", "config":{
         "max_iterations":1, "variables":[{"name":"x", "type":"int"}], "body":{"version":"2026-10-03", "dependencies":{},
-            "nodes":[{"id":"collect", "kind":"test.collect"}], "edges":[edge("%loop", "x", "collect", "item")]
+            "nodes":[{"id":"collect", "kind":"test.collect", "inputs":{"item":{"$ref":"%loop.x"}}}]
         }
     }});
-    let error = prepare(graph(
-        json!([repeat]),
-        vec![edge("feed", "item", "repeat", "x")],
-    ))
-    .unwrap_err()
-    .to_string();
+    let error = prepare(graph(json!([repeat]))).unwrap_err().to_string();
     assert!(
         error.contains("repeat") && error.contains("synchronous scope"),
         "{error}"

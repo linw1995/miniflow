@@ -171,7 +171,7 @@ those views never deserialize the redundant raw child body. Factories receive th
 configuration alongside authoritative prepared children. Node-owned errors retain their typed sources
 under generic compiler node or child-scope context.
 
-Manifest payload version `2026-11-27` contains the root `definition`, resource `entry` and `sources`,
+Manifest payload version `2026-11-28` contains the root `definition`, resource `entry` and `sources`,
 and a public `descriptor` with observation `description` and prepared `input_schema`. It does not
 serialize compiler graphs or execution layouts. Native `CompiledWorkflow` and `CompiledGraph` do not
 implement Serde, and there is no saved-compiled-plan protocol. Generated projects use `workflow-plan.rs`
@@ -289,10 +289,10 @@ resolve independently, including parallel iterations; candidate values cannot cr
 
 ## Input references and Task success prerequisites
 
-`WorkflowDefinition` is the normalized Rust representation. Parsing version `2026-10-19` converts node-local references
-into canonical data `edges`, output gates into `control_edges`, and node-success prerequisites into `order_edges`.
-Serialization emits the authoring shape for the selected version, including nested bodies. Compiler entry points
-therefore share one complete dependency graph; programmatic callers continue to use canonical connections.
+`WorkflowDefinition` is the normalized Rust representation. In every supported scope, parsing turns node-local
+`$ref` bindings into data `edges`, output gates into `control_edges`, and node-success prerequisites into
+`order_edges`. Serialization always writes data bindings as consumer inputs, never as top-level edges or
+`from` objects. Programmatic callers continue to use typed connections.
 
 Add node-success prerequisites to a prepared builder before executable construction:
 

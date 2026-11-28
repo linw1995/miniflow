@@ -18,7 +18,7 @@ fn definition() -> Value {
         "nodes":[{"id":"repeat","kind":"loop.run","config":{
             "max_iterations":3,"variables":[{"name":"count","type":"usize"}],
             "stream_outputs":{"increment":{"node":"step","port":"delta"}},
-            "body":{"version":"2026-10-28", "dependencies":{}, "nodes":[{"id":"step","kind":"fixture.task_stream","inputs":{"count":{"from":{"node":"%loop","port":"count"}}}}]}
+            "body":{"version":"2026-10-28", "dependencies":{}, "nodes":[{"id":"step","kind":"fixture.task_stream","inputs":{"count":{"$ref":"%loop.count"}}}]}
         }}],
         "outputs":[{"name":"increment","node":"repeat","port":"increment"},{"name":"count","node":"repeat","port":"count"}]
     })
@@ -141,7 +141,7 @@ fn body_output_updates_advance_state_without_collecting_stream_deltas() {
     body["nodes"].as_array_mut().unwrap().push(json!({
         "id":"advance", "kind":"builtin.code", "config":{
             "language":"cel", "inputs":{"total":"int"}, "code":{"next":"total + 1"}
-        }, "inputs":{"total":{"from":{"node":"step", "port":"total"}}}
+        }, "inputs":{"total":{"$ref":"step.total"}}
     }));
     body["outputs"] = json!([{"name":"count", "node":"advance", "port":"next"}]);
     let plan =
@@ -188,7 +188,7 @@ fn nested_loops_compose_stream_exports_without_replacing_loop_variables() {
     let mut inner = inner;
     inner["id"] = "inner".into();
     inner["config"]["max_iterations"] = 2.into();
-    inner["inputs"] = json!({"count":{"from":{"node":"%loop","port":"count"}}});
+    inner["inputs"] = json!({"count":{"$ref":"%loop.count"}});
     value["nodes"][0]["config"]["max_iterations"] = 2.into();
     value["nodes"][0]["config"]["body"]["nodes"] = json!([inner]);
     value["nodes"][0]["config"]["stream_outputs"] =
@@ -345,7 +345,7 @@ fn guarded_definition(enabled: bool, marker: &std::path::Path) -> Value {
     value["nodes"][0]["config"]["body"] = json!({"version":"2026-10-28", "dependencies":{}, "nodes":[
         {"id":"enabled","kind":"builtin.constant","config":{"value":enabled}},
         {"id":"gate","kind":"builtin.if_else","config":{"branches":[{"id":"pass","condition":{"source":{"output":"enabled.value","path":""},"operator":"eq","value":true}}]}},
-        {"id":"ready","kind":"builtin.identity","inputs":{"input":{"from":{"node":"gate","port":"pass"}}}},step
+        {"id":"ready","kind":"builtin.identity","inputs":{"input":{"$ref":"gate.pass"}}},step
     ],"edges":[{"from_node":"enabled","from_output":"value","to_node":"gate"},{"from_node":"ready","to_node":"step"}]});
     value
 }

@@ -2894,7 +2894,7 @@ mod tests {
                     }
                 }},
                 {"id":"apply", "kind":"compiler-test.native-flow-invoker", "inputs":{
-                    "flow":{"from":{"node":"make", "port":"flow"}}
+                    "flow":{"$ref":"make.flow"}
                 }}
             ],
             "outputs":[{"name":"answer", "node":"apply", "port":"answer"}]
@@ -2943,7 +2943,7 @@ mod tests {
                     {"id":"apply", "kind":"workflow.call", "config":{
                         "inputs":[],
                         "outputs":[{"name":"answer", "value_type":"int", "required":true}]
-                    }, "inputs":{"flow":{"from":{"node":"formal", "port":"callback"}}}}
+                    }, "inputs":{"flow":{"$ref":"formal.callback"}}}
                 ],
                 "outputs":[{"name":"answer", "node":"apply", "port":"answer"}]
             }))
@@ -3054,7 +3054,7 @@ mod tests {
             if streaming {
                 authored["nodes"].as_array_mut().unwrap().push(json!({
                     "id":"event", "kind":"compiler-test.origin-event",
-                    "inputs":{"flow":{"from":{"node":"make", "port":"value"}}}
+                    "inputs":{"flow":{"$ref":"make.value"}}
                 }));
             } else {
                 authored["execution"] = json!({});

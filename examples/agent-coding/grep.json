@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-13",
+  "version": "2026-11-28",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -56,34 +56,19 @@
       },
       "inputs": {
         "pattern": {
-          "from": {
-            "node": "params",
-            "port": "pattern"
-          }
+          "$ref": "params.pattern"
         },
         "path": {
-          "from": {
-            "node": "params",
-            "port": "path"
-          }
+          "$ref": "params.path"
         },
         "literal": {
-          "from": {
-            "node": "params",
-            "port": "literal"
-          }
+          "$ref": "params.literal"
         },
         "ignore_case": {
-          "from": {
-            "node": "params",
-            "port": "ignore_case"
-          }
+          "$ref": "params.ignore_case"
         },
         "limit": {
-          "from": {
-            "node": "params",
-            "port": "limit"
-          }
+          "$ref": "params.limit"
         }
       }
     }

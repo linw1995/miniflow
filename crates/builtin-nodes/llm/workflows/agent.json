@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-13",
+  "version": "2026-11-28",
   "dependencies": {
     "core": {
       "package": "mfn-core"
@@ -69,10 +69,7 @@
       },
       "inputs": {
         "params.properties": {
-          "from": {
-            "node": "params",
-            "port": "tool_properties"
-          }
+          "$ref": "params.tool_properties"
         }
       }
     },
@@ -99,10 +96,7 @@
       "kind": "builtin.identity",
       "inputs": {
         "input": {
-          "from": {
-            "node": "params",
-            "port": "compact"
-          }
+          "$ref": "params.compact"
         }
       }
     },
@@ -179,7 +173,7 @@
           "value": "continue"
         },
         "body": {
-          "version": "2026-11-13",
+          "version": "2026-11-28",
           "dependencies": {},
           "flows": {
             "agent-request": {
@@ -201,22 +195,13 @@
               },
               "inputs": {
                 "params.checkpoint": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "checkpoint"
-                  }
+                  "$ref": "%loop.checkpoint"
                 },
                 "params.prefix": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "prefix"
-                  }
+                  "$ref": "%loop.prefix"
                 },
                 "params.generated": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "generated"
-                  }
+                  "$ref": "%loop.generated"
                 }
               }
             },
@@ -228,34 +213,19 @@
               },
               "inputs": {
                 "params.messages": {
-                  "from": {
-                    "node": "request",
-                    "port": "messages"
-                  }
+                  "$ref": "request.messages"
                 },
                 "params.tools": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "tool_definitions"
-                  }
+                  "$ref": "%loop.tool_definitions"
                 },
                 "params.model": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "model"
-                  }
+                  "$ref": "%loop.model"
                 },
                 "params.base_url": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "base_url"
-                  }
+                  "$ref": "%loop.base_url"
                 },
                 "params.api_key": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "api_key"
-                  }
+                  "$ref": "%loop.api_key"
                 }
               }
             },
@@ -279,16 +249,10 @@
               },
               "inputs": {
                 "left": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "usages"
-                  }
+                  "$ref": "%loop.usages"
                 },
                 "right": {
-                  "from": {
-                    "node": "turn",
-                    "port": "usages"
-                  }
+                  "$ref": "turn.usages"
                 }
               }
             },
@@ -306,10 +270,7 @@
               },
               "inputs": {
                 "outcome": {
-                  "from": {
-                    "node": "record_pass",
-                    "port": "outcome"
-                  }
+                  "$ref": "record_pass.outcome"
                 }
               }
             },
@@ -370,16 +331,10 @@
               },
               "inputs": {
                 "generated": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "generated"
-                  }
+                  "$ref": "%loop.generated"
                 },
                 "additions": {
-                  "from": {
-                    "node": "turn",
-                    "port": "messages"
-                  }
+                  "$ref": "turn.messages"
                 }
               }
             },
@@ -391,28 +346,16 @@
               },
               "inputs": {
                 "params.model_call_id": {
-                  "from": {
-                    "node": "collect_usages",
-                    "port": "model_call_id"
-                  }
+                  "$ref": "collect_usages.model_call_id"
                 },
                 "params.calls": {
-                  "from": {
-                    "node": "turn",
-                    "port": "tool_calls"
-                  }
+                  "$ref": "turn.tool_calls"
                 },
                 "params.tools": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "tools"
-                  }
+                  "$ref": "%loop.tools"
                 },
                 "params.tool_properties": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "tool_properties"
-                  }
+                  "$ref": "%loop.tool_properties"
                 }
               }
             },
@@ -436,16 +379,10 @@
               },
               "inputs": {
                 "generated": {
-                  "from": {
-                    "node": "append_assistant",
-                    "port": "generated"
-                  }
+                  "$ref": "append_assistant.generated"
                 },
                 "results": {
-                  "from": {
-                    "node": "dispatch",
-                    "port": "results"
-                  }
+                  "$ref": "dispatch.results"
                 }
               }
             },
@@ -536,28 +473,16 @@
               },
               "inputs": {
                 "flow": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "compact"
-                  }
+                  "$ref": "%loop.compact"
                 },
                 "params.generated": {
-                  "from": {
-                    "node": "append_tool_results",
-                    "port": "generated"
-                  }
+                  "$ref": "append_tool_results.generated"
                 },
                 "params.checkpoint": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "checkpoint"
-                  }
+                  "$ref": "%loop.checkpoint"
                 },
                 "params.usages": {
-                  "from": {
-                    "node": "turn",
-                    "port": "usages"
-                  }
+                  "$ref": "turn.usages"
                 }
               }
             },
@@ -579,22 +504,13 @@
               },
               "inputs": {
                 "previous": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "checkpoint"
-                  }
+                  "$ref": "%loop.checkpoint"
                 },
                 "through": {
-                  "from": {
-                    "node": "append_tool_results",
-                    "port": "through"
-                  }
+                  "$ref": "append_tool_results.through"
                 },
                 "report": {
-                  "from": {
-                    "node": "compact",
-                    "port": "result"
-                  }
+                  "$ref": "compact.result"
                 }
               }
             },
@@ -617,30 +533,21 @@
               },
               "inputs": {
                 "outcome": {
-                  "from": {
-                    "node": "turn",
-                    "port": "outcome"
-                  }
+                  "$ref": "turn.outcome"
                 },
                 "usages": {
-                  "from": {
-                    "node": "collect_usages",
-                    "port": "value"
-                  }
+                  "$ref": "collect_usages.value"
                 },
                 "facts": {
                   "exclusive": [
                     {
-                      "node": "checkpoint",
-                      "port": "facts"
+                      "$ref": "checkpoint.facts"
                     },
                     {
-                      "node": "finished_facts",
-                      "port": "value"
+                      "$ref": "finished_facts.value"
                     },
                     {
-                      "node": "no_compaction",
-                      "port": "value"
+                      "$ref": "no_compaction.value"
                     }
                   ]
                 }
@@ -651,10 +558,7 @@
               "kind": "builtin.identity",
               "inputs": {
                 "input": {
-                  "from": {
-                    "node": "turn",
-                    "port": "error"
-                  }
+                  "$ref": "turn.error"
                 }
               }
             },
@@ -665,12 +569,10 @@
                 "input": {
                   "exclusive": [
                     {
-                      "node": "checkpoint",
-                      "port": "error"
+                      "$ref": "checkpoint.error"
                     },
                     {
-                      "node": "provider_error",
-                      "port": "value"
+                      "$ref": "provider_error.value"
                     }
                   ]
                 }
@@ -691,10 +593,7 @@
               },
               "inputs": {
                 "generated": {
-                  "from": {
-                    "node": "append_assistant",
-                    "port": "generated"
-                  }
+                  "$ref": "append_assistant.generated"
                 }
               }
             },
@@ -715,12 +614,10 @@
                 "generated": {
                   "exclusive": [
                     {
-                      "node": "append_tool_results",
-                      "port": "generated"
+                      "$ref": "append_tool_results.generated"
                     },
                     {
-                      "node": "non_tool_reply",
-                      "port": "generated"
+                      "$ref": "non_tool_reply.generated"
                     }
                   ]
                 }
@@ -755,10 +652,7 @@
                       },
                       "inputs": {
                         "messages": {
-                          "from": {
-                            "node": "empty",
-                            "port": "value"
-                          }
+                          "$ref": "empty.value"
                         }
                       }
                     }
@@ -781,16 +675,10 @@
               },
               "inputs": {
                 "params.prefix": {
-                  "from": {
-                    "node": "reply_generated",
-                    "port": "generated"
-                  }
+                  "$ref": "reply_generated.generated"
                 },
                 "params.generated": {
-                  "from": {
-                    "node": "steering",
-                    "port": "messages"
-                  }
+                  "$ref": "steering.messages"
                 }
               }
             },
@@ -811,16 +699,10 @@
               },
               "inputs": {
                 "additions": {
-                  "from": {
-                    "node": "steering",
-                    "port": "messages"
-                  }
+                  "$ref": "steering.messages"
                 },
                 "outcome": {
-                  "from": {
-                    "node": "turn",
-                    "port": "outcome"
-                  }
+                  "$ref": "turn.outcome"
                 }
               }
             },
@@ -843,16 +725,10 @@
               },
               "inputs": {
                 "generated": {
-                  "from": {
-                    "node": "reply_generated",
-                    "port": "generated"
-                  }
+                  "$ref": "reply_generated.generated"
                 },
                 "outcome": {
-                  "from": {
-                    "node": "record_pass",
-                    "port": "outcome"
-                  }
+                  "$ref": "record_pass.outcome"
                 }
               }
             },
@@ -877,24 +753,20 @@
                 "generated": {
                   "exclusive": [
                     {
-                      "node": "steered_generated",
-                      "port": "messages"
+                      "$ref": "steered_generated.messages"
                     },
                     {
-                      "node": "failed_reply",
-                      "port": "generated"
+                      "$ref": "failed_reply.generated"
                     }
                   ]
                 },
                 "outcome": {
                   "exclusive": [
                     {
-                      "node": "steered_outcome",
-                      "port": "outcome"
+                      "$ref": "steered_outcome.outcome"
                     },
                     {
-                      "node": "failed_reply",
-                      "port": "outcome"
+                      "$ref": "failed_reply.outcome"
                     }
                   ]
                 }
@@ -1062,56 +934,33 @@
         "compact": {
           "exclusive": [
             {
-              "node": "use_policy",
-              "port": "value"
+              "$ref": "use_policy.value"
             },
             {
-              "node": "no_policy",
-              "port": "value"
+              "$ref": "no_policy.value"
             }
           ]
         },
         "prefix": {
-          "from": {
-            "node": "params",
-            "port": "messages"
-          }
+          "$ref": "params.messages"
         },
         "tool_definitions": {
-          "from": {
-            "node": "catalog",
-            "port": "tools"
-          }
+          "$ref": "catalog.tools"
         },
         "tools": {
-          "from": {
-            "node": "params",
-            "port": "tools"
-          }
+          "$ref": "params.tools"
         },
         "model": {
-          "from": {
-            "node": "params",
-            "port": "model"
-          }
+          "$ref": "params.model"
         },
         "base_url": {
-          "from": {
-            "node": "params",
-            "port": "base_url"
-          }
+          "$ref": "params.base_url"
         },
         "api_key": {
-          "from": {
-            "node": "params",
-            "port": "api_key"
-          }
+          "$ref": "params.api_key"
         },
         "tool_properties": {
-          "from": {
-            "node": "params",
-            "port": "tool_properties"
-          }
+          "$ref": "params.tool_properties"
         }
       }
     },
@@ -1137,28 +986,16 @@
       },
       "inputs": {
         "text": {
-          "from": {
-            "node": "repeat",
-            "port": "text"
-          }
+          "$ref": "repeat.text"
         },
         "outcome": {
-          "from": {
-            "node": "repeat",
-            "port": "outcome"
-          }
+          "$ref": "repeat.outcome"
         },
         "error": {
-          "from": {
-            "node": "repeat",
-            "port": "error"
-          }
+          "$ref": "repeat.error"
         },
         "usages": {
-          "from": {
-            "node": "repeat",
-            "port": "usages"
-          }
+          "$ref": "repeat.usages"
         }
       }
     }

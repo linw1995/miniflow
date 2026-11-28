@@ -18,11 +18,10 @@ fn plan(config: Value) -> CompiledWorkflow {
         "version":"2026-09-26", "dependencies":{},
         "nodes":[
             {"id":"a", "kind":"fixture.context", "config":config},
-            {"id":"b", "kind":"fixture.context", "config":{"inputs":["input"],"ports":["value"],"outputs":{"value":2}}},
+            {"id":"b", "kind":"fixture.context", "config":{"inputs":["input"],"ports":["value"],"outputs":{"value":2}}, "inputs":{"input":{"$ref":"a.value"}}},
             {"id":"c", "kind":"fixture.context", "config":{"ports":[],"fail":true}}
         ],
-        "edges":[{"from_node":"a","from_output":"value","to_node":"b","to_input":"input"}],
-        "control_edges":[{"from_node":"a","from_output":"inactive","to_node":"c"}],
+        "edges":[{"from_node":"a","from_output":"inactive","to_node":"c"}],
         "outputs":[{"name":"answer","node":"b","port":"value","optional":true}]
     })).unwrap()).unwrap()
 }
