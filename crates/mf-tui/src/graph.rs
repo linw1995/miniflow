@@ -974,8 +974,34 @@ impl GraphLayout {
         } else {
             vec![EdgeRoute::default(); edges.len()]
         };
-        let (crossings, routing_stats) =
-            routing::route_all(&nodes, &edges, &mut routes, &node_components, limits);
+        let cluster_rects: Vec<_> = description
+            .clusters
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                (!collapsed.contains(&index)).then(|| {
+                    let display: Vec<_> = cluster_members[index]
+                        .iter()
+                        .map(|member| display_of_node[*member])
+                        .collect();
+                    cluster_rect(&nodes, &display)
+                })
+            })
+            .collect();
+        let frame_rects: Vec<_> = cluster_rects
+            .iter()
+            .flatten()
+            .copied()
+            .filter(|rect| rect.width >= 3 && rect.height >= 2)
+            .collect();
+        let (crossings, routing_stats) = routing::route_all_with_frames(
+            &nodes,
+            &edges,
+            &mut routes,
+            &frame_rects,
+            &node_components,
+            limits,
+        );
         let clusters = description
             .clusters
             .iter()
@@ -983,41 +1009,10 @@ impl GraphLayout {
             .map(|(index, cluster)| {
                 let members = &cluster_members[index];
                 let collapsed = collapsed.contains(&index);
-                let rect = if collapsed {
+                let rect = cluster_rects[index].unwrap_or_else(|| {
                     let display = cluster_display[index].expect("collapsed cluster has a display");
                     nodes[display].rect
-                } else {
-                    let display: Vec<_> = members
-                        .iter()
-                        .map(|member| display_of_node[*member])
-                        .collect();
-                    let left = display
-                        .iter()
-                        .map(|index| nodes[*index].rect.x)
-                        .min()
-                        .unwrap_or(MARGIN);
-                    let top = display
-                        .iter()
-                        .map(|index| nodes[*index].rect.y)
-                        .min()
-                        .unwrap_or(MARGIN);
-                    let right = display
-                        .iter()
-                        .map(|index| nodes[*index].rect.x + nodes[*index].rect.width)
-                        .max()
-                        .unwrap_or(left);
-                    let bottom = display
-                        .iter()
-                        .map(|index| nodes[*index].rect.y + nodes[*index].rect.height)
-                        .max()
-                        .unwrap_or(top);
-                    GraphRect {
-                        x: left.saturating_sub(1),
-                        y: top.saturating_sub(1),
-                        width: right.saturating_sub(left.saturating_sub(1)) + 1,
-                        height: bottom.saturating_sub(top.saturating_sub(1)) + 1,
-                    }
-                };
+                });
                 GraphCluster {
                     label: cluster.label.clone(),
                     annotation: cluster.annotation.clone(),
@@ -1681,9 +1676,60 @@ fn arrange_cluster_bands(
     bottom
 }
 
+fn cluster_rect(nodes: &[GraphNode], display: &[usize]) -> GraphRect {
+    let left = display
+        .iter()
+        .map(|index| nodes[*index].rect.x)
+        .min()
+        .unwrap_or(MARGIN);
+    let top = display
+        .iter()
+        .map(|index| nodes[*index].rect.y)
+        .min()
+        .unwrap_or(MARGIN);
+    let right = display
+        .iter()
+        .map(|index| nodes[*index].rect.x + nodes[*index].rect.width)
+        .max()
+        .unwrap_or(left);
+    let bottom = display
+        .iter()
+        .map(|index| nodes[*index].rect.y + nodes[*index].rect.height)
+        .max()
+        .unwrap_or(top);
+    GraphRect {
+        x: left.saturating_sub(1),
+        y: top.saturating_sub(1),
+        width: right.saturating_sub(left.saturating_sub(1)) + 1,
+        height: bottom.saturating_sub(top.saturating_sub(1)) + 1,
+    }
+}
+
 fn row_stride(node: &GraphNode, attachment_spacing: u32) -> u32 {
     // Keep sibling port rows on the same grid so staggered arrivals avoid channel turns.
     (node.rect.height + ROW_GAP).div_ceil(attachment_spacing) * attachment_spacing
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct BorderJunction {
+    horizontal: bool,
+    vertical: bool,
+    left: bool,
+    right: bool,
+    up: bool,
+    down: bool,
+}
+
+impl BorderJunction {
+    fn symbol(self) -> Option<&'static str> {
+        // Ports intentionally open the frame at their attachment row. Only a route that
+        // continues on both sides of a border needs a junction to keep the frame legible.
+        match (self.horizontal, self.vertical) {
+            (true, false) if self.up && self.down => Some("┼"),
+            (false, true) if self.left && self.right => Some("┼"),
+            _ => None,
+        }
+    }
 }
 
 pub struct GraphView<'a> {
@@ -1856,6 +1902,78 @@ impl<'a> GraphView<'a> {
                     .expect("reserved marker bounds"),
                 cell.symbol,
                 self.edge_style(edge),
+            );
+        }
+    }
+
+    fn draw_cluster_junctions(&self, area: Rect, buffer: &mut Buffer) {
+        let mut frames = routing::ObstacleIndex::default();
+        let mut frame_count = 0;
+        for (index, cluster) in self.layout.clusters.iter().enumerate() {
+            if !cluster.collapsed && cluster.rect.width >= 3 && cluster.rect.height >= 2 {
+                frames.insert(Some(index), cluster.rect);
+                frame_count += 1;
+            }
+        }
+        if frame_count == 0 {
+            return;
+        }
+        let mut junctions = BTreeMap::<(u32, u32, usize), BorderJunction>::new();
+        for route in &self.layout.routes {
+            if route.unresolved.is_some() {
+                continue;
+            }
+            for segment in route.segments() {
+                let low = segment.low();
+                let high = segment.high();
+                for &(owner, frame) in frames.candidates(segment) {
+                    let cluster = owner.expect("cluster frame index");
+                    let right = frame.x + frame.width - 1;
+                    let bottom = frame.y + frame.height - 1;
+                    match segment.axis() {
+                        routing::Axis::Horizontal => {
+                            if low.y <= frame.y || low.y >= bottom {
+                                continue;
+                            }
+                            for x in [frame.x, right] {
+                                if low.x <= x && high.x >= x {
+                                    let junction =
+                                        junctions.entry((x, low.y, cluster)).or_default();
+                                    junction.vertical = true;
+                                    junction.left |= low.x < x;
+                                    junction.right |= high.x > x;
+                                }
+                            }
+                        }
+                        routing::Axis::Vertical => {
+                            if low.x <= frame.x || low.x >= right {
+                                continue;
+                            }
+                            for y in [frame.y, bottom] {
+                                if low.y <= y && high.y >= y {
+                                    let junction =
+                                        junctions.entry((low.x, y, cluster)).or_default();
+                                    junction.horizontal = true;
+                                    junction.up |= low.y < y;
+                                    junction.down |= high.y > y;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for ((x, y, cluster), junction) in junctions {
+            let Some(symbol) = junction.symbol() else {
+                continue;
+            };
+            self.put(
+                area,
+                buffer,
+                x,
+                y,
+                symbol,
+                cluster_style(self.layout.cluster_key(cluster).1),
             );
         }
     }
@@ -2874,6 +2992,8 @@ impl Widget for GraphView<'_> {
         for crossing in &self.layout.crossings {
             self.draw_crossing(area, buffer, crossing);
         }
+        // Cluster frames remain legible where connections cross them.
+        self.draw_cluster_junctions(area, buffer);
         for (index, node) in self.layout.nodes.iter().enumerate() {
             self.draw_node(area, buffer, index, node);
         }
