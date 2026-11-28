@@ -1670,7 +1670,7 @@ fn running_display_nodes(layout: &GraphLayout, observations: &[NodeObservation])
     running
         .into_iter()
         .filter(|display| {
-            !layout.is_expanded_body(*display)
+            !layout.is_open_body(*display)
                 || !active_bodies.contains(&(
                     layout.node_path(*display),
                     layout.nodes()[*display].id.clone(),
@@ -3235,10 +3235,7 @@ impl ObservationView {
     }
 
     fn collapse_body_path(&self) -> Option<Vec<String>> {
-        if matches!(
-            self.root.body_display(self.state.selected),
-            Some(BodyDisplay::Expanded | BodyDisplay::Summary)
-        ) {
+        if self.root.is_open_body(self.state.selected) {
             return self.selected_body();
         }
         // A summary can show a leaf without its original Router or Call owners.
@@ -3248,11 +3245,7 @@ impl ObservationView {
             let owner = self
                 .root
                 .display_index_for_scoped_node(&path[..end - 1], &path[end - 1])?;
-            matches!(
-                self.root.body_display(owner),
-                Some(BodyDisplay::Expanded | BodyDisplay::Summary)
-            )
-            .then(|| path[..end].to_vec())
+            self.root.is_open_body(owner).then(|| path[..end].to_vec())
         })
     }
 
@@ -3454,22 +3447,23 @@ impl ObservationView {
         logs: &LogSnapshot,
     ) {
         if !self.state.traces.visible {
+            let selected = self.state.selected;
+            let open = || BodyDisplay::open_for(&self.root.nodes()[selected].kind);
             let result = match key {
                 KeyCode::Char('c') => Some(if let Some(path) = self.selected_body() {
-                    let selected = self.state.selected;
                     let display = match self.root.body_display(selected).unwrap_or_default() {
                         BodyDisplay::Expanded if self.root.can_summarize_body(selected) => {
                             BodyDisplay::Summary
                         }
                         BodyDisplay::Expanded | BodyDisplay::Summary => BodyDisplay::Hidden,
-                        BodyDisplay::Hidden => BodyDisplay::Expanded,
+                        BodyDisplay::Hidden => open(),
                     };
                     self.set_body_state(&path, display)
                 } else {
                     self.toggle_cluster()
                 }),
                 KeyCode::Char('l') => Some(if let Some(path) = self.selected_body() {
-                    self.set_body_state(&path, BodyDisplay::Expanded)
+                    self.set_body_state(&path, open())
                 } else {
                     Ok(())
                 }),
@@ -7939,59 +7933,65 @@ assert not reply.readline()
         assert!(capture.error.is_none());
     }
 
-    #[test]
-    fn router_children_are_visible_before_execution_and_keep_independent_state() {
-        use mf_telemetry::event::ScopePathEntry;
+    fn router_fixture() -> WorkflowDescription {
         use serde_json::json;
 
+        let routes = [("first", "calculate"), ("second", "search")].map(|(route, id)| {
+            json!({
+                "path":[ScopePathEntry::binding_key("execute", route)],
+                "nodes":[{"id":id, "kind":"builtin.code"}], "execution_order":[id],
+                "data_edges":[], "control_edges":[]
+            })
+        });
+        serde_json::from_value(json!({
+            "version":"2026-11-09", "workflow_id":format!("sha256:{}", "b".repeat(64)),
+            "execution":{"mode":"single"}, "nodes":[{"id":"execute", "kind":"builtin.router"}],
+            "execution_order":["execute"], "data_edges":[], "control_edges":[], "loop_bodies":routes
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn router_children_are_visible_before_execution_and_keep_independent_state() {
         let selected = vec![ScopePathEntry::binding_key("execute", "first")];
         let unused = vec![ScopePathEntry::binding_key("execute", "second")];
-        let description: WorkflowDescription = serde_json::from_value(json!({
-            "version":"2026-11-09",
-            "workflow_id":format!("sha256:{}", "b".repeat(64)),
-            "execution":{"mode":"single"},
-            "nodes":[{"id":"execute", "kind":"builtin.router"}],
-            "execution_order":["execute"], "data_edges":[], "control_edges":[],
-            "loop_bodies":[
-                {"path":selected, "nodes":[{"id":"calculate", "kind":"builtin.code"}],
-                 "execution_order":["calculate"], "data_edges":[], "control_edges":[]},
-                {"path":unused, "nodes":[{"id":"search", "kind":"builtin.code"}],
-                 "execution_order":["search"], "data_edges":[], "control_edges":[]}
-            ]
-        }))
-        .unwrap();
-        let mut view = ObservationView::new(&description).unwrap();
+        let description = router_fixture();
+        let view = ObservationView::new(&description).unwrap();
         let execute = view.root.display_index_for_node_id("execute").unwrap();
-        assert_eq!(view.root.body_display(execute), Some(BodyDisplay::Hidden));
+        assert_eq!(view.root.body_display(execute), Some(BodyDisplay::Summary));
+        assert!(view.root.can_summarize_body(execute));
         assert_eq!(
             view.execution
                 .body_display(view.execution.display_index_for_node_id("execute").unwrap()),
-            Some(BodyDisplay::Hidden)
+            Some(BodyDisplay::Summary)
         );
+        let first = view
+            .root
+            .display_index_for_scoped_node(&selected, "calculate")
+            .unwrap();
+        let second = view
+            .root
+            .display_index_for_scoped_node(&unused, "search")
+            .unwrap();
+        assert_eq!(view.root.nodes()[first].id, "calculate");
+        assert_eq!(view.root.nodes()[second].id, "search");
+        assert_eq!(view.root.node_path(first), selected.as_slice());
+        assert_eq!(view.root.node_path(second), unused.as_slice());
         assert!(
             view.pip_layout
                 .display_index_for_scoped_node(&selected, "calculate")
                 .is_some()
         );
-        view.expand_all_bodies();
-        let selected_display = view
-            .root
-            .display_index_for_scoped_node(&selected, "calculate")
-            .unwrap();
-        let unused_display = view
-            .root
-            .display_index_for_scoped_node(&unused, "search")
-            .unwrap();
         let mut snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
             .unwrap()
             .snapshot();
         let observed = inline_observations(&view.root, &description, &snapshot, &BTreeMap::new());
         assert_eq!(
-            observed[view.root.sources(selected_display)[0]].status,
+            observed[view.root.sources(first)[0]].status,
             NodeStatus::Pending
         );
         assert_eq!(
-            observed[view.root.sources(unused_display)[0]].status,
+            observed[view.root.sources(second)[0]].status,
             NodeStatus::Pending
         );
         snapshot.nodes[0].status = NodeStatus::Running;
@@ -8010,23 +8010,73 @@ assert not reply.readline()
         });
         let observed = inline_observations(&view.root, &description, &snapshot, &BTreeMap::new());
         assert_eq!(
-            observed[view.root.sources(selected_display)[0]].status,
+            observed[view.root.sources(first)[0]].status,
             NodeStatus::Running
         );
         assert_eq!(
-            observed[view.root.sources(unused_display)[0]].status,
+            observed[view.root.sources(second)[0]].status,
             NodeStatus::Pending
         );
-        assert_eq!(
-            running_display_nodes(&view.root, &observed),
-            vec![selected_display]
-        );
-        let pips = execution_pips(&view.pip_layout, &observed, &description, &snapshot);
-        assert_eq!(pips.len(), 1);
-        assert_eq!(pips[0].display, selected_display);
+        assert_eq!(running_display_nodes(&view.root, &observed), vec![first]);
         let chat = render_chat_execution(&view, &snapshot);
         assert_eq!(chat.matches(" Running: ").count(), 1, "{chat}");
         assert!(!chat.contains(" Running: execute "), "{chat}");
+    }
+
+    #[test]
+    fn router_toggles_only_between_inline_routes_and_fully_folded() {
+        let description = router_fixture();
+        let mut view = ObservationView::new(&description).unwrap();
+        let reader = ObservationReader::detached(description, RunId::new()).unwrap();
+        let first = [ScopePathEntry::binding_key("execute", "first")];
+        let second = [ScopePathEntry::binding_key("execute", "second")];
+        for (key, expected) in [
+            ('c', BodyDisplay::Hidden),
+            ('c', BodyDisplay::Summary),
+            ('l', BodyDisplay::Summary),
+            ('h', BodyDisplay::Hidden),
+            ('l', BodyDisplay::Summary),
+        ] {
+            view.handle_key(KeyCode::Char(key), &reader);
+            assert_eq!(view.root.nodes()[view.state.selected].id, "execute");
+            assert_eq!(view.root.body_display(view.state.selected), Some(expected));
+            for (path, id) in [(&first, "calculate"), (&second, "search")] {
+                assert_eq!(
+                    view.body_states
+                        .get(path.as_slice())
+                        .copied()
+                        .unwrap_or_default(),
+                    expected
+                );
+                assert_eq!(
+                    view.root.display_index_for_scoped_node(path, id).is_some(),
+                    expected == BodyDisplay::Summary
+                );
+            }
+        }
+        view.state.selected = view
+            .root
+            .display_index_for_scoped_node(&first, "calculate")
+            .unwrap();
+        view.state.sync_scope(&view.root);
+        view.handle_key(KeyCode::Char('d'), &reader);
+        let screen = render_observation_screen(
+            &mut view,
+            &reader,
+            &CaptureView::default(),
+            Duration::ZERO,
+            None,
+            Presentation::Preview,
+        );
+        assert!(screen.contains("calculate (builtin.code)"), "{screen}");
+        view.handle_key(KeyCode::Esc, &reader);
+        view.handle_key(KeyCode::Esc, &reader);
+        assert_eq!(view.root.nodes().len(), 1);
+        assert_eq!(view.root.nodes()[view.state.selected].id, "execute");
+        assert_eq!(
+            view.root.body_display(view.state.selected),
+            Some(BodyDisplay::Hidden)
+        );
     }
 
     fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {

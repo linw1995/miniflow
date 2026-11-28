@@ -36,6 +36,7 @@ const COMPONENT_GAP: u32 = 4;
 const MARGIN: u32 = 2;
 const LAYOUT_STACK_BYTES: usize = 64 * 1024 * 1024;
 const CLUSTER_KIND: &str = "node cluster";
+const ROUTER_KIND: &str = "builtin.router";
 const FLOW_FRAME_NS: u64 = 100_000_000;
 const ACTIVITY_DENSITIES: [&str; 4] = ["▓", "▒", "░", "·"];
 const TRANSFER_PULSE_NS: u64 = 600_000_000;
@@ -83,6 +84,17 @@ pub enum BodyDisplay {
     Hidden,
     Summary,
     Expanded,
+}
+
+impl BodyDisplay {
+    /// A Router's route subgraphs are its entire body, so its summary is already fully open.
+    pub fn open_for(kind: &str) -> Self {
+        if kind == ROUTER_KIND {
+            Self::Summary
+        } else {
+            Self::Expanded
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -186,7 +198,7 @@ impl<'a> InlineBodies<'a> {
             .flat_map(|(path, nodes)| {
                 nodes
                     .iter()
-                    .filter(|node| node.kind == "builtin.router")
+                    .filter(|node| node.kind == ROUTER_KIND)
                     .map(move |node| (path, node.id.as_str()))
             })
             .collect();
@@ -1159,8 +1171,9 @@ impl GraphLayout {
             if paths.is_empty() {
                 continue;
             }
+            let open = BodyDisplay::open_for(&node.kind);
             let mut display = BodyDisplay::Hidden;
-            let mut summarizable = false;
+            let mut summarizable = open == BodyDisplay::Summary;
             let mut attach = |child, mode| {
                 if let Some(existing) = children.get_mut(&node.id) {
                     existing.stack_below(child);
@@ -1175,11 +1188,7 @@ impl GraphLayout {
                 let mut summary = bodies.summary(child_path).peekable();
                 summarizable |= summary.peek().is_some();
                 match bodies.states.get(child_path).copied().unwrap_or_default() {
-                    BodyDisplay::Expanded => attach(
-                        Self::inline_scope(description, child_path, view, bodies, remaining)?,
-                        BodyDisplay::Expanded,
-                    ),
-                    BodyDisplay::Summary => {
+                    BodyDisplay::Summary if open == BodyDisplay::Expanded => {
                         let mut outer_route: Option<&[String]> = None;
                         for binding in summary {
                             // Its own normal layout already accounts for any nested routes.
@@ -1198,6 +1207,10 @@ impl GraphLayout {
                             attach(child, BodyDisplay::Summary);
                         }
                     }
+                    BodyDisplay::Summary | BodyDisplay::Expanded => attach(
+                        Self::inline_scope(description, child_path, view, bodies, remaining)?,
+                        open,
+                    ),
                     BodyDisplay::Hidden => {}
                 }
             }
@@ -1381,6 +1394,13 @@ impl GraphLayout {
 
     pub fn can_summarize_body(&self, display: usize) -> bool {
         self.summarizable_nodes.contains(&display)
+    }
+
+    pub fn is_open_body(&self, display: usize) -> bool {
+        matches!(
+            self.body_display(display),
+            Some(BodyDisplay::Summary | BodyDisplay::Expanded)
+        )
     }
 
     pub fn is_expanded_body(&self, display: usize) -> bool {
@@ -2466,9 +2486,9 @@ impl<'a> GraphView<'a> {
             .sources(index)
             .first()
             .copied()
-            .filter(|_| !self.layout.is_collapsed_cluster(index))
+            .filter(|_| !collapsed)
             .and_then(|source| self.observation(source));
-        let status = if self.layout.is_collapsed_cluster(index) {
+        let status = if collapsed {
             self.display_status(index)
         } else {
             observed.map_or(NodeStatus::Pending, |item| item.status)
@@ -2526,7 +2546,7 @@ impl<'a> GraphView<'a> {
             None => "",
         };
         let title = format!("{marker} {}{fold}", display_line(&node.id));
-        let detail = if self.layout.is_collapsed_cluster(index) {
+        let detail = if collapsed {
             format!("{} nodes | collapsed", self.layout.sources(index).len())
         } else {
             display_line(&node_detail(node, observed, self.elapsed_ns))
