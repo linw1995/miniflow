@@ -100,16 +100,12 @@ fn definition(items: Value, mode: &str, on_error: &str) -> Value {
                 "mode":mode,
                 "on_error":on_error,
                 "body":{"version":"2026-09-26", "dependencies":{},
-                    "nodes":[{"id":"map","kind":"test.iteration_map"}],
-                    "edges":[
-                        {"from_node":"%iteration","from_output":"item","to_node":"map","to_input":"item"},
-                        {"from_node":"%iteration","from_output":"index","to_node":"map","to_input":"index"}
-                    ],
+                    "nodes":[{"id":"map","kind":"test.iteration_map", "inputs":{"item":{"$ref":"%iteration.item"}, "index":{"$ref":"%iteration.index"}}}],
                     "outputs": [{"name":"result", "node":"map","port":"value"}]
                 }
-            }}
+            },
+            "inputs":{"items":{"$ref":"source.value"}}}
         ],
-        "edges":[{"from_node":"source","from_output":"value","to_node":"iteration","to_input":"items"}],
         "outputs":[{"name":"results","node":"iteration","port":"results"}]
     })
 }
@@ -169,11 +165,9 @@ fn iteration_binds_map_keys_values_and_indices_in_each_body() {
                 "language": "cel",
                 "inputs": {"item": "int", "index": "int", "key": "string"},
                 "code": {"value": "key + ':' + string(item * 2 + index)"}
-            }
+            },
+            "inputs":{"key":{"$ref":"%iteration.key"}, "item":{"$ref":"%iteration.item"}, "index":{"$ref":"%iteration.index"}}
         });
-        body["edges"].as_array_mut().unwrap().push(json!({
-            "from_node": "%iteration", "from_output": "key", "to_node": "map", "to_input": "key"
-        }));
         assert_eq!(
             execute(value).unwrap(),
             json!({"results": [":2", "10:5", "2:8", "a/~:11"]})
@@ -314,19 +308,20 @@ fn iteration_rejects_legacy_item_references_for_all_definition_versions() {
         assert_eq!(execute(value.clone()).unwrap(), json!({"results": [2]}));
 
         let mut edge = value.clone();
-        edge["nodes"][1]["config"]["body"]["edges"][0]["from_output"] = json!("items");
+        edge["nodes"][1]["config"]["body"]["nodes"][0]["inputs"]["item"] =
+            json!({"$ref":"%iteration.items"});
         let mut output = value.clone();
         output["nodes"][1]["config"]["body"]["outputs"][0] =
             json!({"name":"result", "node": "%iteration", "port": "items"});
         let mut control = value.clone();
-        control["nodes"][1]["config"]["body"]["control_edges"] = json!([
+        control["nodes"][1]["config"]["body"]["edges"] = json!([
             {"from_node": "%iteration", "from_output": "items", "to_node": "map"}
         ]);
         value["nodes"][1]["config"]["body"] = json!({"version":"2026-09-26", "dependencies":{},
             "nodes": [{"id": "route", "kind": "builtin.if_else", "config": {"branches": [{
                 "id": "one", "condition": {"source": {"output": "%iteration.items", "path": ""}, "operator": "eq", "value": 1}
             }]}}],
-            "control_edges": [{"from_node": "%iteration", "from_output": "item", "to_node": "route"}],
+            "edges": [{"from_node": "%iteration", "from_output": "item", "to_node": "route"}],
             "outputs": [{"name":"result", "node": "route", "port": "one"}]
         });
         for invalid in [edge, output, control, value] {
@@ -351,10 +346,6 @@ fn iteration_body_order_is_canonical_in_the_compiled_plan() {
         .push(json!({"id":"unused","kind":"builtin.constant","config":{"value":7}}));
     let mut reordered = first.clone();
     reordered["nodes"][1]["config"]["body"]["nodes"]
-        .as_array_mut()
-        .unwrap()
-        .reverse();
-    reordered["nodes"][1]["config"]["body"]["edges"]
         .as_array_mut()
         .unwrap()
         .reverse();
@@ -529,7 +520,7 @@ fn body_plugins_inherit_the_correlated_node_span() {
     let mut value = definition(json!([1, 2, 3]), "parallel", "terminate");
     value["nodes"][1]["config"]["body"] = json!({"version":"2026-09-26", "dependencies":{},
         "nodes":[{"id":"probe","kind":"test.iteration_trace_probe"}],
-        "control_edges":[{
+        "edges":[{
             "from_node":"%iteration",
             "from_output":"item",
             "to_node":"probe"
@@ -618,12 +609,9 @@ fn skipped_body_nodes_report_their_item_and_dependency() {
                     "value":1
                 }
             }]}},
-            {"id":"copy","kind":"builtin.identity"}
+            {"id":"copy","kind":"builtin.identity", "inputs":{"input":{"$ref":"%iteration.item"}}}
         ],
         "edges":[
-            {"from_node":"%iteration","from_output":"item","to_node":"copy","to_input":"input"}
-        ],
-        "control_edges":[
             {"from_node":"%iteration","from_output":"item","to_node":"route"},
             {"from_node":"route","from_output":"one","to_node":"copy"}
         ],
@@ -781,7 +769,7 @@ fn generated_parallel_runner_matches_in_memory_and_describes_one_iteration_node(
     let body = &mut value["nodes"][1]["config"]["body"];
     body["nodes"][0]["config"]["inputs"]["key"] = json!("string");
     body["nodes"][0]["config"]["code"]["value"] = json!("key + ':' + string(10 / item + position)");
-    body["nodes"][0]["inputs"]["key"] = json!({"from":{"node":"%iteration","port":"key"}});
+    body["nodes"][0]["inputs"]["key"] = json!({"$ref":"%iteration.key"});
     let expected = execute(value.clone()).unwrap();
     assert_eq!(expected, json!({"results": ["a:10", null, "c:7"]}));
     fs::write(&path, value.to_string()).unwrap();
@@ -812,7 +800,7 @@ fn generated_parallel_runner_matches_in_memory_and_describes_one_iteration_node(
         "nodes":[],
         "outputs": [{"name":"result", "node":"%iteration","port":"item"}]
     });
-    value["nodes"][1]["inputs"]["items"]["from"]["port"] = json!("values");
+    value["nodes"][1]["inputs"]["items"]["$ref"] = json!("source.values");
     fs::write(&path, value.to_string()).unwrap();
     let error = compile_project(&request).unwrap_err();
     // Receiver contracts must now be discovered before generation. Omitting
@@ -879,15 +867,15 @@ fn loop_and_iteration_share_a_workflow_in_memory_and_generated_runners() {
     nested["nodes"][1]["config"]["variables"] = json!([{"name": "items", "type": "array"}]);
     nested["nodes"][1]["config"]["until"] = Value::Null;
     let mut nested_iteration = iteration["nodes"][1].clone();
-    nested_iteration["inputs"]["items"] = json!({"from":{"node":"%loop","port":"items"}});
+    nested_iteration["inputs"]["items"] = json!({"$ref":"%loop.items"});
     nested["nodes"][1]["config"]["body"] = json!({"version":nested["version"], "dependencies":{},
         "nodes": [
             nested_iteration,
             {"id": "assign", "kind": "workflow.assign", "config": {"variable": "items"},
-             "inputs":{"value":{"from":{"node":"iteration","port":"results"}}}}
+             "inputs":{"value":{"$ref":"iteration.results"}}}
         ]
     });
-    nested["nodes"][1]["inputs"] = json!({"items":{"from":{"node":"seed","port":"value"}}});
+    nested["nodes"][1]["inputs"] = json!({"items":{"$ref":"seed.value"}});
     nested["outputs"][0]["name"] = json!("items");
     nested["outputs"][0]["port"] = json!("items");
     let nested_expected = json!({"items": [4, 11, 18]});

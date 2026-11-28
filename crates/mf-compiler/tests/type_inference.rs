@@ -20,25 +20,17 @@ fn dependencies() -> Value {
 
 fn linear(value: Value, identities: usize, sink_type: &str) -> WorkflowDefinition {
     let mut nodes = vec![json!({"id":"source","kind":"builtin.constant","config":{"value":value}})];
-    let mut edges = Vec::new();
     let mut previous = "source".to_owned();
     for index in 0..identities {
         let id = format!("identity_{index}");
-        nodes.push(json!({"id":id,"kind":"builtin.identity"}));
-        edges.push(
-            json!({"from_node":previous,"from_output":"value","to_node":id,"to_input":"input"}),
-        );
+        nodes.push(json!({"id":id,"kind":"builtin.identity", "inputs":{"input":{"$ref":format!("{previous}.value")}}}));
         previous = id;
     }
-    nodes.push(json!({"id":"sink","kind":"fixture.typed_echo","config":{"type":sink_type}}));
-    edges.push(
-        json!({"from_node":previous,"from_output":"value","to_node":"sink","to_input":"input"}),
-    );
+    nodes.push(json!({"id":"sink","kind":"fixture.typed_echo","config":{"type":sink_type}, "inputs":{"input":{"$ref":format!("{previous}.value")}}}));
     serde_json::from_value(json!({
         "version":"2026-09-26",
         "dependencies":dependencies(),
         "nodes":nodes,
-        "edges":edges,
         "outputs":[{"name":"result","node":"sink","port":"value"}]
     }))
     .unwrap()
@@ -159,9 +151,8 @@ fn rejects_forwarded_output_conflicts() {
         "dependencies":dependencies(),
         "nodes":[
             {"id":"source","kind":"builtin.constant","config":{"value":"wrong"}},
-            {"id":"forward","kind":"fixture.forwarding"}
+            {"id":"forward","kind":"fixture.forwarding", "inputs":{"input":{"$ref":"source.value"}}}
         ],
-        "edges":[{"from_node":"source","from_output":"value","to_node":"forward","to_input":"input"}],
         "outputs":[{"name":"result","node":"forward","port":"value"}]
     }))
     .unwrap();
@@ -193,14 +184,10 @@ fn control_edges_do_not_propagate_known_data() {
         "nodes":[
             {"id":"source","kind":"fixture.typed_source","config":{"type":"any","value":"bad"}},
             {"id":"control","kind":"builtin.constant","config":{"value":42}},
-            {"id":"identity","kind":"builtin.identity"},
-            {"id":"sink","kind":"fixture.typed_echo","config":{"type":"int64"}}
+            {"id":"identity","kind":"builtin.identity", "inputs":{"input":{"$ref":"source.value"}}},
+            {"id":"sink","kind":"fixture.typed_echo","config":{"type":"int64"}, "inputs":{"input":{"$ref":"identity.value"}}}
         ],
-        "edges":[
-            {"from_node":"source","from_output":"value","to_node":"identity","to_input":"input"},
-            {"from_node":"identity","from_output":"value","to_node":"sink","to_input":"input"}
-        ],
-        "control_edges":[{"from_node":"control","from_output":"value","to_node":"identity"}],
+        "edges":[{"from_node":"control","from_output":"value","to_node":"identity"}],
         "outputs":[{"name":"result","node":"sink","port":"value"}]
     }))
     .unwrap();

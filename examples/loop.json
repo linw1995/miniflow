@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-13",
+  "version": "2026-11-28",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -50,10 +50,7 @@
               },
               "inputs": {
                 "count": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "count"
-                  }
+                  "$ref": "%loop.count"
                 }
               }
             },
@@ -65,10 +62,7 @@
               },
               "inputs": {
                 "value": {
-                  "from": {
-                    "node": "increment",
-                    "port": "next"
-                  }
+                  "$ref": "increment.next"
                 }
               }
             }
@@ -87,10 +81,7 @@
       },
       "inputs": {
         "count": {
-          "from": {
-            "node": "seed",
-            "port": "value"
-          }
+          "$ref": "seed.value"
         }
       }
     }

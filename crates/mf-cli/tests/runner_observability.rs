@@ -96,15 +96,15 @@ fn definition(plugin: &Path, trace: &Path) -> WorkflowDefinition {
                 "ports":["result.alpha","unused"],"required":"result.alpha",
                 "inputs":["input"],"outputs":{"result.alpha":14},"skipped":["unused"],
                 "trace":trace,"name":"b"
-            }},
+            },
+            "inputs":{"input":{"$ref":"a.value"}}},
             {"id":"c","kind":"fixture.context","config":{
                 "ports":["other.port"],"required":"other.port",
                 "outputs":{"other.port":true},
                 "trace":trace,"name":"c"
             }}
         ],
-        "edges":[{"from_node":"a","from_output":"value","to_node":"b","to_input":"input"}],
-        "control_edges":[{"from_node":"a","from_output":"value","to_node":"c"}],
+        "edges":[{"from_node":"a","from_output":"value","to_node":"c"}],
         "outputs":[{"name":"answer","node":"b","port":"result.alpha"}]
     }))
     .unwrap()
@@ -230,17 +230,14 @@ fn generated_loop_runner_exports_complete_per_pass_observations() {
                         {"id": "increment", "kind": "builtin.code", "config": {
                             "language": "cel", "inputs": {"count": "int"},
                             "code": {"next": "count + 1"}
-                        }},
-                        {"id": "assign", "kind": "workflow.assign", "config": {"variable": "count"}}
-                    ],
-                    "edges": [
-                        {"from_node": "%loop", "from_output": "count", "to_node": "increment", "to_input": "count"},
-                        {"from_node": "increment", "from_output": "next", "to_node": "assign", "to_input": "value"}
+                        },
+                        "inputs":{"count":{"$ref":"%loop.count"}}},
+                        {"id": "assign", "kind": "workflow.assign", "config": {"variable": "count"}, "inputs":{"value":{"$ref":"increment.next"}}}
                     ]
                 }
-            }}
+            },
+            "inputs":{"count":{"$ref":"seed.value"}}}
         ],
-        "edges": [{"from_node": "seed", "from_output": "value", "to_node": "repeat", "to_input": "count"}],
         "outputs": [{"name": "count", "node": "repeat", "port": "count"}]
     }).to_string()).unwrap();
     compile_project(&CompileRequest {

@@ -133,9 +133,9 @@ fn mixed_version_child_iterations_retain_body_paths_for_static_and_mapped_calls(
                     "nodes": [{"id": "value", "kind": "builtin.constant", "config": {"value": 7}}],
                     "outputs": [{"name":"result", "node": "value", "port": "value"}]
                 }
-            }}
+            },
+            "inputs":{"items":{"$ref":"items.value"}}}
         ],
-        "edges": [{"from_node": "items", "from_output": "value", "to_node": "iteration", "to_input": "items"}],
         "outputs": [{"name": "results", "node": "iteration", "port": "results"}]
     });
     let parent = definition(json!({

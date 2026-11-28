@@ -36,12 +36,12 @@ fn definition() -> Value {
                 "base_url":{"$ref":"params.base_url"},
                 "api_key":{"$ref":"params.api_key"},
                 "timeout_ms":{"$ref":"params.timeout_ms"}
-            },"inputs":{"query":{"from":{"node":"params","port":"query"}}}},
+            },"inputs":{"query":{"$ref":"params.query"}}},
             {"id":"fetch","kind":"builtin.deepseek.fetch","config":{
                 "base_url":{"$ref":"params.base_url"},
                 "api_key":{"$ref":"params.api_key"},
                 "timeout_ms":{"$ref":"params.timeout_ms"}
-            },"inputs":{"url":{"from":{"node":"params","port":"url"}}}}
+            },"inputs":{"url":{"$ref":"params.url"}}}
         ],
         "edges":[{"from_node":"search","to_node":"fetch"}],
         "outputs":[
@@ -125,7 +125,7 @@ fn web_agent(server: &Server, fetch_timeout_ms: u64) -> Value {
                 {"id":name,"kind":format!("builtin.deepseek.{name}"),"config":{
                     "base_url":{"$ref":"params.base_url"},
                     "api_key":{"$ref":"params.api_key"}
-                },"inputs":{argument:{"from":{"node":"params","port":argument}}}}
+                },"inputs":{argument:{"$ref":format!("params.{argument}")}}}
             ],
             "outputs":outputs.into_iter().map(|port| json!({"name":port,"node":name,"port":port})).collect::<Vec<_>>()
         });

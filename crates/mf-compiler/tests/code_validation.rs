@@ -26,10 +26,10 @@ fn graph(expression: &str) -> Value {
             }]}},
             {"id": "transform", "kind": "builtin.code", "config": {
                 "language": "cel", "inputs": {"amount": "int"}, "code": {"result": expression}
-            }}
+            },
+            "inputs":{"amount":{"$ref":"source.value"}}}
         ],
-        "edges": [{"from_node": "source", "from_output": "value", "to_node": "transform", "to_input": "amount"}],
-        "control_edges": [
+        "edges": [
             {"from_node": "source", "from_output": "value", "to_node": "route"},
             {"from_node": "route", "from_output": "on", "to_node": "transform"}
         ],
@@ -84,11 +84,12 @@ fn code_outputs_retain_secrets_in_workflow_observations() {
             {"id":"transform", "kind":"builtin.code", "config":{
                 "language":"cel", "inputs":{"record":"object"},
                 "code":{"derived":"record.token + '-suffix'", "independent":"42"}
-            }}
+            },
+            "inputs":{"record":{"$ref":"params.record"}}}
         ],
-        "edges":[{"from_node":"params", "from_output":"record", "to_node":"transform", "to_input":"record"}],
         "outputs":[{"name":"result", "node":"transform", "port":"derived"}]
-    })).unwrap();
+    }))
+    .unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
     let flow = instantiate_compiled(&plan, &registry).unwrap();
@@ -126,18 +127,13 @@ fn structured_json_matches_in_memory_and_generated_runner_checks() {
             {"id":"collect", "kind":"builtin.code", "config":{
                 "language":"cel", "inputs":{"left":{"list":"object"}, "right":{"list":"object"}, "probe":"any"},
                 "code":{"value":"left + right", "probe":"dyn(probe)"}
-            }},
+            },
+            "inputs":{"left":{"$ref":"params.left"}, "right":{"$ref":"params.right"}, "probe":{"$ref":"params.probe"}}},
             {"id":"consume", "kind":"builtin.code", "config":{
                 "language":"cel", "inputs":{"records":{"list":"object"}, "probe":"int"},
                 "code":{"records":"records", "probe":"probe"}
-            }}
-        ],
-        "edges":[
-            {"from_node":"params", "from_output":"left", "to_node":"collect", "to_input":"left"},
-            {"from_node":"params", "from_output":"right", "to_node":"collect", "to_input":"right"},
-            {"from_node":"params", "from_output":"probe", "to_node":"collect", "to_input":"probe"},
-            {"from_node":"collect", "from_output":"value", "to_node":"consume", "to_input":"records"},
-            {"from_node":"collect", "from_output":"probe", "to_node":"consume", "to_input":"probe"}
+            },
+            "inputs":{"records":{"$ref":"collect.value"}, "probe":{"$ref":"collect.probe"}}}
         ],
         "outputs":[
             {"name":"records", "node":"consume", "port":"records"},
@@ -223,18 +219,14 @@ fn loop_accumulation_accepts_collections_beyond_the_former_entry_limit() {
                         {"id":"collect", "kind":"builtin.code", "config":{
                             "language":"cel", "inputs":{"left":{"list":"object"}, "right":{"list":"object"}},
                             "code":{"value":"left + right"}
-                        }},
-                        {"id":"assign", "kind":"workflow.assign", "config":{"variable":"items"}}
-                    ],
-                    "edges":[
-                        {"from_node":"%loop", "from_output":"items", "to_node":"collect", "to_input":"left"},
-                        {"from_node":"chunk", "from_output":"value", "to_node":"collect", "to_input":"right"},
-                        {"from_node":"collect", "from_output":"value", "to_node":"assign", "to_input":"value"}
+                        },
+                        "inputs":{"left":{"$ref":"%loop.items"}, "right":{"$ref":"chunk.value"}}},
+                        {"id":"assign", "kind":"workflow.assign", "config":{"variable":"items"}, "inputs":{"value":{"$ref":"collect.value"}}}
                     ]
                 }
-            }}
+            },
+            "inputs":{"items":{"$ref":"seed.value"}}}
         ],
-        "edges":[{"from_node":"seed", "from_output":"value", "to_node":"repeat", "to_input":"items"}],
         "outputs":[{"name":"items", "node":"repeat", "port":"items"}]
     })).unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();

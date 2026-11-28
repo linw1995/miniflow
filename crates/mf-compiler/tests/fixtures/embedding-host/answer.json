@@ -16,15 +16,12 @@
     },
     {
       "id": "echo",
-      "kind": "builtin.identity"
-    }
-  ],
-  "edges": [
-    {
-      "from_node": "source",
-      "from_output": "value",
-      "to_node": "echo",
-      "to_input": "input"
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "$ref": "source.value"
+        }
+      }
     }
   ],
   "outputs": [

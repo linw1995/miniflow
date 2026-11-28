@@ -452,10 +452,9 @@ fn newer_static_children_do_not_enable_startup_inputs_on_legacy_roots() {
                 "version": "2026-09-29", "dependencies": {},
                 "nodes": [{"id": "dispatch", "kind": "user.dispatch"},
                     {"id": "independent", "kind": "fixture.input"},
-                    {"id": "data-target", "kind": "fixture.sink"},
+                    {"id": "data-target", "kind": "fixture.sink", "inputs":{"value":{"$ref":"dispatch.value"}}},
                     {"id": "control-target", "kind": "fixture.sink"}],
-                "edges": [{"from_node": "dispatch", "from_output": "value", "to_node": "data-target", "to_input": "value"}],
-                "control_edges": [{"from_node": "dispatch", "from_output": "ready", "to_node": "control-target"}]
+                "edges": [{"from_node": "dispatch", "from_output": "ready", "to_node": "control-target"}]
             }),
             &["dispatch", "independent", "data-target", "control-target"],
         );

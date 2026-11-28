@@ -162,7 +162,7 @@ fn keyless_title_uses_display_answer_even_when_replacement_context_is_empty() {
         .remove("messages")
         .unwrap();
     result["inputs"]["display_messages"] = display_input;
-    result["inputs"]["context_messages"] = json!({"from":{"node":"snapshot","port":"value"}});
+    result["inputs"]["context_messages"] = json!({"$ref":"snapshot.value"});
     definition["outputs"][0]["name"] = "replace_context".into();
     let profile = WorkflowProfile::new(
         "default",

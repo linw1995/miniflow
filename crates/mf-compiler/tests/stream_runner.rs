@@ -38,8 +38,8 @@ fn generated_streams_preserve_protocol_boundaries_and_installation_guarantees() 
             "core":{"package":"mfn-core","path":common::crates_dir().join("builtin-nodes/core")},
             "fixture":{"package":"fixture-multi-nodes","path":Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/multi-nodes")}
         }, "nodes":[{"id":"feed","kind":"builtin.readline"},
-            {"id":"collect","kind":"builtin.batch","config":{"max_items":3,"max_wait_ms":3600000},"inputs":{"item":{"from":{"node":"feed","port":"line"}}}},
-            {"id":"consume","kind":"fixture.stream_echo","config":{"trace":trace},"inputs":{"input":{"from":{"node":"collect","port":"items"}}}}],
+            {"id":"collect","kind":"builtin.batch","config":{"max_items":3,"max_wait_ms":3600000},"inputs":{"item":{"$ref":"feed.line"}}},
+            {"id":"consume","kind":"fixture.stream_echo","config":{"trace":trace},"inputs":{"input":{"$ref":"collect.items"}}}],
         "outputs":[{"name":"batch","node":"consume","port":"value"}]
     });
     let compile = |definition: &Value, telemetry| {

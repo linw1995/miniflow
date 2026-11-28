@@ -148,7 +148,8 @@ impl WorkflowDefinition {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Chronological order is used by the schema feature gates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum WorkflowDefinitionVersion {
     #[serde(rename = "2026-09-26")]
     V2026_09_26,
@@ -170,75 +171,47 @@ pub enum WorkflowDefinitionVersion {
     V2026_11_11,
     #[serde(rename = "2026-11-13")]
     V2026_11_13,
+    #[serde(rename = "2026-11-28")]
+    V2026_11_28,
 }
 
 impl WorkflowDefinitionVersion {
-    pub const CURRENT: Self = Self::V2026_11_13;
+    pub const CURRENT: Self = Self::V2026_11_28;
 
     pub fn supports_child_streams(self) -> bool {
-        matches!(
-            self,
-            Self::V2026_10_28 | Self::V2026_11_11 | Self::V2026_11_13
-        )
+        self >= Self::V2026_10_28
     }
 
     pub fn supports_nested_flows(self) -> bool {
-        matches!(
-            self,
-            Self::V2026_10_25 | Self::V2026_10_28 | Self::V2026_11_11 | Self::V2026_11_13
-        )
+        self >= Self::V2026_10_25
     }
 
     pub fn supports_startup_inputs(self) -> bool {
-        matches!(
-            self,
-            Self::V2026_10_03
-                | Self::V2026_10_19
-                | Self::V2026_10_23
-                | Self::V2026_10_25
-                | Self::V2026_10_28
-                | Self::V2026_11_11
-                | Self::V2026_11_13
-        )
+        self >= Self::V2026_10_03
     }
 
     pub fn supports_node_success_edges(self) -> bool {
-        matches!(
-            self,
-            Self::V2026_10_19
-                | Self::V2026_10_23
-                | Self::V2026_10_25
-                | Self::V2026_10_28
-                | Self::V2026_11_11
-                | Self::V2026_11_13
-        )
+        self >= Self::V2026_10_19
     }
 
     pub fn supports_clusters(self) -> bool {
-        matches!(
-            self,
-            Self::V2026_10_23
-                | Self::V2026_10_25
-                | Self::V2026_10_28
-                | Self::V2026_11_11
-                | Self::V2026_11_13
-        )
+        self >= Self::V2026_10_23
     }
 
     pub fn supports_cluster_collapsed(self) -> bool {
-        matches!(self, Self::V2026_11_11 | Self::V2026_11_13)
+        self >= Self::V2026_11_11
     }
 
     pub fn supports_loop_inputs(self) -> bool {
-        matches!(self, Self::V2026_11_11 | Self::V2026_11_13)
+        self >= Self::V2026_11_11
     }
 
     pub fn supports_loop_output_updates(self) -> bool {
-        matches!(self, Self::V2026_11_13)
+        self >= Self::V2026_11_13
     }
 
     pub fn supports_workflow_variables(self) -> bool {
-        matches!(self, Self::V2026_11_13)
+        self >= Self::V2026_11_13
     }
 }
 
@@ -512,17 +485,6 @@ pub struct OrderEdgeDefinition {
 pub struct OutputReferenceDefinition {
     pub node: DefinitionId,
     pub port: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged, deny_unknown_fields)]
-pub enum InputBindingDefinition {
-    From {
-        from: OutputReferenceDefinition,
-    },
-    Exclusive {
-        exclusive: Vec<OutputReferenceDefinition>,
-    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

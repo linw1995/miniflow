@@ -28,7 +28,7 @@ fn apply_definition() -> Value {
             {"id":"apply", "kind":"workflow.call", "config":{
                 "inputs":[],
                 "outputs":[{"name":"answer", "value_type":"string", "required":true}]
-            }, "inputs":{"flow":{"from":{"node":"params", "port":"policy"}}}}
+            }, "inputs":{"flow":{"$ref":"params.policy"}}}
         ],
         "outputs":[{"name":"answer", "node":"apply", "port":"answer"}]
     })
@@ -65,13 +65,13 @@ fn fixture(root: &Path) -> std::path::PathBuf {
                 {"id":"makeOne", "kind":"builtin.constant", "config":{"type":"flow", "value":{"path":"bodies/one.json"}}},
                 {"id":"makeTwo", "kind":"builtin.constant", "config":{"type":"flow", "value":{"path":"bodies/two.json"}}},
                 {"id":"forward", "kind":"builtin.identity", "inputs":{
-                    "input":{"from":{"node":"makeOne", "port":"value"}}
+                    "input":{"$ref":"makeOne.value"}
                 }},
                 {"id":"first", "kind":"workflow.call", "config":{"flow":"A"}, "inputs":{
-                    "params.policy":{"from":{"node":"forward", "port":"value"}}
+                    "params.policy":{"$ref":"forward.value"}
                 }},
                 {"id":"second", "kind":"workflow.call", "config":{"flow":"A"}, "inputs":{
-                    "params.policy":{"from":{"node":"makeTwo", "port":"value"}}
+                    "params.policy":{"$ref":"makeTwo.value"}
                 }}
             ],
             "outputs":[
@@ -223,8 +223,8 @@ fn configured_flow_calls_refresh_residual_signatures_and_run_without_sources() {
                         "prefix":{"type":"string","secret":false},"text":{"type":"string","secret":false}
                     }}},
                     {"id":"result","kind":"builtin.object","config":{"fields":{"prefix":"string","text":"string"}},"inputs":{
-                        "prefix":{"from":{"node":"params","port":"prefix"}},
-                        "text":{"from":{"node":"params","port":"text"}}
+                        "prefix":{"$ref":"params.prefix"},
+                        "text":{"$ref":"params.text"}
                     }}
                 ],"outputs":[{"name":"result","node":"result","port":"value"}]}
             }},
@@ -233,8 +233,8 @@ fn configured_flow_calls_refresh_residual_signatures_and_run_without_sources() {
                 "inputs":[{"name":"params.text","value_type":"string","required":true}],
                 "outputs":[{"name":"result","value_type":{"map":"string"},"required":true}]
             },"inputs":{
-                "flow":{"from":{"node":"configured","port":"value"}},
-                "params.text":{"from":{"node":"text","port":"value"}}
+                "flow":{"$ref":"configured.value"},
+                "params.text":{"$ref":"text.value"}
             }}
         ],
         "edges":[{"from_node":"params","to_node":"configured"}],
@@ -244,6 +244,31 @@ fn configured_flow_calls_refresh_residual_signatures_and_run_without_sources() {
     let definition: WorkflowDefinition = serde_json::from_value(value.clone()).unwrap();
     let plan = mf_compiler::compile_definition(&definition, &registry).unwrap();
     let flow = mf_compiler::instantiate_compiled(&plan, &registry).unwrap();
+    let description = mf_compiler::describe_compiled(&plan).unwrap();
+    let routes: Vec<_> = description
+        .data_edges
+        .iter()
+        .map(|edge| {
+            (
+                &*edge.from_node,
+                &*edge.from_output,
+                &*edge.to_node,
+                &*edge.to_input,
+                edge.exclusive,
+            )
+        })
+        .collect();
+    // The configured prefix is a context read; only the two invocation inputs carry data.
+    assert_eq!(
+        routes,
+        [
+            ("configured", "value", "invoke", "flow", false),
+            ("text", "value", "invoke", "params.text", false)
+        ]
+    );
+    assert_eq!(description.order_edges.len(), 1);
+    assert_eq!(description.order_edges[0].from_node, "params");
+    assert_eq!(description.order_edges[0].to_node, "configured");
     for prefix in ["first", "second"] {
         let output = flow
             .execute_with_inputs(
@@ -362,7 +387,7 @@ fn native_streaming_capabilities_travel_through_parameters_and_ordinary_edges() 
     ]);
     definition["nodes"].as_array_mut().unwrap().push(json!({
         "id":"consume", "kind":"builtin.identity", "inputs":{
-            "input":{"from":{"node":"apply", "port":"delta"}}
+            "input":{"$ref":"apply.delta"}
         }
     }));
     definition["outputs"]

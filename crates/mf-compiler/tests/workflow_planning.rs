@@ -48,16 +48,10 @@ fn diamond_definition() -> Value {
     json!({
         "version": "2026-09-26", "dependencies": {},
         "nodes": [
-            {"id":"sink","kind":"plan.join"},
-            {"id":"right","kind":"plan.pass"},
+            {"id":"sink","kind":"plan.join", "inputs":{"right":{"$ref":"right.value"}, "left":{"$ref":"left.value"}}},
+            {"id":"right","kind":"plan.pass", "inputs":{"input":{"$ref":"root.value"}}},
             {"id":"root","kind":"plan.source"},
-            {"id":"left","kind":"plan.pass"}
-        ],
-        "edges": [
-            {"from_node":"root","from_output":"value","to_node":"right","to_input":"input"},
-            {"from_node":"right","from_output":"value","to_node":"sink","to_input":"right"},
-            {"from_node":"root","from_output":"value","to_node":"left","to_input":"input"},
-            {"from_node":"left","from_output":"value","to_node":"sink","to_input":"left"}
+            {"id":"left","kind":"plan.pass", "inputs":{"input":{"$ref":"root.value"}}}
         ],
         "outputs": [{"name":"final","node":"sink","port":"result"}]
     })
@@ -124,7 +118,6 @@ fn chooses_a_stable_order_when_multiple_nodes_are_ready() {
 
     let mut reordered = value;
     reordered["nodes"].as_array_mut().unwrap().reverse();
-    reordered["edges"].as_array_mut().unwrap().reverse();
     let reordered: WorkflowDefinition = serde_json::from_value(reordered).unwrap();
     assert_eq!(topological_order(&reordered, &registry).unwrap(), expected);
 }
@@ -134,14 +127,9 @@ fn reports_only_nodes_on_the_cycle() {
     let definition: WorkflowDefinition = serde_json::from_value(json!({
         "version": "2026-09-26", "dependencies": {},
         "nodes": [
-            {"id":"a","kind":"plan.pass"},
-            {"id":"b","kind":"plan.pass"},
-            {"id":"0-tail","kind":"plan.pass"}
-        ],
-        "edges": [
-            {"from_node":"a","from_output":"value","to_node":"b","to_input":"input"},
-            {"from_node":"b","from_output":"value","to_node":"a","to_input":"input"},
-            {"from_node":"b","from_output":"value","to_node":"0-tail","to_input":"input"}
+            {"id":"a","kind":"plan.pass", "inputs":{"input":{"$ref":"b.value"}}},
+            {"id":"b","kind":"plan.pass", "inputs":{"input":{"$ref":"a.value"}}},
+            {"id":"0-tail","kind":"plan.pass", "inputs":{"input":{"$ref":"b.value"}}}
         ]
     }))
     .unwrap();
@@ -160,8 +148,7 @@ fn reports_only_nodes_on_the_cycle() {
 fn reports_self_loops() {
     let definition: WorkflowDefinition = serde_json::from_value(json!({
         "version": "2026-09-26", "dependencies": {},
-        "nodes": [{"id":"self","kind":"plan.pass"}],
-        "edges": [{"from_node":"self","from_output":"value","to_node":"self","to_input":"input"}]
+        "nodes": [{"id":"self","kind":"plan.pass", "inputs":{"input":{"$ref":"self.value"}}}]
     }))
     .unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();

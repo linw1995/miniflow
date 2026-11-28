@@ -113,15 +113,14 @@ inventory::submit! {
 
 fn workflow(kind: &str, workers: usize) -> WorkflowDefinition {
     let probe = json!({"id": "probe", "kind": "test.worker_probe", "config": {"workers": workers}});
-    let (subgraph, input, output, seed) = if kind == "loop" {
+    let (mut subgraph, input, output, seed) = if kind == "loop" {
         (
             json!({
                 "id": "subgraph", "kind": "loop.run", "config": {
                     "max_iterations": 3,
                     "variables": [{"name": "threads", "type": {"list": "string"}}],
                     "body": {"version":"2026-09-29", "dependencies":{},
-                        "nodes": [probe, {"id": "assign", "kind": "workflow.assign", "config": {"variable": "threads"}}],
-                        "edges": [{"from_node": "probe", "from_output": "value", "to_node": "assign", "to_input": "value"}]
+                        "nodes": [probe, {"id": "assign", "kind": "workflow.assign", "config": {"variable": "threads"}, "inputs":{"value":{"$ref":"probe.value"}}}]
                     }
                 }
             }),
@@ -142,12 +141,13 @@ fn workflow(kind: &str, workers: usize) -> WorkflowDefinition {
             json!([0, 1, 2]),
         )
     };
+    subgraph["inputs"][input] = json!({"$ref":"seed.value"});
     serde_json::from_value(json!({
         "version": "2026-09-29", "dependencies": {},
         "nodes": [{"id": "seed", "kind": "builtin.constant", "config": {"value": seed}}, subgraph],
-        "edges": [{"from_node": "seed", "from_output": "value", "to_node": "subgraph", "to_input": input}],
         "outputs": [{"name": "result", "node": "subgraph", "port": output}]
-    })).unwrap()
+    }))
+    .unwrap()
 }
 
 #[test]
@@ -216,19 +216,15 @@ fn stream_subgraphs_share_workers_and_effective_limit_across_messages() {
             definition["version"] = json!("2026-10-03");
             definition["execution"] = json!({"limits": {"workers": stream_workers}});
             definition["nodes"][0] = json!({"id": "seed", "kind": "test.controlled_source", "config": {"item_type": "any"}});
-            definition["edges"][0]["from_output"] = json!("item");
+            definition["nodes"][1]["inputs"]["items"] = json!({"$ref":"seed.item"});
             // Only the downstream Iteration needs a runtime execution worker.
             definition["nodes"][1]["config"]["body"]["nodes"][0]["config"]["pool_workers"] =
                 json!(1);
             if batch {
-                definition["edges"][0]["from_node"] = json!("batch");
-                definition["edges"][0]["from_output"] = json!("items");
+                definition["nodes"][1]["inputs"]["items"] = json!({"$ref":"batch.items"});
                 definition["nodes"].as_array_mut().unwrap().push(
-                    json!({"id": "batch", "kind": "builtin.batch", "config": {"max_items": 1, "max_wait_ms": 100}}),
+                    json!({"id": "batch", "kind": "builtin.batch", "inputs":{"item":{"$ref":"seed.item"}}, "config": {"max_items": 1, "max_wait_ms": 100}}),
                 );
-                definition["edges"].as_array_mut().unwrap().push(json!({
-                    "from_node": "seed", "from_output": "item", "to_node": "batch", "to_input": "item"
-                }));
             }
             let definition = serde_json::from_value(definition).unwrap();
             let plan = compile_definition(&definition, &registry).unwrap();

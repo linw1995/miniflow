@@ -13,15 +13,12 @@
     },
     {
       "id": "echo",
-      "kind": "fixture.typed_text"
-    }
-  ],
-  "edges": [
-    {
-      "from_node": "source",
-      "from_output": "text",
-      "to_node": "echo",
-      "to_input": "text"
+      "kind": "fixture.typed_text",
+      "inputs": {
+        "text": {
+          "$ref": "source.text"
+        }
+      }
     }
   ],
   "outputs": [

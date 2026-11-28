@@ -91,11 +91,10 @@ fn conditional_skips_do_not_add_items_or_skip_a_pending_batch() {
             {"id":"route", "kind":"builtin.if_else", "config":{"branches":[{"id":"positive", "condition":{
                 "source":{"output":"feed.item", "path":""}, "operator":"gt", "value":0
             }}]}},
-            {"id":"collect", "kind":"builtin.batch", "config":{"max_items":3, "max_wait_ms":100}},
+            {"id":"collect", "kind":"builtin.batch", "config":{"max_items":3, "max_wait_ms":100}, "inputs":{"item":{"$ref":"feed.item"}}},
             controlled::source(json!("int"))
         ],
-        "edges":[{"from_node":"feed", "from_output":"item", "to_node":"collect", "to_input":"item"}],
-        "control_edges":[{"from_node":"feed", "from_output":"item", "to_node":"route"},
+        "edges":[{"from_node":"feed", "from_output":"item", "to_node":"route"},
             {"from_node":"route", "from_output":"positive", "to_node":"collect"}],
         "outputs":[{"name":"batch", "node":"collect", "port":"items"}]
     })).unwrap();

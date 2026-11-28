@@ -22,9 +22,9 @@ pub const MAX_MANIFEST_SECTION_BYTES: usize =
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkflowManifestVersion {
-    /// Standalone business stdout with optional invocation-local callback RPC.
-    #[serde(rename = "2026-11-27")]
-    V2026_11_27,
+    /// Embedded definitions use node-local whole-output references.
+    #[serde(rename = "2026-11-28")]
+    V2026_11_28,
 }
 
 /// Read-only public projection, independent of compiler IR and executable layouts.
@@ -100,7 +100,7 @@ impl WorkflowManifest {
         input_schema: WorkflowInputSchema,
     ) -> Result<Self, WorkflowManifestError> {
         let manifest = Self {
-            version: WorkflowManifestVersion::V2026_11_27,
+            version: WorkflowManifestVersion::V2026_11_28,
             definition: graph.definition.clone(),
             entry: "workflow.json".into(),
             sources: [(

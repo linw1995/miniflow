@@ -17,9 +17,8 @@ fn graph(source_type: &str, value: Value, sink_type: &str) -> WorkflowDefinition
         "dependencies": common::fixture_definition().dependencies,
         "nodes": [
             {"id": "source", "kind": "fixture.typed_source", "config": {"type": source_type, "value": value}},
-            {"id": "sink", "kind": "fixture.typed_echo", "config": {"type": sink_type}}
+            {"id": "sink", "kind": "fixture.typed_echo", "config": {"type": sink_type}, "inputs":{"input":{"$ref":"source.value"}}}
         ],
-        "edges": [{"from_node": "source", "from_output": "value", "to_node": "sink", "to_input": "input"}],
         "outputs": [{"name": "result", "node": "sink", "port": "value"}]
     }))
     .unwrap()
@@ -38,10 +37,9 @@ fn skipped_graph() -> WorkflowDefinition {
             {"id": "route", "kind": "builtin.if_else", "config": {"branches": [{
                 "id": "on", "condition": {"source": {"output": "trigger.value", "path": ""}, "operator": "eq", "value": true}
             }]}},
-            {"id": "sink", "kind": "fixture.typed_echo", "config": {"type": "int64"}}
+            {"id": "sink", "kind": "fixture.typed_echo", "config": {"type": "int64"}, "inputs":{"input":{"$ref":"source.value"}}}
         ],
-        "edges": [{"from_node": "source", "from_output": "value", "to_node": "sink", "to_input": "input"}],
-        "control_edges": [
+        "edges": [
             {"from_node": "trigger", "from_output": "value", "to_node": "route"},
             {"from_node": "route", "from_output": "on", "to_node": "sink"}
         ],

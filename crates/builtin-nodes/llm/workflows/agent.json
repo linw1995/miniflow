@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-13",
+  "version": "2026-11-28",
   "dependencies": {
     "core": {
       "package": "mfn-core"
@@ -64,10 +64,7 @@
       },
       "inputs": {
         "params.properties": {
-          "from": {
-            "node": "params",
-            "port": "tool_properties"
-          }
+          "$ref": "params.tool_properties"
         }
       }
     },
@@ -129,7 +126,7 @@
           "value": "continue"
         },
         "body": {
-          "version": "2026-11-13",
+          "version": "2026-11-28",
           "dependencies": {},
           "flows": {
             "agent-request": {
@@ -151,16 +148,10 @@
               },
               "inputs": {
                 "params.prefix": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "prefix"
-                  }
+                  "$ref": "%loop.prefix"
                 },
                 "params.generated": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "generated"
-                  }
+                  "$ref": "%loop.generated"
                 }
               }
             },
@@ -172,34 +163,19 @@
               },
               "inputs": {
                 "params.messages": {
-                  "from": {
-                    "node": "request",
-                    "port": "messages"
-                  }
+                  "$ref": "request.messages"
                 },
                 "params.tools": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "tool_definitions"
-                  }
+                  "$ref": "%loop.tool_definitions"
                 },
                 "params.model": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "model"
-                  }
+                  "$ref": "%loop.model"
                 },
                 "params.base_url": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "base_url"
-                  }
+                  "$ref": "%loop.base_url"
                 },
                 "params.api_key": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "api_key"
-                  }
+                  "$ref": "%loop.api_key"
                 }
               }
             },
@@ -222,16 +198,10 @@
               },
               "inputs": {
                 "left": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "usages"
-                  }
+                  "$ref": "%loop.usages"
                 },
                 "right": {
-                  "from": {
-                    "node": "turn",
-                    "port": "usages"
-                  }
+                  "$ref": "turn.usages"
                 }
               }
             },
@@ -249,10 +219,7 @@
               },
               "inputs": {
                 "outcome": {
-                  "from": {
-                    "node": "turn",
-                    "port": "outcome"
-                  }
+                  "$ref": "turn.outcome"
                 }
               }
             },
@@ -313,16 +280,10 @@
               },
               "inputs": {
                 "generated": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "generated"
-                  }
+                  "$ref": "%loop.generated"
                 },
                 "additions": {
-                  "from": {
-                    "node": "turn",
-                    "port": "messages"
-                  }
+                  "$ref": "turn.messages"
                 }
               }
             },
@@ -334,22 +295,13 @@
               },
               "inputs": {
                 "params.calls": {
-                  "from": {
-                    "node": "turn",
-                    "port": "tool_calls"
-                  }
+                  "$ref": "turn.tool_calls"
                 },
                 "params.tools": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "tools"
-                  }
+                  "$ref": "%loop.tools"
                 },
                 "params.tool_properties": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "tool_properties"
-                  }
+                  "$ref": "%loop.tool_properties"
                 }
               }
             },
@@ -372,16 +324,10 @@
               },
               "inputs": {
                 "generated": {
-                  "from": {
-                    "node": "append_assistant",
-                    "port": "generated"
-                  }
+                  "$ref": "append_assistant.generated"
                 },
                 "results": {
-                  "from": {
-                    "node": "dispatch",
-                    "port": "results"
-                  }
+                  "$ref": "dispatch.results"
                 }
               }
             },
@@ -400,10 +346,7 @@
               },
               "inputs": {
                 "generated": {
-                  "from": {
-                    "node": "append_assistant",
-                    "port": "generated"
-                  }
+                  "$ref": "append_assistant.generated"
                 }
               }
             },
@@ -424,12 +367,10 @@
                 "generated": {
                   "exclusive": [
                     {
-                      "node": "append_tool_results",
-                      "port": "generated"
+                      "$ref": "append_tool_results.generated"
                     },
                     {
-                      "node": "completed_generated",
-                      "port": "generated"
+                      "$ref": "completed_generated.generated"
                     }
                   ]
                 }
@@ -464,10 +405,7 @@
                       },
                       "inputs": {
                         "messages": {
-                          "from": {
-                            "node": "empty",
-                            "port": "value"
-                          }
+                          "$ref": "empty.value"
                         }
                       }
                     }
@@ -490,16 +428,10 @@
               },
               "inputs": {
                 "params.prefix": {
-                  "from": {
-                    "node": "reply_generated",
-                    "port": "generated"
-                  }
+                  "$ref": "reply_generated.generated"
                 },
                 "params.generated": {
-                  "from": {
-                    "node": "steering",
-                    "port": "messages"
-                  }
+                  "$ref": "steering.messages"
                 }
               }
             },
@@ -520,16 +452,10 @@
               },
               "inputs": {
                 "additions": {
-                  "from": {
-                    "node": "steering",
-                    "port": "messages"
-                  }
+                  "$ref": "steering.messages"
                 },
                 "outcome": {
-                  "from": {
-                    "node": "turn",
-                    "port": "outcome"
-                  }
+                  "$ref": "turn.outcome"
                 }
               }
             },
@@ -552,16 +478,10 @@
               },
               "inputs": {
                 "generated": {
-                  "from": {
-                    "node": "append_assistant",
-                    "port": "generated"
-                  }
+                  "$ref": "append_assistant.generated"
                 },
                 "outcome": {
-                  "from": {
-                    "node": "turn",
-                    "port": "outcome"
-                  }
+                  "$ref": "turn.outcome"
                 }
               }
             },
@@ -586,24 +506,20 @@
                 "generated": {
                   "exclusive": [
                     {
-                      "node": "steered_generated",
-                      "port": "messages"
+                      "$ref": "steered_generated.messages"
                     },
                     {
-                      "node": "failed_reply",
-                      "port": "generated"
+                      "$ref": "failed_reply.generated"
                     }
                   ]
                 },
                 "outcome": {
                   "exclusive": [
                     {
-                      "node": "steered_outcome",
-                      "port": "outcome"
+                      "$ref": "steered_outcome.outcome"
                     },
                     {
-                      "node": "failed_reply",
-                      "port": "outcome"
+                      "$ref": "failed_reply.outcome"
                     }
                   ]
                 }
@@ -716,46 +632,25 @@
       },
       "inputs": {
         "prefix": {
-          "from": {
-            "node": "params",
-            "port": "messages"
-          }
+          "$ref": "params.messages"
         },
         "tool_definitions": {
-          "from": {
-            "node": "catalog",
-            "port": "tools"
-          }
+          "$ref": "catalog.tools"
         },
         "tools": {
-          "from": {
-            "node": "params",
-            "port": "tools"
-          }
+          "$ref": "params.tools"
         },
         "model": {
-          "from": {
-            "node": "params",
-            "port": "model"
-          }
+          "$ref": "params.model"
         },
         "base_url": {
-          "from": {
-            "node": "params",
-            "port": "base_url"
-          }
+          "$ref": "params.base_url"
         },
         "api_key": {
-          "from": {
-            "node": "params",
-            "port": "api_key"
-          }
+          "$ref": "params.api_key"
         },
         "tool_properties": {
-          "from": {
-            "node": "params",
-            "port": "tool_properties"
-          }
+          "$ref": "params.tool_properties"
         }
       }
     },
@@ -781,28 +676,16 @@
       },
       "inputs": {
         "text": {
-          "from": {
-            "node": "repeat",
-            "port": "text"
-          }
+          "$ref": "repeat.text"
         },
         "outcome": {
-          "from": {
-            "node": "repeat",
-            "port": "outcome"
-          }
+          "$ref": "repeat.outcome"
         },
         "error": {
-          "from": {
-            "node": "repeat",
-            "port": "error"
-          }
+          "$ref": "repeat.error"
         },
         "usages": {
-          "from": {
-            "node": "repeat",
-            "port": "usages"
-          }
+          "$ref": "repeat.usages"
         }
       }
     }

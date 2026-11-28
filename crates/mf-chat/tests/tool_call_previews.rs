@@ -233,7 +233,7 @@ fn native_tool_only_previews_accept_call_deltas_and_reject_other_payloads() {
                 {"id":"params","kind":"builtin.parameters","config":{"parameters":{"messages":{"type":{"list":"object"},"secret":false},"api_key":{"type":"string","default":"synthetic-private-key"}}}},
                 {"id":"tools","kind":"builtin.constant","config":{"value":[{"name":"calculator","description":"Calculate","input_schema":{"type":"object"}}]}},
                 {"id":"model","kind":"builtin.llm","config":{"model":"fixture","base_url":server.base_url,"api_key":{"$ref":"params.api_key"}},
-                    "inputs":{"messages":{"from":{"node":"params","port":"messages"}},"tools":{"from":{"node":"tools","port":"value"}}}},
+                    "inputs":{"messages":{"$ref":"params.messages"},"tools":{"$ref":"tools.value"}}},
                 {"id":"result","kind":"builtin.constant","config":{"value":{"status":"succeeded","messages":[{"role":"assistant","content":"Done"}],"usages":[]}}}
             ],
             "edges":[{"from_node":"model","to_node":"result"}],

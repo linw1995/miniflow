@@ -34,23 +34,23 @@ fn definition() -> Result<WorkflowDefinition, Box<dyn Error>> {
             {"id":"add_properties","kind":"builtin.object","config":{"fields":{
                 "description":"string","parameters":"object","interface":"object"
             }},"inputs":{
-                "description":{"from":{"node":"params","port":"add_description"}},
-                "parameters":{"from":{"node":"params","port":"add_parameters"}},
-                "interface":{"from":{"node":"add","port":"properties"}}
+                "description":{"$ref":"params.add_description"},
+                "parameters":{"$ref":"params.add_parameters"},
+                "interface":{"$ref":"add.properties"}
             }},
             {"id":"tools","kind":"builtin.object","config":{"fields":{"add":"flow"}},"inputs":{
-                "add":{"from":{"node":"add","port":"value"}}
+                "add":{"$ref":"add.value"}
             }},
             {"id":"tool_properties","kind":"builtin.object","config":{"fields":{"add":"object"}},"inputs":{
-                "add":{"from":{"node":"add_properties","port":"value"}}
+                "add":{"$ref":"add_properties.value"}
             }},
             {"id":"catalog","kind":"workflow.call","config":{"flow":"catalog"},"inputs":{
-                "params.properties":{"from":{"node":"tool_properties","port":"value"}}
+                "params.properties":{"$ref":"tool_properties.value"}
             }},
             {"id":"dispatch","kind":"workflow.call","config":{"flow":"dispatch"},"inputs":{
-                "params.calls":{"from":{"node":"params","port":"calls"}},
-                "params.tools":{"from":{"node":"tools","port":"value"}},
-                "params.tool_properties":{"from":{"node":"tool_properties","port":"value"}}
+                "params.calls":{"$ref":"params.calls"},
+                "params.tools":{"$ref":"tools.value"},
+                "params.tool_properties":{"$ref":"tool_properties.value"}
             }}
         ],
         "edges":[{"from_node":"catalog","from_output":"tools","to_node":"dispatch"}],

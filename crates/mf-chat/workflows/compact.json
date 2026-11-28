@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-13",
+  "version": "2026-11-28",
   "dependencies": {
     "core": {
       "package": "mfn-core"
@@ -92,10 +92,7 @@
       },
       "inputs": {
         "context": {
-          "from": {
-            "node": "params",
-            "port": "context"
-          }
+          "$ref": "params.context"
         }
       }
     },
@@ -137,10 +134,7 @@
       "kind": "builtin.identity",
       "inputs": {
         "input": {
-          "from": {
-            "node": "params",
-            "port": "messages"
-          }
+          "$ref": "params.messages"
         }
       }
     },
@@ -163,16 +157,10 @@
       },
       "inputs": {
         "messages": {
-          "from": {
-            "node": "params",
-            "port": "messages"
-          }
+          "$ref": "params.messages"
         },
         "append_messages": {
-          "from": {
-            "node": "params",
-            "port": "append_messages"
-          }
+          "$ref": "params.append_messages"
         }
       }
     },
@@ -183,12 +171,10 @@
         "input": {
           "exclusive": [
             {
-              "node": "messages_only",
-              "port": "value"
+              "$ref": "messages_only.value"
             },
             {
-              "node": "append_messages",
-              "port": "messages"
+              "$ref": "append_messages.messages"
             }
           ]
         }
@@ -209,16 +195,10 @@
       },
       "inputs": {
         "enabled": {
-          "from": {
-            "node": "settings_valid",
-            "port": "enabled"
-          }
+          "$ref": "settings_valid.enabled"
         },
         "force": {
-          "from": {
-            "node": "params",
-            "port": "force"
-          }
+          "$ref": "params.force"
         }
       }
     },
@@ -246,10 +226,7 @@
       "kind": "builtin.identity",
       "inputs": {
         "input": {
-          "from": {
-            "node": "combined_messages",
-            "port": "value"
-          }
+          "$ref": "combined_messages.value"
         }
       }
     },
@@ -293,10 +270,7 @@
       },
       "inputs": {
         "messages": {
-          "from": {
-            "node": "combined_messages",
-            "port": "value"
-          }
+          "$ref": "combined_messages.value"
         }
       }
     },
@@ -320,22 +294,13 @@
       },
       "inputs": {
         "messages": {
-          "from": {
-            "node": "combined_messages",
-            "port": "value"
-          }
+          "$ref": "combined_messages.value"
         },
         "usages": {
-          "from": {
-            "node": "params",
-            "port": "usages"
-          }
+          "$ref": "params.usages"
         },
         "state": {
-          "from": {
-            "node": "boundaries",
-            "port": "state"
-          }
+          "$ref": "boundaries.state"
         }
       }
     },
@@ -356,28 +321,16 @@
       },
       "inputs": {
         "tokens_before": {
-          "from": {
-            "node": "estimate_tokens",
-            "port": "tokens_before"
-          }
+          "$ref": "estimate_tokens.tokens_before"
         },
         "force": {
-          "from": {
-            "node": "params",
-            "port": "force"
-          }
+          "$ref": "params.force"
         },
         "context_window": {
-          "from": {
-            "node": "settings_valid",
-            "port": "context_window"
-          }
+          "$ref": "settings_valid.context_window"
         },
         "reserve_tokens": {
-          "from": {
-            "node": "settings_valid",
-            "port": "reserve_tokens"
-          }
+          "$ref": "settings_valid.reserve_tokens"
         }
       }
     },
@@ -388,12 +341,10 @@
         "input": {
           "exclusive": [
             {
-              "node": "disabled_result",
-              "port": "tokens_before"
+              "$ref": "disabled_result.tokens_before"
             },
             {
-              "node": "estimate_tokens",
-              "port": "tokens_before"
+              "$ref": "estimate_tokens.tokens_before"
             }
           ]
         }
@@ -423,10 +374,7 @@
       "kind": "builtin.identity",
       "inputs": {
         "input": {
-          "from": {
-            "node": "combined_messages",
-            "port": "value"
-          }
+          "$ref": "combined_messages.value"
         }
       }
     },
@@ -461,52 +409,28 @@
       },
       "inputs": {
         "params.messages": {
-          "from": {
-            "node": "combined_messages",
-            "port": "value"
-          }
+          "$ref": "combined_messages.value"
         },
         "params.state": {
-          "from": {
-            "node": "boundaries",
-            "port": "state"
-          }
+          "$ref": "boundaries.state"
         },
         "params.tokens_before": {
-          "from": {
-            "node": "estimate_tokens",
-            "port": "tokens_before"
-          }
+          "$ref": "estimate_tokens.tokens_before"
         },
         "params.keep_recent_tokens": {
-          "from": {
-            "node": "settings_valid",
-            "port": "keep_recent_tokens"
-          }
+          "$ref": "settings_valid.keep_recent_tokens"
         },
         "params.custom_instructions": {
-          "from": {
-            "node": "settings_valid",
-            "port": "custom_instructions"
-          }
+          "$ref": "settings_valid.custom_instructions"
         },
         "params.model": {
-          "from": {
-            "node": "params",
-            "port": "model"
-          }
+          "$ref": "params.model"
         },
         "params.base_url": {
-          "from": {
-            "node": "params",
-            "port": "base_url"
-          }
+          "$ref": "params.base_url"
         },
         "params.api_key": {
-          "from": {
-            "node": "params",
-            "port": "api_key"
-          }
+          "$ref": "params.api_key"
         }
       }
     },
@@ -517,16 +441,13 @@
         "input": {
           "exclusive": [
             {
-              "node": "disabled_result",
-              "port": "status"
+              "$ref": "disabled_result.status"
             },
             {
-              "node": "below_result",
-              "port": "status"
+              "$ref": "below_result.status"
             },
             {
-              "node": "run_compaction",
-              "port": "status"
+              "$ref": "run_compaction.status"
             }
           ]
         }
@@ -539,16 +460,13 @@
         "input": {
           "exclusive": [
             {
-              "node": "disabled_result",
-              "port": "compacted"
+              "$ref": "disabled_result.compacted"
             },
             {
-              "node": "below_result",
-              "port": "compacted"
+              "$ref": "below_result.compacted"
             },
             {
-              "node": "run_compaction",
-              "port": "compacted"
+              "$ref": "run_compaction.compacted"
             }
           ]
         }
@@ -561,16 +479,13 @@
         "input": {
           "exclusive": [
             {
-              "node": "disabled_messages",
-              "port": "value"
+              "$ref": "disabled_messages.value"
             },
             {
-              "node": "below_messages",
-              "port": "value"
+              "$ref": "below_messages.value"
             },
             {
-              "node": "run_compaction",
-              "port": "messages"
+              "$ref": "run_compaction.messages"
             }
           ]
         }
@@ -583,16 +498,13 @@
         "input": {
           "exclusive": [
             {
-              "node": "disabled_result",
-              "port": "summary"
+              "$ref": "disabled_result.summary"
             },
             {
-              "node": "below_result",
-              "port": "summary"
+              "$ref": "below_result.summary"
             },
             {
-              "node": "run_compaction",
-              "port": "summary"
+              "$ref": "run_compaction.summary"
             }
           ]
         }
@@ -605,16 +517,13 @@
         "input": {
           "exclusive": [
             {
-              "node": "disabled_usages",
-              "port": "value"
+              "$ref": "disabled_usages.value"
             },
             {
-              "node": "below_usages",
-              "port": "value"
+              "$ref": "below_usages.value"
             },
             {
-              "node": "run_compaction",
-              "port": "usages"
+              "$ref": "run_compaction.usages"
             }
           ]
         }
@@ -627,16 +536,13 @@
         "input": {
           "exclusive": [
             {
-              "node": "disabled_result",
-              "port": "read_files"
+              "$ref": "disabled_result.read_files"
             },
             {
-              "node": "below_result",
-              "port": "read_files"
+              "$ref": "below_result.read_files"
             },
             {
-              "node": "run_compaction",
-              "port": "read_files"
+              "$ref": "run_compaction.read_files"
             }
           ]
         }
@@ -649,16 +555,13 @@
         "input": {
           "exclusive": [
             {
-              "node": "disabled_result",
-              "port": "modified_files"
+              "$ref": "disabled_result.modified_files"
             },
             {
-              "node": "below_result",
-              "port": "modified_files"
+              "$ref": "below_result.modified_files"
             },
             {
-              "node": "run_compaction",
-              "port": "modified_files"
+              "$ref": "run_compaction.modified_files"
             }
           ]
         }
@@ -671,16 +574,13 @@
         "input": {
           "exclusive": [
             {
-              "node": "disabled_result",
-              "port": "error"
+              "$ref": "disabled_result.error"
             },
             {
-              "node": "below_result",
-              "port": "error"
+              "$ref": "below_result.error"
             },
             {
-              "node": "run_compaction",
-              "port": "error"
+              "$ref": "run_compaction.error"
             }
           ]
         }

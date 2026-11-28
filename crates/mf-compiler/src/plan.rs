@@ -1330,7 +1330,7 @@ mod tests {
                     "parameters":{"callback":{"type":"flow", "secret":false}}
                 }},
                 {"id":"apply", "kind":"workflow.call", "config":{"inputs":[], "outputs":[]},
-                    "inputs":{"flow":{"from":{"node":"formal", "port":"callback"}}}}
+                    "inputs":{"flow":{"$ref":"formal.callback"}}}
             ]
         }))
         .unwrap();

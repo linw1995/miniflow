@@ -169,8 +169,7 @@ fn generated_streams_run_in_tui_with_parameters_files_and_interrupts() {
     };
     let graph = json!({"version":"2026-10-03", "execution":{},
         "dependencies":{"core":{"package":"mfn-core", "path":crates.join("builtin-nodes/core")}},
-        "nodes":[{"id":"read", "kind":"builtin.readline"}, {"id":"consume", "kind":"builtin.identity"}],
-        "edges":[{"from_node":"read", "from_output":"line", "to_node":"consume", "to_input":"input"}],
+        "nodes":[{"id":"read", "kind":"builtin.readline"}, {"id":"consume", "kind":"builtin.identity", "inputs":{"input":{"$ref":"read.line"}}}],
         "outputs":[{"name":"value", "node":"consume", "port":"value"}]});
     compile(graph.clone(), &source);
     fs::remove_file(&definition).unwrap();

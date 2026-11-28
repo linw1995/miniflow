@@ -136,9 +136,8 @@ fn typed_tasks_use_the_same_adapter_and_context_in_task_and_stream_domains() {
             "version":"2026-10-03", "dependencies":{},
             "nodes":[
                 {"id":"source", "kind":"test.typed_task_source", "config":{"stream":streaming}},
-                {"id":"add", "kind":"test.typed_add"}
+                {"id":"add", "kind":"test.typed_add", "inputs":{"item":{"$ref":"source.item"}}}
             ],
-            "edges":[{"from_node":"source", "from_output":"item", "to_node":"add", "to_input":"item"}],
             "outputs":[{"name":"result", "node":"add", "port":"value"}]
         });
         if streaming {
@@ -188,13 +187,10 @@ fn derived_outputs_reject_disjoint_consumers_before_execution() {
         "version":"2026-10-03", "dependencies":{},
         "nodes":[
             {"id":"source", "kind":"test.typed_task_source"},
-            {"id":"add", "kind":"test.typed_add"},
-            {"id":"sink", "kind":"test.typed_output_sink"}
+            {"id":"add", "kind":"test.typed_add", "inputs":{"item":{"$ref":"source.item"}}},
+            {"id":"sink", "kind":"test.typed_output_sink", "inputs":{"value":{"$ref":"add.value"}}}
         ],
-        "edges":[
-            {"from_node":"source", "from_output":"item", "to_node":"add", "to_input":"item"},
-            {"from_node":"add", "from_output":"value", "to_node":"sink", "to_input":"value"}
-        ], "outputs":[]
+         "outputs":[]
     }))
     .unwrap();
     let error =

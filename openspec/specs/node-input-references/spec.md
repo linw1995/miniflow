@@ -2,22 +2,20 @@
 
 ## Purpose
 
-Define versioned node-local data bindings that normalize into a complete dependency graph while preserving types, scope, exclusivity, and execution semantics.
+Define node-local data bindings that normalize into a complete dependency graph while preserving types, scope, exclusivity, and execution semantics.
 
 ## Requirements
 
-### Requirement: Select binding syntax by definition version
+### Requirement: Use one binding syntax in every scope
 
-Version `2026-10-19` SHALL support node-local inputs and execution-only edges. Existing versions SHALL retain their
-original data edges and control gates and reject node-local inputs. Child bodies SHALL be complete Flow definitions
-with their own version; their bindings SHALL follow that version rather than the root's version. Every JSON
-and programmatic entry point MUST enforce version-specific fields without shape-based guessing. The new version SHALL
-inherit previously supported features.
+All supported versions SHALL use consumer-local references for data inputs and top-level edges only for execution
+prerequisites. Root and child scopes SHALL reject legacy endpoint bindings, data edges with target input ports, and
+`control_edges`. The effective scope version SHALL still govern unrelated features such as Task-success prerequisites.
 
-#### Scenario: Reject mixed formats
+#### Scenario: Reject legacy connections
 
-- **WHEN** a new-version document includes `control_edges` or an edge with `to_input`, or a legacy document includes node-local inputs
-- **THEN** validation rejects the version-incompatible field, including within bodies
+- **WHEN** a definition declares an old version or inherits it from the root
+- **THEN** neither parsing nor serialization falls back to the old connection syntax
 
 #### Scenario: Preserve startup and streaming support
 
@@ -26,15 +24,21 @@ inherit previously supported features.
 
 ### Requirement: Declare input sources on the consumer
 
-New-version nodes SHALL accept an optional input-port map whose values are strict `from` endpoint objects or `exclusive`
-endpoint lists. Endpoints SHALL name node and port separately. Exclusive lists SHALL contain at least two distinct
+Each ordinary input and each `exclusive` candidate SHALL use the whole-output configuration reference
+form `{"$ref":"node.port"}`. Exclusive lists SHALL contain at least two distinct
 sources. Duplicate input keys, unknown fields, null bindings, mixed variants, and unsupported shapes MUST fail. Empty
 maps SHALL be omitted on serialization.
 
 #### Scenario: Bind an ordinary input
 
-- **WHEN** `inputs.repository.from` names node `params` and port `repository`
+- **WHEN** `inputs.repository` is `{"$ref":"params.repository"}` in any supported scope
 - **THEN** that output binds the consumer input and establishes its dependency without a separate edge
+
+#### Scenario: Address dotted names before provider discovery
+
+- **WHEN** a `$ref` input names an output with dots in either component
+- **THEN** structural planning uses the unique in-scope node prefix followed by a nonempty port, including implicit scope sources
+- **AND** unknown or ambiguous prefixes fail rather than silently changing endpoints on read or serialization
 
 #### Scenario: Bind exclusive alternatives
 
@@ -48,10 +52,9 @@ maps SHALL be omitted on serialization.
 
 ### Requirement: Normalize before dependency analysis
 
-All definition-based compiler paths SHALL normalize version-selected author definitions before dependency analysis,
+All definition-based compiler paths SHALL normalize authored input references before dependency analysis,
 including supported bodies. Canonical data bindings SHALL be distinct from new authoring execution edges. Normalization
-SHALL preserve source definitions, remain deterministic, and avoid duplicate dependencies. Equivalent legacy and new
-workflows without success edges SHALL have equivalent semantic graphs.
+SHALL preserve source definitions, remain deterministic, and avoid duplicate dependencies. The graph description SHALL expose ordinary and exclusive input routes as data edges.
 
 #### Scenario: Reject a combined cycle
 
@@ -90,7 +93,7 @@ candidates. Isolated execution SHALL still accept resolved inputs without predec
 - **WHEN** a reference violates existing input-domain rules
 - **THEN** compilation rejects it without adding correlation or buffering
 
-### Requirement: Keep configuration references separate
+### Requirement: Share reference syntax without inferring execution from configuration
 
 Input bindings SHALL select whole outputs without literals, projection, interpolation, or fallback expressions.
 Configuration references SHALL retain existing explicit-ancestor and missing/skipped-read rules. Input and execution
@@ -106,19 +109,7 @@ dependencies MAY establish ancestry, but mentioning an output in configuration S
 - **WHEN** configuration mentions a producer without a dependency path
 - **THEN** compilation retains its existing rejection
 
-### Requirement: Preserve legacy definitions during migration
+#### Scenario: Inspect input routing
 
-Existing versions SHALL retain their original serialized shapes and behavior. Migration to the new version SHALL move
-data mappings into inputs and output gates into edges without changing their semantics. Branch-output gates MUST NOT be
-replaced automatically by node-success edges. Updated readers SHALL retain legacy support; unsupported versions MUST
-fail explicitly.
-
-#### Scenario: Migrate conditional convergence
-
-- **WHEN** an old exclusive group is moved into inputs and its control gates are moved into new edges
-- **THEN** its data selection, branch activation, results, and existing proof remain equivalent
-
-#### Scenario: Run an unchanged legacy workflow
-
-- **WHEN** a caller loads a supported old definition
-- **THEN** its edges retain data-binding semantics and no format rewrite is required
+- **WHEN** a runner previews a consumer with an ordinary input, an exclusive input, and a configuration reference
+- **THEN** its description includes the ordinary data edge and one exclusive edge per candidate, but no edge for the configuration read

@@ -95,11 +95,12 @@ fn loop_definition(mut body: Value) -> WorkflowDefinition {
             {"id": "repeat", "kind": "loop.run", "config": {
                 "max_iterations": 1, "variables": [{"name": "x", "type": "int"}],
                 "body": body
-            }}
+            },
+            "inputs":{"x":{"$ref":"seed.value"}}}
         ],
-        "edges": [{"from_node": "seed", "from_output": "value", "to_node": "repeat", "to_input": "x"}],
         "outputs": [{"name": "x", "node": "repeat", "port": "x"}]
-    })).unwrap()
+    }))
+    .unwrap()
 }
 
 #[test]
@@ -157,11 +158,12 @@ fn iteration_failures_preserve_item_context_and_typed_workflow_sources() {
                         "nodes": [{"id": "fail", "kind": "test.error_source"}],
                         "outputs": [{"name":"result", "node": "fail", "port": "result"}]
                     }
-                }}
+                },
+                "inputs":{"items":{"$ref":"items.value"}}}
             ],
-            "edges": [{"from_node": "items", "from_output": "value", "to_node": "each", "to_input": "items"}],
             "outputs": [{"name": "results", "node": "each", "port": "results"}]
-        })).unwrap();
+        }))
+        .unwrap();
         let plan = compile_definition(&definition, &registry).unwrap();
         let flow = instantiate_compiled(&plan, &registry).unwrap();
         let error = flow.execute().unwrap_err();
@@ -210,9 +212,9 @@ fn subgraph_compilation_preserves_nested_configuration_errors() {
             {"id": "seed", "kind": "builtin.constant", "config": {"value": []}},
             {"id": "each", "kind": "builtin.iteration", "config": {"body": {"version":"2026-09-26", "dependencies":{},
                 "nodes": [broken], "outputs": [{"name":"result", "node": "broken", "port": "value"}]
-            }}}
-        ],
-        "edges": [{"from_node": "seed", "from_output": "value", "to_node": "each", "to_input": "items"}]
+            }},
+            "inputs":{"items":{"$ref":"seed.value"}}}
+        ]
     })).unwrap();
     for definition in [loop_definition, iteration_definition] {
         let error = compile_definition(&definition, &registry).unwrap_err();
@@ -281,18 +283,19 @@ fn malformed_loop_assignment_configuration_preserves_json_sources_and_scope() {
 #[test]
 fn loop_structure_errors_preserve_the_typed_inner_compilation_error() {
     let definition = loop_definition(json!({
-        "nodes": [{"id": "assign", "kind": "workflow.assign", "config": {"variable": "x"}}],
-        "edges": [{"from_node": "missing", "from_output": "value", "to_node": "assign", "to_input": "value"}]
+        "nodes": [{"id": "assign", "kind": "workflow.assign", "config": {"variable": "x"}, "inputs":{"value":{"$ref":"assign.done"}}}]
     }));
     let error = plan_definition(&definition).unwrap_err();
     assert!(
         matches!(error, WorkflowCompileError::ChildGraph { ref definition_id, .. }
         if definition_id.as_str() == "repeat")
     );
-    assert!(
-        matches!(find_source::<Box<WorkflowCompileError>>(&error).unwrap().as_ref(),
-        WorkflowCompileError::UnknownEdgeSource { from_node, .. } if from_node.as_str() == "missing")
-    );
+    assert!(matches!(
+        find_source::<Box<WorkflowCompileError>>(&error)
+            .unwrap()
+            .as_ref(),
+        WorkflowCompileError::Cycle { .. }
+    ));
 }
 
 fn inference_node(
@@ -481,9 +484,8 @@ fn native_producer_io_failures_preserve_the_original_source() {
         "version": "2026-10-03", "execution": {}, "dependencies": {},
         "nodes": [
             {"id": "path", "kind": "builtin.constant", "config": {"value": missing}},
-            {"id": "read", "kind": "fixture.read_lines", "config": {}}
+            {"id": "read", "kind": "fixture.read_lines", "config": {}, "inputs":{"path":{"$ref":"path.value"}}}
         ],
-        "edges": [{"from_node": "path", "from_output": "value", "to_node": "read", "to_input": "path"}],
         "outputs": [{"name": "line", "node": "read", "port": "line"}]
     })).unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();

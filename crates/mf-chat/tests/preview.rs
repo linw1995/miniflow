@@ -479,7 +479,7 @@ fn embedded_native_stream_graphs_keep_their_coordinator() {
         "nodes":[
             {"id":"begin", "kind":"test.chat.streaming"},
             {"id":"preview", "kind":"test.chat.preview_event", "inputs":{
-                "delta":{"from":{"node":"begin","port":"delta"}}
+                "delta":{"$ref":"begin.delta"}
             }}
         ],
         "outputs":[

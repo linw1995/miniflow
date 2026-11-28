@@ -67,7 +67,7 @@ fn graph() -> Value {
         {"id":"b", "kind":"test.dynamic", "config":{"ports":["done"]}},
         {"id":"c", "kind":"test.dynamic", "config":{"ports":["yes","else"],"reference":"a.value"}}
     ],
-    "control_edges":[
+    "edges":[
         {"from_node":"a","from_output":"value","to_node":"b"},
         {"from_node":"b","from_output":"done","to_node":"c"}
     ]})
@@ -126,14 +126,14 @@ fn generated_body_snapshots_reuse_prepared_factories_and_preserve_dotted_keys() 
                         {"id": "b", "kind": "test.dynamic", "config": {"ports": ["done"], "count_body": true}},
                         {"id": "c", "kind": "test.dynamic", "config": {"ports": ["done"], "count_body": true}}
                     ],
-                    "control_edges": [
+                    "edges": [
                         {"from_node": "a.part", "from_output": "value.part", "to_node": "b"},
                         {"from_node": "a.part", "from_output": "value.part", "to_node": "c"}
                     ]
                 }
-            }}
-        ],
-        "edges": [{"from_node": "seed", "from_output": "value", "to_node": "repeat", "to_input": "count"}]
+            },
+            "inputs":{"count":{"$ref":"seed.value"}}}
+        ]
     }));
     let plan = plan_definition(&definition).unwrap();
     BODY_CONSTRUCTIONS.store(0, Ordering::SeqCst);
@@ -151,7 +151,7 @@ fn rejects_missing_and_unordered_context_references() {
         assert!(error(value).contains(reference));
     }
     let mut value = graph();
-    value["control_edges"] = json!([]);
+    value["edges"] = json!([]);
     let message = error(value);
     assert!(message.contains("explicit dependency") && message.contains("branch-test"));
     let mut value = graph();
@@ -176,7 +176,8 @@ fn validates_sparse_references_in_a_deep_shared_graph() {
     for index in [2000, 3999] {
         nodes[index]["config"]["reference"] = json!("n0000.value");
     }
-    let mut value = json!({"version": "2026-09-26", "dependencies": {}, "nodes": nodes, "control_edges": controls});
+    let mut value =
+        json!({"version": "2026-09-26", "dependencies": {}, "nodes": nodes, "edges": controls});
     let registry = mf_compiler::NodeRegistry::from_inventory().unwrap();
     validate_definition(&definition(value.clone()), &registry).unwrap();
     value["nodes"][3999]["config"]["reference"] = json!("isolated.value");
@@ -198,7 +199,7 @@ fn rejects_port_collisions_and_invalid_descriptors() {
         .as_object_mut()
         .unwrap()
         .remove("reference");
-    value["control_edges"] = json!([]);
+    value["edges"] = json!([]);
     assert!(error(value).contains("a.b.c"));
 }
 #[test]
@@ -206,27 +207,24 @@ fn exact_dotted_references_do_not_split_names() {
     let mut value = graph();
     value["nodes"][0]["id"] = json!("a.source");
     value["nodes"][2]["config"]["reference"] = json!("a.source.value");
-    value["control_edges"][0]["from_node"] = json!("a.source");
+    value["edges"][0]["from_node"] = json!("a.source");
     validate_definition(&definition(value), &NodeRegistry::from_inventory().unwrap()).unwrap();
 }
 #[test]
 fn validates_control_structure_and_union_cycles() {
     let mut value = graph();
-    value["control_edges"]
+    value["edges"]
         .as_array_mut()
         .unwrap()
         .push(json!({"from_node":"c","from_output":"yes","to_node":"a"}));
     assert!(error(value).contains("cycle"));
     let mut value = graph();
-    let duplicate = value["control_edges"][0].clone();
-    value["control_edges"]
-        .as_array_mut()
-        .unwrap()
-        .push(duplicate);
+    let duplicate = value["edges"][0].clone();
+    value["edges"].as_array_mut().unwrap().push(duplicate);
     assert!(error(value).contains("duplicate"));
     for field in ["from_node", "to_node", "from_output"] {
         let mut value = graph();
-        value["control_edges"][0][field] = json!("unknown");
+        value["edges"][0][field] = json!("unknown");
         assert!(error(value).contains("unknown"));
     }
     let mut value = graph();
@@ -234,7 +232,7 @@ fn validates_control_structure_and_union_cycles() {
         .as_object_mut()
         .unwrap()
         .remove("reference");
-    value["control_edges"] = json!([]);
+    value["edges"] = json!([]);
     let parsed = definition(value);
     assert!(
         serde_json::to_value(parsed)
@@ -247,12 +245,10 @@ fn validates_control_structure_and_union_cycles() {
 #[test]
 fn plans_union_dependencies_once_and_rejects_mixed_cycles() {
     let mut value = graph();
-    value["edges"] =
-        json!([{"from_node":"a","from_output":"value","to_node":"b","to_input":"input"}]);
+    value["nodes"][1]["inputs"]["input"] = json!({"$ref":"a.value"});
     let plan = plan_definition(&definition(value.clone())).unwrap();
     assert_eq!(plan.graph.execution_order.len(), 3);
-    value["edges"][0] =
-        json!({"from_node":"c","from_output":"yes","to_node":"a","to_input":"input"});
+    value["nodes"][0]["inputs"]["input"] = json!({"$ref":"c.yes"});
     assert!(
         plan_definition(&definition(value))
             .unwrap_err()
