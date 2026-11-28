@@ -8130,11 +8130,24 @@ assert not reply.readline()
             assert_eq!(view.root.body_display(view.state.selected), Some(expected));
             assert_eq!(view.root.nodes()[view.state.selected].id, "execute");
         }
-        // A route placeholder acts on the Router's entire branch set.
+        // Details list the aggregate's branch members and merged status.
         view.state.selected = view
             .root
             .display_index_for_scoped_node(&first, "calculate")
             .unwrap();
+        view.state.details_visible = true;
+        let reader = ObservationReader::detached(description.clone(), RunId::new()).unwrap();
+        let screen = render_observation_screen(
+            &mut view,
+            &reader,
+            &CaptureView::default(),
+            Duration::ZERO,
+            None,
+            Presentation::Preview,
+        );
+        assert!(screen.contains("Route: first"), "{screen}");
+        assert!(screen.contains("calculate: Pending"), "{screen}");
+        // A route placeholder acts on the Router's entire branch set.
         view.handle_navigation(KeyCode::Char('l'), &snapshot, &traces, &logs);
         assert_eq!(
             view.root.body_display(view.state.selected),

@@ -297,6 +297,80 @@ fn router_half_fold_projects_each_static_route_as_one_aggregate_node() {
 }
 
 #[test]
+fn router_route_summary_respects_the_shared_node_budget() {
+    let path = vec![ScopePathEntry::binding_key("execute", "first")];
+    let nodes: Vec<_> = (0..MAX_SESSION_NODES)
+        .map(|index| json!({"id":format!("leaf-{index}"), "kind":"fixture.task"}))
+        .collect();
+    let order: Vec<_> = nodes.iter().map(|node| node["id"].clone()).collect();
+    let description: WorkflowDescription = serde_json::from_value(json!({
+        "version":"2026-11-09", "workflow_id":format!("sha256:{}", "c".repeat(64)),
+        "execution":{"mode":"single"},
+        "nodes":[{"id":"execute", "kind":"builtin.router"}],
+        "execution_order":["execute"], "data_edges":[], "control_edges":[],
+        "loop_bodies":[{
+            "path":path, "nodes":nodes, "execution_order":order,
+            "data_edges":[], "control_edges":[]
+        }]
+    }))
+    .unwrap();
+    description.validate().unwrap();
+    let states: BTreeMap<_, _> = description
+        .loop_bodies
+        .iter()
+        .map(|body| (body.path.clone(), BodyDisplay::Summary))
+        .collect();
+    // The Router's own node leaves one slot short of the route's members.
+    assert!(matches!(
+        GraphLayout::with_body_states(
+            &description,
+            ConnectionView::Execution,
+            &states,
+            &BTreeMap::new(),
+        ),
+        Err(GraphError::TooManyNodes { limit }) if limit == MAX_SESSION_NODES
+    ));
+}
+
+#[test]
+fn router_half_fold_labels_bodies_without_a_binding_key_by_their_scope_id() {
+    let description: WorkflowDescription = serde_json::from_value(json!({
+        "version":"2026-11-09", "workflow_id":format!("sha256:{}", "d".repeat(64)),
+        "execution":{"mode":"single"},
+        "nodes":[{"id":"execute", "kind":"builtin.router"}],
+        "execution_order":["execute"], "data_edges":[], "control_edges":[],
+        "loop_bodies":[{
+            "path":["execute"], "nodes":[{"id":"leaf", "kind":"fixture.task"}],
+            "execution_order":["leaf"], "data_edges":[], "control_edges":[]
+        }]
+    }))
+    .unwrap();
+    description.validate().unwrap();
+    let states: BTreeMap<_, _> = description
+        .loop_bodies
+        .iter()
+        .map(|body| (body.path.clone(), BodyDisplay::Summary))
+        .collect();
+    let layout = GraphLayout::with_body_states(
+        &description,
+        ConnectionView::Execution,
+        &states,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert_eq!(layout.nodes().len(), 2);
+    let placeholder = (0..layout.nodes().len())
+        .find(|display| layout.is_route_summary(*display))
+        .unwrap();
+    assert_eq!(layout.nodes()[placeholder].id, "execute");
+    assert!(
+        layout
+            .display_index_for_scoped_node(&["execute".into()], "leaf")
+            .is_some_and(|display| display == placeholder)
+    );
+}
+
+#[test]
 fn expanded_binding_body_propagates_the_shared_node_budget_error() {
     let path = vec![ScopePathEntry::binding_key("invoke", "provided")];
     // Each scope fits individually, but the owner plus its body exceeds the display budget.
