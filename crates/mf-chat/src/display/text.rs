@@ -19,7 +19,12 @@ impl PartialEq for Text {
     fn eq(&self, other: &Self) -> bool {
         match (&self.0, &other.0) {
             (None, None) => true,
-            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (Some(a), Some(b)) => {
+                Arc::ptr_eq(a, b)
+                    || matches!(
+                        (a.as_ref(), b.as_ref()), (Source::Inline(left), Source::Inline(right)) if Arc::ptr_eq(left, right)
+                    )
+            }
             _ => false,
         }
     }
@@ -42,7 +47,7 @@ enum Source {
         id: i64,
         bytes: i64,
     },
-    Inline(String),
+    Inline(Arc<str>),
 }
 
 #[derive(diesel::QueryableByName)]
@@ -73,13 +78,15 @@ impl Reader {
     }
 }
 
+impl From<Arc<str>> for Text {
+    fn from(text: Arc<str>) -> Self {
+        Self((!text.is_empty()).then(|| Arc::new(Source::Inline(text))))
+    }
+}
+
 impl Text {
     pub(super) fn inline(text: String) -> Self {
-        if text.is_empty() {
-            Self::default()
-        } else {
-            Self(Some(Arc::new(Source::Inline(text))))
-        }
+        Arc::<str>::from(text).into()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -89,7 +96,7 @@ impl Text {
     pub fn load(&self) -> Result<String, ChatError> {
         match self.0.as_deref() {
             None => Ok(String::new()),
-            Some(Source::Inline(text)) => Ok(text.clone()),
+            Some(Source::Inline(text)) => Ok(text.to_string()),
             Some(Source::Draft { reader, id, bytes }) => {
                 read_draft(&mut reader.0.lock().unwrap(), *id, *bytes)
             }

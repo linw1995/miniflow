@@ -137,14 +137,28 @@ fn cancelling_before_delivery_restores_steering_as_a_draft_not_as_a_follow_up() 
     terminal.wait_for(&["What would you like"]);
     terminal.send(b"Original question\x1b\r");
     terminal.wait_for(&["Paused reply", "Alt+Enter queue", "Alt+S steer"]);
-    terminal.send(b"After success\x1b\rWithdraw next\x1b\rWithdraw steer\x1bs");
-    terminal.wait_for(&["Steering queued"]);
+    terminal.send(b"\x05After success\x1b\rWithdraw next\x1b\rWithdraw steer\x1bs");
+    terminal.wait_for(&[
+        "Queued (next turn)\nAfter success",
+        "Queued (next turn)\nWithdraw next",
+        "Steering requested\nWithdraw steer",
+    ]);
     terminal.send(b"\x1b[1;3A");
-    terminal.wait_for(&["Withdrew next-turn input", "Withdraw next"]);
+    let screen = terminal.wait_for(&[
+        "Withdrew next-turn input",
+        "Withdraw next",
+        "Steering requested\nWithdraw steer",
+    ]);
+    assert!(!screen.contains("Queued (next turn)\nWithdraw next"));
     terminal.send(b"\x15\x1b[1;3B");
-    terminal.wait_for(&["Withdrew steering input", "Withdraw steer"]);
+    let screen = terminal.wait_for(&[
+        "Withdrew steering input",
+        "Withdraw steer",
+        "Queued (next turn)\nAfter success",
+    ]);
+    assert!(!screen.contains("Steering requested"));
     terminal.send(b"\x15Unsent correction\x1bs");
-    terminal.wait_for(&["Steering queued"]);
+    terminal.wait_for(&["Steering requested\nUnsent correction"]);
     terminal.send(b"Newer draft");
     terminal.wait_for(&["Newer draft"]);
     terminal.send(b"\x03");
@@ -235,15 +249,26 @@ fn a_chatflow_without_a_steering_callback_queues_separate_turns_without_prefetch
     terminal.send(b"Original\x1b\r");
     terminal.wait_for(&["Alt+Enter queue"]);
     server.wait_for_requests(1);
-    terminal.send(b"Withdrawn\x1b\r");
-    terminal.wait_for(&["Message queued"]);
+    terminal.send(b"\x05Withdrawn\x1b\r");
+    terminal.wait_for(&["Queued (next turn)\nWithdrawn"]);
     terminal.send(b"\x1b[1;3A");
     terminal.wait_for(&["Withdrew next-turn input", "Withdrawn"]);
     terminal.send(b"\x15Second question\x1b\rThird question\x1b\rStill editing");
-    terminal.wait_for(&["Message queued", "Still editing"]);
+    terminal.wait_for(&[
+        "Queued (next turn)\nSecond question\nQueued (next turn)\nThird question",
+        "Still editing",
+    ]);
     assert_eq!(server.requests().len(), 1);
     release.store(true, Ordering::Release);
-    terminal.wait_for(&["Third reply", "Still editing", "Alt+Enter send"]);
+    let saved = terminal.wait_for(&[
+        "You\nOriginal",
+        "You [queued]\nSecond question",
+        "You [queued]\nThird question",
+        "Third reply",
+        "Still editing",
+        "Alt+Enter send",
+    ]);
+    assert!(!saved.contains("Queued (next turn)"));
     terminal.quit();
     let requests = server.requests();
     assert_eq!(requests.len(), 4);
@@ -286,10 +311,14 @@ fn killing_the_host_after_delivery_leaves_no_steering_on_disk_or_for_replay() {
     live.send(b"Original question\x1b\r");
     live.wait_for(&["First reply", "Alt+S steer"]);
     let queued_marker = "OnlyInTheNextTurnQueue";
-    live.send(format!("{queued_marker}\x1b\r{marker}\x1bs").as_bytes());
-    live.wait_for(&["Steering queued"]);
+    live.send(format!("\x05{queued_marker}\x1b\r{marker}\x1bs").as_bytes());
+    live.wait_for(&[
+        &format!("Queued (next turn)\n{queued_marker}"),
+        &format!("Steering requested\n{marker}"),
+    ]);
     advance.store(true, Ordering::Release);
-    live.wait_for(&["Unfinished revision"]);
+    let screen = live.wait_for(&["Unfinished revision", queued_marker]);
+    assert!(!screen.contains("Steering requested"));
     assert_eq!(
         server.requests()[1].body["messages"][2],
         json!({"role":"user","content":marker})
@@ -360,22 +389,19 @@ fn live_steering_and_next_turn_input_reach_different_requests_and_turns() {
     terminal.wait_for(&["What would you like"]);
     terminal.send(b"Original question\x1b\r");
     terminal.wait_for(&["calculator [add]", "Alt+Enter queue", "Alt+S steer"]);
-    terminal.send(b"Separate question\x1b\rUse both results\x1bs");
-    terminal.wait_for(&["Steering queued"]);
+    terminal.send(b"\x05Separate question\x1b\rUse both results\x1bs");
+    terminal.wait_for(&[
+        "Queued (next turn)\nSeparate question",
+        "Steering requested\nUse both results",
+    ]);
     first.store(true, Ordering::Release);
-    terminal.wait_for(&["Intermediate answer"]);
-    terminal.send(b"Revise the conclusion");
-    terminal.wait_for(&["Revise the conclusion"]);
-    terminal.send(b"\x1bs");
-    // The second checkpoint must not race ahead of the actual UI submission.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while terminal
-        .wait_for(&["Steering queued"])
-        .contains("Revise the conclusion")
-    {
-        assert!(Instant::now() < deadline);
-        thread::sleep(Duration::from_millis(10));
-    }
+    let screen = terminal.wait_for(&[
+        "Intermediate answer",
+        "Queued (next turn)\nSeparate question",
+    ]);
+    assert!(!screen.contains("Steering requested"));
+    terminal.send(b"Revise the conclusion\x1bs");
+    terminal.wait_for(&["Steering requested\nRevise the conclusion"]);
     assert_eq!(
         server.requests().len(),
         2,
@@ -387,7 +413,14 @@ fn live_steering_and_next_turn_input_reach_different_requests_and_turns() {
     terminal.wait_for(&["not accepting steering input", "Late correction"]);
     assert_eq!(server.requests().len(), 4);
     finish_title.store(true, Ordering::Release);
-    terminal.wait_for(&["Separate reply", "Alt+Enter send", "Late correction"]);
+    terminal.wait_for(&[
+        "You [steering]\nUse both results",
+        "You [queued]\nRevise the conclusion",
+        "You [queued]\nSeparate question",
+        "Separate reply",
+        "Alt+Enter send",
+        "Late correction",
+    ]);
     terminal.quit();
 
     let requests = server.requests();

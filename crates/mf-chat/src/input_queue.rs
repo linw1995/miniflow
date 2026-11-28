@@ -1,4 +1,4 @@
-//! In-memory input waiting for a new turn, never for the current runner.
+//! Bounded pending input and the session FIFO for separate turns.
 
 use crate::{ChatError, Completion, Invocation, error::*};
 use snafu::ensure;
@@ -86,6 +86,11 @@ impl<T: AsRef<str>> NextTurnQueue<T> {
 
     pub fn session_id(&self) -> &str {
         &self.current.session_id
+    }
+
+    /// A FIFO view of unclaimed entries. Reading it does not reserve a turn.
+    pub fn pending(&self) -> impl Iterator<Item = &(PendingMessageId, T)> {
+        self.pending.0.iter()
     }
 
     pub fn enqueue(&mut self, message: T) -> Result<PendingMessageId, ChatError> {

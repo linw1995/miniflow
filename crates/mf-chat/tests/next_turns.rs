@@ -132,7 +132,26 @@ fn a_session_worker_claims_one_turn_per_commit_without_receipt_polling() {
         .send(ConversationResult::assistant("four"))
         .unwrap();
     fourth_job.join().unwrap();
-    assert_eq!(host.database().model_context(&session).unwrap().revision, 4);
+    let context = host.database().model_context(&session).unwrap();
+    assert_eq!(context.revision, 4);
+    assert!(context.messages.iter().all(|m| !matches!(
+        m,
+        mf_chat::ChatMessage::User {
+            metadata: Some(_),
+            ..
+        }
+    )));
+    use mf_chat::display::{Message, UserPlacement::*};
+    let page = host.database().display_page(&session, 20, None).unwrap();
+    let placements: Vec<_> = page
+        .messages
+        .iter()
+        .filter_map(|r| match &r.message {
+            Message::User { placement, .. } => Some(*placement),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(placements, [Prompt, Queued, Queued, Queued]);
     assert!(matches!(
         host.queue_next(&session, "too late"),
         Err(ChatError::NextTurnClosed)

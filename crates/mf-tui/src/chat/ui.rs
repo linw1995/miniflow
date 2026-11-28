@@ -7,7 +7,7 @@ use crossterm::{
     },
     execute,
 };
-use mf_chat::display::{Message as DisplayMessage, PreviewSegment, Text};
+use mf_chat::display::{Message as DisplayMessage, PreviewSegment, Text, UserPlacement};
 use ratatui::{
     Terminal, TerminalOptions, Viewport,
     backend::CrosstermBackend,
@@ -130,6 +130,14 @@ fn render_assistant<'a>(
     render_tools(transcript, key, tools, expanded, focused);
 }
 
+fn user_label(placement: UserPlacement) -> &'static str {
+    match placement {
+        UserPlacement::Prompt => "You",
+        UserPlacement::Steering => "You [steering]",
+        UserPlacement::Queued => "You [queued]",
+    }
+}
+
 fn render_message_group(
     transcript: &mut super::transcript::Transcript,
     key: &str,
@@ -143,7 +151,7 @@ fn render_message_group(
         group_gap(transcript, key);
     }
     let (label, content) = match group.message {
-        DisplayMessage::User(content) => ("You", content),
+        DisplayMessage::User { content, placement } => (user_label(*placement), content),
         DisplayMessage::System(content) => ("System", content),
         DisplayMessage::Assistant { content, tools } => {
             let tools = tools.iter().map(|call| ToolGroup {
@@ -447,7 +455,7 @@ pub fn run_chat(path: &Path, options: ChatOptions) -> Result<u8, ChatRunError> {
             if signal.interrupted.swap(false, Ordering::Relaxed) {
                 controller.cancel();
             }
-            view.draw(&mut terminal)?;
+            view.draw(&mut terminal, &controller)?;
             if !event::poll(view.inspector.frame_wait(Duration::from_millis(50))).context(
                 IoSnafu {
                     operation: "poll terminal",
@@ -727,7 +735,7 @@ impl PresentedResult {
 
 enum Admission {
     Editor(u64),
-    Queued,
+    Queued(Invocation),
     Retry,
 }
 
@@ -735,6 +743,36 @@ enum Admission {
 enum InputQueue {
     NextTurn,
     Steering,
+}
+
+#[derive(Default)]
+struct PendingInputs {
+    steering: Vec<(PendingMessageId, Arc<str>)>,
+    next: Vec<(PendingMessageId, Arc<str>)>,
+}
+
+impl PendingInputs {
+    fn render(&self, transcript: &mut super::transcript::Transcript) {
+        for (label, entries) in [
+            ("Steering requested", &self.steering),
+            ("Queued (next turn)", &self.next),
+        ] {
+            for (id, text) in entries {
+                let key = format!("pending:{id:?}");
+                transcript.plain(
+                    format!("{key}:label"),
+                    vec![role_label(label, Color::Yellow, None)],
+                );
+                transcript.deferred(key, &Text::from(text.clone()), Format::Literal);
+            }
+        }
+    }
+}
+
+struct ActivePrompt {
+    invocation: Invocation,
+    text: String,
+    placement: UserPlacement,
 }
 
 struct ChatView {
@@ -758,7 +796,7 @@ struct ChatView {
     model_filter: String,
     pending: Option<Admission>,
     /// The turn being presented until its authoritative messages reload.
-    active: Option<(Invocation, String)>,
+    active: Option<ActivePrompt>,
     /// Whether that turn is still executing, separate from what is presented.
     running: bool,
     host_compacting: bool,
@@ -1026,7 +1064,10 @@ impl ChatView {
                 invocation,
                 prompt,
             } => {
-                if let Some(Admission::Editor(revision)) = self.pending.take()
+                let admission = self.pending.take();
+                let placement = UserPlacement::admitted(matches!(&admission,
+                    Some(Admission::Queued(claimed)) if claimed == &invocation));
+                if let Some(Admission::Editor(revision)) = admission
                     && revision == self.editor.revision
                 {
                     self.editor = Editor::default();
@@ -1036,7 +1077,11 @@ impl ChatView {
                 self.latest_invocation = Some(invocation.clone());
                 self.preview = LivePreview::default();
                 self.reply = None;
-                self.active = Some((invocation, prompt));
+                self.active = Some(ActivePrompt {
+                    invocation,
+                    text: prompt,
+                    placement,
+                });
                 self.running = true;
                 self.host_compacting = false;
                 self.observation = None;
@@ -1053,7 +1098,7 @@ impl ChatView {
                     && self
                         .active
                         .as_ref()
-                        .is_some_and(|(active, _)| active == &invocation)
+                        .is_some_and(|active| active.invocation == invocation)
                 {
                     self.replace_preview(preview);
                 }
@@ -1063,12 +1108,14 @@ impl ChatView {
                     && self
                         .active
                         .as_ref()
-                        .is_some_and(|(current, _)| current == &invocation)
+                        .is_some_and(|current| current.invocation == invocation)
                 {
                     self.host_compacting = active;
                 }
             }
-            ChatEvent::NextTurnClaimed { .. } => self.pending = Some(Admission::Queued),
+            ChatEvent::NextTurnClaimed { invocation, .. } => {
+                self.pending = Some(Admission::Queued(invocation))
+            }
             ChatEvent::UnsentNextTurns {
                 session_id,
                 prompts,
@@ -1088,7 +1135,7 @@ impl ChatView {
                 if self
                     .active
                     .as_ref()
-                    .is_some_and(|(id, _)| id == &invocation)
+                    .is_some_and(|active| active.invocation == invocation)
                 {
                     self.restore_input(prompts);
                 }
@@ -1118,7 +1165,7 @@ impl ChatView {
                 }
                 self.running = false;
                 self.host_compacting = false;
-                let handing_off = matches!(self.pending, Some(Admission::Queued));
+                let handing_off = matches!(self.pending, Some(Admission::Queued(_)));
                 if !handing_off {
                     self.pending = None;
                 }
@@ -1212,11 +1259,11 @@ impl ChatView {
                 if admission {
                     self.pending = None;
                     let was_running = std::mem::take(&mut self.running);
-                    if let Some((_, prompt)) = self.active.take()
+                    if let Some(prompt) = self.active.take()
                         && was_running
                         && self.editor.text.is_empty()
                     {
-                        self.editor.insert(&prompt);
+                        self.editor.insert(&prompt.text);
                     }
                     self.outcome.clear();
                     append_diagnostic(&mut self.outcome, &detail);
@@ -1385,7 +1432,7 @@ impl ChatView {
             InputQueue::Steering => (
                 self.active
                     .as_ref()
-                    .and_then(|(id, _)| controller.steering(id))
+                    .and_then(|p| controller.steering(&p.invocation))
                     .and_then(|inbox| inbox.withdraw_last()),
                 "steering input",
             ),
@@ -1408,19 +1455,17 @@ impl ChatView {
                 .session
                 .as_ref()
                 .context(NextTurnClosedSnafu)
-                .and_then(|s| controller.queue_next(&s.id, text))
-                .map(|_| "Message queued for the next turn"),
+                .and_then(|s| controller.queue_next(&s.id, text)),
             InputQueue::Steering => self
                 .active
                 .as_ref()
                 .context(SteeringClosedSnafu)
-                .and_then(|(id, _)| controller.steer(id, text))
-                .map(|_| "Steering queued for the current reply boundary"),
+                .and_then(|p| controller.steer(&p.invocation, text)),
         };
         match result {
-            Ok(notice) => {
+            Ok(_) => {
                 self.editor = Editor::default();
-                self.notice = notice.into();
+                self.notice.clear();
             }
             Err(error) => self.notice = error.to_string(),
         }
@@ -1430,7 +1475,7 @@ impl ChatView {
         if self.editor.text.trim().is_empty() {
             return;
         }
-        if matches!(self.pending, Some(Admission::Queued)) {
+        if matches!(self.pending, Some(Admission::Queued(_))) {
             self.enqueue(controller, InputQueue::NextTurn);
             return;
         }
@@ -1788,7 +1833,7 @@ impl ChatView {
             Mode::Input => match key.code {
                 KeyCode::Esc => self.mode = Mode::Browse,
                 KeyCode::Up
-                    if (self.running || matches!(self.pending, Some(Admission::Queued)))
+                    if (self.running || matches!(self.pending, Some(Admission::Queued(_))))
                         && key.modifiers.contains(KeyModifiers::ALT) =>
                 {
                     self.withdraw_last(controller, InputQueue::NextTurn)
@@ -1926,9 +1971,23 @@ impl ChatView {
             self.send(controller, ChatCommand::ListSessions { after: next });
         }
     }
+    fn pending_inputs(&self, controller: &ChatController) -> PendingInputs {
+        PendingInputs {
+            steering: self
+                .active
+                .as_ref()
+                .and_then(|p| controller.steering(&p.invocation))
+                .map_or_else(Vec::new, |inbox| inbox.pending()),
+            next: self
+                .session
+                .as_ref()
+                .map_or_else(Vec::new, |s| controller.pending_next(&s.id)),
+        }
+    }
     fn draw(
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<Box<dyn Write>>>,
+        controller: &ChatController,
     ) -> Result<(), ChatRunError> {
         self.transcript
             .get_mut()
@@ -1945,12 +2004,15 @@ impl ChatView {
             }
             self.mode = Mode::Input;
         }
-        terminal.draw(|frame| self.render(frame)).context(IoSnafu {
-            operation: "draw chat",
-        })?;
+        let pending = self.pending_inputs(controller);
+        terminal
+            .draw(|frame| self.render(frame, &pending))
+            .context(IoSnafu {
+                operation: "draw chat",
+            })?;
         Ok(())
     }
-    fn render(&self, frame: &mut ratatui::Frame) {
+    fn render(&self, frame: &mut ratatui::Frame, pending: &PendingInputs) {
         let area = frame.area();
         let input = self.editor.display(self.mode == Mode::Input);
         let input_lines = Paragraph::new(input.clone())
@@ -2091,18 +2153,22 @@ impl ChatView {
             transcript.plain(format!("turn:{turn}:saved:metadata"), metadata);
         }
         let turn = current_turn;
-        if let Some((invocation, prompt)) = &self.active
+        if let Some(prompt) = &self.active
             && !self.page.as_ref().is_some_and(|page| {
                 page.messages
                     .iter()
-                    .any(|record| record.turn_id == invocation.turn_id)
+                    .any(|record| record.turn_id == prompt.invocation.turn_id)
             })
         {
             transcript.plain(
                 format!("turn:{turn}:you:label"),
-                vec![role_label("You", Color::Cyan, None)],
+                vec![role_label(user_label(prompt.placement), Color::Cyan, None)],
             );
-            transcript.literal(format!("turn:{turn}:you:body"), prompt, Style::default());
+            transcript.literal(
+                format!("turn:{turn}:you:body"),
+                &prompt.text,
+                Style::default(),
+            );
             transcript.plain(format!("turn:{turn}:you:metadata"), vec![Line::default()]);
         }
         if !self.outcome.is_empty() {
@@ -2219,6 +2285,7 @@ impl ChatView {
             }
             transcript.plain(format!("turn:{turn}:status"), status);
         }
+        pending.render(&mut transcript);
         if transcript.is_empty() {
             transcript.plain(
                 "welcome".into(),
@@ -2239,7 +2306,7 @@ impl ChatView {
             Mode::Input if self.running && self.supports_steering => {
                 " Alt+Enter queue | Alt+S steer | Alt+Up undo next | Alt+Down undo steer "
             }
-            Mode::Input if self.running || matches!(self.pending, Some(Admission::Queued)) => {
+            Mode::Input if self.running || matches!(self.pending, Some(Admission::Queued(_))) => {
                 " Alt+Enter queue | Alt+Up undo next | Enter newline "
             }
             Mode::Input => " Alt+Enter send | Enter newline | Esc browse ",
@@ -2368,7 +2435,9 @@ mod tests {
     }
     fn render(view: &ChatView, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|frame| view.render(frame)).unwrap();
+        terminal
+            .draw(|frame| view.render(frame, &PendingInputs::default()))
+            .unwrap();
         let buffer = terminal.backend().buffer();
         (0..height)
             .map(|y| {
@@ -3823,7 +3892,7 @@ mod tests {
         view.editor.insert("first prompt");
         view.submit(&controller);
         pump(&mut view, &controller, |view| view.observation.is_some());
-        let invocation = view.active.as_ref().unwrap().0.call_id.clone();
+        let invocation = view.active.as_ref().unwrap().invocation.call_id.clone();
         view.editor.insert("next draft");
         view.mode = Mode::Browse;
         let toggle = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL);
@@ -3856,7 +3925,7 @@ mod tests {
         assert!(view.show_execution);
         assert!(render(&view, 180, 40).contains("Flow: Running"));
         assert!(controller.busy());
-        assert_eq!(view.active.as_ref().unwrap().0.call_id, invocation);
+        assert_eq!(view.active.as_ref().unwrap().invocation.call_id, invocation);
         assert_eq!(view.editor.text, "next draft");
         assert!(view.actions().iter().any(|(action, label)| {
             *action == Action::ToggleExecution && label.starts_with("Hide")
@@ -3904,7 +3973,7 @@ mod tests {
         assert!(view.editor.text.ends_with(" + new draft"));
         let edited = view.editor.text.clone();
         view.submit(&controller);
-        assert_eq!(view.notice, "Message queued for the next turn");
+        assert_eq!(view.pending_inputs(&controller).next[0].1.as_ref(), edited);
         assert!(view.editor.text.is_empty());
         let session = view.session.as_ref().unwrap().id.clone();
         view.key(
@@ -4329,7 +4398,7 @@ mod tests {
             );
             view.event(event, &controller);
             if handoff {
-                assert!(matches!(view.pending, Some(Admission::Queued)));
+                assert!(matches!(view.pending, Some(Admission::Queued(_))));
                 view.act(Action::New, &controller);
                 assert!(view.session.is_some());
                 view.submit(&controller);
@@ -4530,7 +4599,7 @@ mod tests {
             &controller,
         );
         view.event(finish(invocation, "stale final"), &controller);
-        assert_eq!(view.active.as_ref().unwrap().0, next);
+        assert_eq!(view.active.as_ref().unwrap().invocation, next);
         assert!(!render(&view, 100, 30).contains("stale final"));
         controller.close().unwrap();
     }

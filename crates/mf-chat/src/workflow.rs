@@ -1264,6 +1264,7 @@ pub fn run_conversation_with_context_windows(
         &automatic_compaction,
         observer,
         ConversationPresentation {
+            queued_prompt: false,
             on_admitted: None,
             preview,
             tools: None,
@@ -1275,6 +1276,8 @@ pub fn run_conversation_with_context_windows(
 
 #[derive(Default)]
 pub struct ConversationPresentation {
+    /// This invocation admits a prompt claimed from the session's next-turn queue.
+    pub queued_prompt: bool,
     /// Called once, after the original user message and turn have been durably admitted.
     pub on_admitted: Option<Box<dyn FnOnce() + Send>>,
     pub steering: Option<crate::SteeringInbox>,
@@ -1296,6 +1299,7 @@ pub fn run_observed_conversation(
 ) -> Result<ReconciledCompletion, ChatError> {
     automatic_compaction.validate()?;
     let ConversationPresentation {
+        queued_prompt,
         on_admitted,
         mut preview,
         steering,
@@ -1407,7 +1411,7 @@ pub fn run_observed_conversation(
         &plan,
         "begin",
         host_task("begin", move |input| {
-            let started = crate::turn::begin(input)?;
+            let started = crate::turn::begin(input, queued_prompt)?;
             if let Some(notify) = on_admitted.lock().unwrap().take() {
                 notify();
             }

@@ -50,14 +50,19 @@ fn withdrawal_and_claiming_a_batch_have_one_winner() {
     let other = SteeringInbox::new(Invocation::new("target"));
     let first = inbox.submit("same".into()).unwrap();
     let second = inbox.submit("same".into()).unwrap();
+    assert_eq!(
+        inbox.pending(),
+        [(first, "same".into()), (second, "same".into())]
+    );
     assert!(other.withdraw(first).is_none());
     assert_eq!(inbox.withdraw(second).as_deref(), Some("same"));
     assert!(inbox.withdraw(second).is_none());
     let claimed = inbox.take().unwrap();
     assert_eq!(
         claimed.into_iter().collect::<Vec<_>>(),
-        [(first, "same".to_string())]
+        [(first, "same".into())]
     );
+    assert!(inbox.pending().is_empty());
     assert!(inbox.withdraw(first).is_none());
     assert!(inbox.withdraw_last().is_none());
     let late = inbox.submit("later boundary".into()).unwrap();
@@ -88,7 +93,7 @@ fn concurrent_withdrawal_never_removes_an_input_that_the_reader_obtained() {
             }
             None => assert_eq!(
                 claimed.into_iter().collect::<Vec<_>>(),
-                [(id, "racing".to_owned())]
+                [(id, "racing".into())]
             ),
         }
     });
@@ -179,12 +184,83 @@ fn receipts_validate_ordered_steering_text_and_invocation_on_final_output() {
 }
 
 #[test]
+fn identical_pulls_are_labeled_by_returned_display_order_even_across_page_cuts() {
+    use crate::display::{self, Message, UserPlacement::*};
+
+    let (root, db, id) = admitted();
+    let inbox = SteeringInbox::new(id.clone());
+    for _ in 0..4 {
+        inbox.submit("same".into()).unwrap();
+    }
+    let log = DeliveryLog::new(inbox);
+    db.deliveries
+        .with_active(&id, Some(&log), || {
+            log.claim()?.delivered();
+            Ok(())
+        })
+        .unwrap();
+    let user = json!({"role":"user", "content":"same"});
+    let answer = json!({"role":"assistant", "content":"Answer"});
+    let additions: Vec<ChatMessage> = serde_json::from_value(json!([
+        {"role":"assistant", "content":"", "tool_calls":[{"id":"tool", "name":"read", "arguments":{}}]},
+        {"role":"tool", "tool_call_id":"tool", "content":"result"}, user, user, answer, user, user, answer
+    ])).unwrap();
+    let placement = |m: &Message| match m {
+        Message::User { placement, .. } => Some(*placement),
+        _ => None,
+    };
+    let expected = [Steering, Steering, Queued, Queued];
+    let (staged, warning) = display::stage(additions.clone());
+    assert!(warning.is_none());
+    assert_eq!(
+        staged.iter().filter_map(placement).collect::<Vec<_>>(),
+        expected
+    );
+    let result = ConversationResult {
+        update: crate::MessageUpdate::ReplaceContext {
+            display_messages: additions,
+            context_messages: vec![],
+        },
+        ..Default::default()
+    };
+    db.complete_turn(id.clone(), result).unwrap();
+    assert_eq!(
+        db.display_reply(&id, 8)
+            .unwrap()
+            .iter()
+            .filter_map(placement)
+            .collect::<Vec<_>>(),
+        expected
+    );
+    drop(db);
+    let db = ChatDatabase::open(root.path().join("chat.sqlite")).unwrap();
+    for (sequence, kind) in [
+        (0, Prompt),
+        (3, Steering),
+        (4, Steering),
+        (6, Queued),
+        (7, Queued),
+    ] {
+        let page = db
+            .display_page(&id.session_id, 1, Some(sequence - 1))
+            .unwrap();
+        assert_eq!(placement(&page.messages[0].message), Some(kind));
+    }
+    assert!(
+        db.model_context(&id.session_id)
+            .unwrap()
+            .messages
+            .is_empty()
+    );
+}
+
+#[test]
 fn partial_writes_and_overlapping_pulls_cannot_authorize_undelivered_users() {
     let inbox = SteeringInbox::new(Invocation::new("session"));
     let log = DeliveryLog::new(inbox.clone());
     inbox.submit("sent".into()).unwrap();
     log.claim().unwrap().delivered();
-    assert_eq!(*log.messages.lock().unwrap(), ["sent".to_owned()]);
+    assert_eq!(*log.messages.lock().unwrap(), [Arc::from("sent")]);
     let next = SteeringInbox::new(Invocation::new("another session"));
     next.submit("not written".into()).unwrap();
     let second = DeliveryLog::new(next.clone());

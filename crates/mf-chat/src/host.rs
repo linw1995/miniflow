@@ -550,6 +550,7 @@ impl Inner {
             let admitted = Arc::new(AtomicBool::new(false));
             let flag = admitted.clone();
             let presentation = ConversationPresentation {
+                queued_prompt: queued,
                 on_admitted: queued
                     .then(|| Box::new(move || flag.store(true, Ordering::Release)) as _),
                 preview: preview.take(),

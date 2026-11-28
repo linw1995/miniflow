@@ -240,10 +240,22 @@ commit releases at most one queued prompt, in FIFO order. Failure, cancellation,
 result stops the queue and returns unadmitted prompts for editing. Saving that result or reopening
 the application does not restart the queue.
 
-Only `Alt+S` steers. A normal text answer with pending steering also continues the same execution.
+`Alt+S` requests steering. A normal text answer with pending input also continues the same execution.
 No tool is interrupted or replayed. A closed inbox rejects late steering without clearing the editor
 or turning it into a follow-up. Withdrawing from either queue leaves the other queue, the active
 turn and newer edits alone. An already claimed input cannot be withdrawn.
+
+Above the editor, the scrollable transcript shows each waiting message verbatim under
+`Queued (next turn)` or `Steering requested`. Withdrawal or claim removes it from that list;
+claiming a message is not a saved user message. The final labels come from what happened, not
+which key was pressed:
+
+- `You [steering]`: the Flow placed the input after tool results, before the answer.
+- `You [queued]`: the Flow placed it after an assistant answer as a follow-up in the **same** turn,
+  or the host admitted it from the next-turn queue into a **new** turn.
+- `You`: an ordinary prompt. Older admissions with no recorded queue origin keep this label.
+
+These labels also apply to saved history and do not change the text sent to the model.
 
 The standard Agent declares a finite zero-argument `workflow.call` named `callback:steering`. The
 calculator, context, and DeepSeek examples need no steering-specific startup ports, nodes or

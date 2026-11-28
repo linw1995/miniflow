@@ -152,7 +152,7 @@ pub fn load_call(connection: &mut SqliteConnection, id: &str) -> Result<ModelCal
         .context(CallMissingSnafu { id })
 }
 
-pub fn begin(input: BeginTurnInputs) -> Result<TurnStarted, ChatError> {
+pub fn begin(input: BeginTurnInputs, queued_prompt: bool) -> Result<TurnStarted, ChatError> {
     ensure!(
         !input.prompt.is_empty(),
         InvalidSnafu {
@@ -247,7 +247,8 @@ pub fn begin(input: BeginTurnInputs) -> Result<TurnStarted, ChatError> {
         context.messages.push(message.payload.clone());
         let call = ModelCall {
             usages: None,
-            metadata: None,
+            // Admission provenance belongs to the invocation, not the model's user message.
+            metadata: queued_prompt.then(|| [("queued_prompt".into(), true.into())].into()),
             id: input.call_id.clone(),
             session_id: owner.id.clone(),
             turn_id: Some(turn.id.clone()),
@@ -800,20 +801,23 @@ impl ChatDatabase {
         model: ModelIdentity,
         retry_of: Option<String>,
     ) -> Result<TurnStarted, ChatError> {
-        begin(BeginTurnInputs {
-            database_path: self
-                .path()
-                .to_str()
-                .context(PathSnafu { path: self.path() })?
-                .into(),
-            session_id: invocation.session_id,
-            turn_id: invocation.turn_id,
-            call_id: invocation.call_id,
-            prompt: prompt.into(),
-            model,
-            retry_of,
-            result_alternatives: None,
-        })
+        begin(
+            BeginTurnInputs {
+                database_path: self
+                    .path()
+                    .to_str()
+                    .context(PathSnafu { path: self.path() })?
+                    .into(),
+                session_id: invocation.session_id,
+                turn_id: invocation.turn_id,
+                call_id: invocation.call_id,
+                prompt: prompt.into(),
+                model,
+                retry_of,
+                result_alternatives: None,
+            },
+            false,
+        )
     }
 
     pub fn validate_completion(
@@ -1206,7 +1210,7 @@ mod tests {
             (retry, "retry_of"),
         ] {
             assert!(
-                matches!(begin(input), Err(ChatError::Invalid { field, .. }) if field == expected)
+                matches!(begin(input, false), Err(ChatError::Invalid { field, .. }) if field == expected)
             );
         }
         assert_eq!(database.session(&owner.id).unwrap().next_sequence, 0);
@@ -1217,7 +1221,7 @@ mod tests {
                 .messages
                 .is_empty()
         );
-        assert_eq!(begin(base).unwrap().invocation.call_id, "call");
+        assert_eq!(begin(base, false).unwrap().invocation.call_id, "call");
     }
 
     #[test]

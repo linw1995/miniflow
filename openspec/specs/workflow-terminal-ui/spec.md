@@ -891,6 +891,19 @@ SHALL run off the terminal rendering thread, with independent cancellation.
 - **THEN** only the steering text can appear in the current runner's request and display delta
 - **AND** the later prompt starts a different turn after successful settlement, without a view acknowledgment
 
+#### Scenario: Show pending text without predicting the Flow's decision
+
+- **WHEN** either FIFO contains unclaimed messages
+- **THEN** the terminal SHALL show their literal text in FIFO order per destination, distinguishing a queued next turn from a steering request
+- **AND** withdrawing or claiming an entry SHALL remove its pending row without fabricating a transcript message
+
+#### Scenario: Label how input entered the conversation
+
+- **WHEN** the terminal presents a validated display delta or reopens its history
+- **THEN** consecutive user additions after a tool batch SHALL be labeled steering and those after an assistant answer SHALL be labeled queued
+- **AND** a prompt durably admitted from the next-turn queue SHALL be labeled queued, while an ordinary admission SHALL remain unmarked
+- **AND** history pagination, save-only presentation and context replacement MUST NOT change those labels or add them to model inputs
+
 #### Scenario: Withdraw pending input
 
 - **WHEN** the user withdraws from either queue before its boundary pull or next-turn claim

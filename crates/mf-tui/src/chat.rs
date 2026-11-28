@@ -197,7 +197,7 @@ pub enum ChatEvent {
 }
 
 type ActiveSteering = Arc<Mutex<Option<mf_chat::SteeringInbox>>>;
-type ActiveNextTurns = Arc<Mutex<Option<NextTurnQueue>>>;
+type ActiveNextTurns = Arc<Mutex<Option<NextTurnQueue<Arc<str>>>>>;
 
 pub struct ChatController {
     next_turns: ActiveNextTurns,
@@ -306,7 +306,15 @@ impl ChatController {
             .as_mut()
             .filter(|q| q.session_id() == session_id)
             .context(NextTurnClosedSnafu)?
-            .enqueue(text)?)
+            .enqueue(text.into())?)
+    }
+    fn pending_next(&self, session_id: &str) -> Vec<(PendingMessageId, Arc<str>)> {
+        self.next_turns
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|q| q.session_id() == session_id)
+            .map_or_else(Vec::new, |q| q.pending().cloned().collect())
     }
     pub fn withdraw_next(&self, session_id: &str, id: PendingMessageId) -> Option<String> {
         self.next_turns
@@ -315,6 +323,7 @@ impl ChatController {
             .as_mut()
             .filter(|q| q.session_id() == session_id)?
             .withdraw(id)
+            .map(|s| s.to_string())
     }
     pub fn withdraw_last_next(&self, session_id: &str) -> Option<String> {
         self.next_turns
@@ -323,6 +332,7 @@ impl ChatController {
             .as_mut()
             .filter(|q| q.session_id() == session_id)?
             .withdraw_last()
+            .map(|s| s.to_string())
     }
     pub fn supports_steering(&self) -> bool {
         self.supports_steering
@@ -712,6 +722,7 @@ impl Controller {
                     &invocation,
                     &prompt,
                     retry_of.take(),
+                    queued,
                     admitted.clone(),
                 )
             })();
@@ -737,7 +748,7 @@ impl Controller {
                     if queued && !admitted.load(Ordering::Acquire) {
                         unsent.push(std::mem::take(&mut prompt));
                     }
-                    unsent.extend(queue.stop());
+                    unsent.extend(queue.stop().into_iter().map(|s| s.to_string()));
                     *active = None;
                 }
                 next
@@ -770,7 +781,7 @@ impl Controller {
                 return Ok(());
             };
             invocation = next.invocation;
-            prompt = next.message;
+            prompt = next.message.to_string();
             queued = true;
         }
     }
@@ -781,6 +792,7 @@ impl Controller {
         invocation: &Invocation,
         prompt: &str,
         retry_of: Option<String>,
+        queued_prompt: bool,
         admitted: Arc<AtomicBool>,
     ) -> Result<ChatEvent, ChatRunError> {
         ensure!(
@@ -888,6 +900,7 @@ impl Controller {
             &mf_chat::CompactionConfig::default(),
             None,
             mf_chat::workflow::ConversationPresentation {
+                queued_prompt,
                 on_admitted: Some(Box::new(move || {
                     admitted.store(true, Ordering::Release);
                     emit(&output, &closed, submitted);

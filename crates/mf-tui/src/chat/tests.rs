@@ -509,7 +509,11 @@ fn history_pages_start_at_the_tail_and_do_not_overlap_across_failed_turns() {
     let ChatEvent::Loaded { page, .. } = next(&controller) else {
         panic!("expected tail")
     };
-    let display::Message::User(text) = &page.messages.last().unwrap().message else {
+    let display::Message::User {
+        content: text,
+        placement: display::UserPlacement::Prompt,
+    } = &page.messages.last().unwrap().message
+    else {
         panic!("expected a prompt");
     };
     assert_eq!(text.load().unwrap(), "prompt-59");

@@ -30,7 +30,7 @@ pub struct SteeringInbox {
 #[derive(Default)]
 struct State {
     closed: bool,
-    pending: PendingMessages,
+    pending: PendingMessages<Arc<str>>,
 }
 
 impl SteeringInbox {
@@ -46,14 +46,35 @@ impl SteeringInbox {
     pub fn submit(&self, text: String) -> Result<PendingMessageId, ChatError> {
         let mut state = self.state.lock().unwrap();
         ensure!(!state.closed, SteeringClosedSnafu);
-        state.pending.push(text)
+        state.pending.push(text.into())
+    }
+    /// A shallow FIFO snapshot for presentation, not a delivery receipt.
+    pub fn pending(&self) -> Vec<(PendingMessageId, Arc<str>)> {
+        self.state
+            .lock()
+            .unwrap()
+            .pending
+            .0
+            .iter()
+            .cloned()
+            .collect()
     }
     /// Withdrawal and claiming a batch linearize under the same lock.
     pub fn withdraw(&self, id: PendingMessageId) -> Option<String> {
-        self.state.lock().unwrap().pending.withdraw(id)
+        self.state
+            .lock()
+            .unwrap()
+            .pending
+            .withdraw(id)
+            .map(|s| s.to_string())
     }
     pub fn withdraw_last(&self) -> Option<String> {
-        self.state.lock().unwrap().pending.pop_back()
+        self.state
+            .lock()
+            .unwrap()
+            .pending
+            .pop_back()
+            .map(|s| s.to_string())
     }
     pub fn close(&self) {
         self.state.lock().unwrap().closed = true;
@@ -62,12 +83,12 @@ impl SteeringInbox {
     pub fn take_unsent(&self) -> Vec<String> {
         let mut state = self.state.lock().unwrap();
         if state.closed {
-            state.pending.drain().collect()
+            state.pending.drain().map(|s| s.to_string()).collect()
         } else {
             Vec::new()
         }
     }
-    fn take(&self) -> Result<VecDeque<(PendingMessageId, String)>, ChatError> {
+    fn take(&self) -> Result<VecDeque<(PendingMessageId, Arc<str>)>, ChatError> {
         let mut state = self.state.lock().unwrap();
         ensure!(!state.closed, SteeringClosedSnafu);
         Ok(std::mem::take(&mut state.pending.0))
@@ -77,7 +98,7 @@ impl SteeringInbox {
 pub struct DeliveryLog {
     inbox: SteeringInbox,
     in_flight: std::sync::atomic::AtomicBool,
-    messages: Mutex<Vec<String>>,
+    messages: Mutex<Vec<Arc<str>>>,
 }
 
 impl DeliveryLog {
@@ -126,7 +147,7 @@ impl DeliveryLog {
             .iter()
             .map(|(_, text)| {
                 ChatMessage::User {
-                    content: text.clone(),
+                    content: text.to_string(),
                     metadata: None,
                 }
                 .encode()
@@ -168,7 +189,7 @@ impl DeliveryLog {
         }
     }
 
-    fn restore(&self, mut batch: VecDeque<(PendingMessageId, String)>) {
+    fn restore(&self, mut batch: VecDeque<(PendingMessageId, Arc<str>)>) {
         let mut state = self.inbox.state.lock().unwrap();
         state.closed = true;
         batch.append(&mut state.pending.0);
@@ -217,11 +238,11 @@ impl Deliveries {
         let delivered = receipts.as_ref().map(|log| log.messages.lock().unwrap());
         let expected = delivered.as_deref().map_or(&[][..], Vec::as_slice);
         let users = display.iter().filter_map(|message| match message {
-            ChatMessage::User { content, .. } => Some(content),
+            ChatMessage::User { content, .. } => Some(content.as_str()),
             _ => None,
         });
         ensure!(
-            users.eq(expected.iter()),
+            users.eq(expected.iter().map(AsRef::as_ref)),
             InvalidSnafu {
                 field: "display steering",
                 reason: "must exactly match host-delivered user input in order"
